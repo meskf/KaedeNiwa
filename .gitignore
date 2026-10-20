@@ -1,0 +1,62 @@
+﻿/target/
+**/target/
+/dist/
+**/dist/
+_*.log
+_*.txt
+*.bak_*
+*.bak
+*.db
+*.db-shm
+*.db-wal
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+# ---- KaedeNiwa cleanup (2026-10-14) ----
+_trash/
+*.log
+*.bak_*
+*.bak
+test_audio.wav
+test_screen.mp4
+kaede.db
+kaede_ui.db
+kaede_ui.db-*
+kaede.db-*
+
+# ---- WebRTC prebuilt (headers + webrtc.lib, ~430 MB) ----
+_webrtc/
+
+# ---- review bundles ----
+review_bundle_*/
+review_bundle_*.zip
+
+# ---- 本地备份/归档 (2026-10-18) ----
+_bak_*/
+src_legacy/
+_archive/
+check.log
+
+# ---- phase 修复备份（脚本生成）----
+_backup_*/
+_backup_phase*/
+
+# ---- 临时 Node 调试脚本 ----
+test-*.mjs
+
+
+# ---- 临时修复脚本 ----
+fix_*.cjs
+
+
+# ---- 临时 Node 脚本（fix_*.cjs / scan_*.cjs 等）----
+*.cjs
+
+# ---- LiveKit 二进制（55MB，用 scripts/download-livekit.ps1 下载）----
+tools/livekit/*.exe
+# ---- 内部审计记录（不公开）----
+.audit/
+# ---- 备份文件 ----
+*.bak2
+*.bak2b

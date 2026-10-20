@@ -1,0 +1,1491 @@
+﻿# KaedeNiwa v2 完整技术文档
+
+ 版本：v2.1
+ 日期：2026-10-16
+ 状态：核心工程完成，媒体全链路打通，UI 待重做
+ 仓库：`Ddev2kaedeniwa`
+
+本文档整合 `docs` 下的所有分散文档，作为单一入口。
+
+---
+
+## 目录
+
+1. [项目概述](#1-项目概述)
+2. [快速开始](#2-快速开始)
+3. [架构](#3-架构)
+4. [密钥体系](#4-密钥体系)
+5. [协议](#5-协议)
+6. [存储](#6-存储)
+7. [媒体层](#7-媒体层)
+8. [LiveKit 传输层](#8-livekit-传输层)
+9. [状态管理](#9-状态管理)
+10. [构建与运行](#10-构建与运行)
+11. [测试与验证](#11-测试与验证)
+12. [环境依赖](#12-环境依赖)
+13. [关键决策时间线](#13-关键决策时间线)
+14. [技术债清单](#14-技术债清单)
+15. [路线图](#15-路线图)
+16. [WASM 体积优化](#16-wasm-体积优化)
+17. [附录](#17-附录)
+
+---
+
+## 1. 项目概述
+
+### 1.1 定位
+
+KaedeNiwa v2 是对旧版（C++20 + React 19 + Electron）的完全重写。目标：
+
+- Rust 全栈 workspace（服务器 + 客户端 + UI + 采集）
+- MLS (RFC 9420) 单一化密钥体系，服务器无法解密
+- Dioxus 跨平台 UI（Web WASM  Desktop Wry）
+- 4K608K60 屏幕共享 + 系统音频捕获 + 一起听歌
+- LiveKit SFU 媒体中继 + 内建 E2EE
+
+### 1.2 核心原则
+
+1. 服务器零解密：`kaede-server` 只依赖 `kaede-protocol`，转发的 `Mls` payload 是不透明字节流
+2. 密钥从 MLS 派生：所有对称密钥从 MLS `export_secret` 派生（S1S2 已废弃）
+3. 实时媒体用 LiveKit E2EE（v2.1 起），SFrame 保留给离线落盘场景
+4. 事件驱动：UI 通过 `events()` 订阅，不轮询；`events()` 是 fanout（多订阅者各拿全部）
+
+### 1.3 Crate 分层（12 个）
+
+按变更频率划分。重构时优先动下层，稳定层尽量不动。
+
+ 层  Crate  职责  测试 
+------------
+ 稳定  `kaede-protocol`  线协议类型（CBOR）  13 
+ 稳定  `kaede-crypto`  AEAD  HKDF  X25519  ML-KEM  SFrame 原语  31+1 
+ 演进  `kaede-mls`  openmls 0.9.1 封装 + snapshot cipher  27 
+ 演进  `kaede-storage`  存储 enum（memory  sqlite  IndexedDB）  5 
+ 演进  `kaede-client`  状态机 + HTTP + WS + RoomSession  41+2 
+ 演进  `kaede-media`  媒体会话层（MediaSession  AudioSession  LiveKit）  6 
+ 易变  `kaede-server`  axum HTTP + WebSocket + SQLite  5 e2e 
+ 易变  `kaede-ui`  Dioxus 组件（占位，将重做）  0 
+ 入口  `kaede-wasm`  Web 入口  0 
+ 入口  `kaede-desktop`  Desktop 入口（Wry）  0 
+ 附加  `kaede-capture`  屏幕采集 + NVENC + 音频（GStreamer）  0 
+ 附加  `kaede-livekit-spike`  LiveKit API 验证（实验）  0 
+
+已移除：`kaede-encode`（空壳）、`kaede-stream`（被 `kaede-media` 取代）。
+
+---
+
+## 2. 快速开始
+
+### 2.1 启动 LiveKit server
+
+```powershell
+.toolslivekitlivekit-server.exe --dev
+# - listening on wslocalhost7880
+2.2 服务器
+powershell
+$envLIVEKIT_API_KEY    = devkey
+$envLIVEKIT_API_SECRET = secret
+$envLIVEKIT_WS_URL     = wslocalhost7880
+cargo run -p kaede-server
+# - listening on http0.0.0.08080
+2.3 端到端媒体验证（3 个窗口）
+窗口 B（推流）：
+
+powershell
+$envKAEDE_PUSH_SECS = 40
+.targetreleaseexampleslivekit_push.exe
+窗口 C（订阅 + 显示）：
+
+powershell
+$envKAEDE_LISTEN_SECS = 30
+.targetreleaseexampleslivekit_recv_video.exe
+预期：GStreamer 窗口播放远端屏幕，控制台打印 frame #60 (2560x1440, ...) 递增。
+
+2.4 音频验证
+powershell
+# 推流（麦克风）
+.targetreleaseexampleslivekit_audio_push.exe
+
+# 订阅（播放）
+.targetreleaseexampleslivekit_recv.exe
+3. 架构
+3.1 依赖方向
+text
+kaede-protocol   -  kaede-server
+                 -  kaede-client  -  kaede-ui  -  kaede-wasm
+                                                    -  kaede-desktop
+kaede-crypto     -  kaede-client
+                 -  kaede-capture  -  kaede-media
+kaede-mls        -  kaede-client
+kaede-storage    -  kaede-client
+铁律：kaede-server 只依赖 kaede-protocol，永不依赖解密路径。
+
+3.2 分层视图
+text
+应用入口         kaede-wasm  kaede-desktop
+                     
+UI               kaede-ui（Dioxus，占位将重做）
+                     
+高层客户端       kaede-client（RoomSession）
+                     
+-----------------------------------------------------
+媒体层           kaede-media        kaede-capture
+                 -- MediaSession    （GStreamer 采集 + NVENC）
+                 -- AudioSession
+                 -- LiveKitSession
+                 -- LiveKitAudioSession
+                 -- LiveKitVideoSink
+-----------------------------------------------------
+加密层           kaede-mls（openmls）    kaede-crypto（SFrame）
+存储层           kaede-storage
+-----------------------------------------------------
+协议层           kaede-protocol（CBOR）
+服务器           kaede-server（axum + WS + SQLite）
+3.3 关键架构决策
+决策	结论
+协议编码	CBOR (ciborium)，internally-tagged enum
+密钥体系	MLS 单一化，S1S2 废弃
+服务器持有密钥	零。只转发 MLS payload
+MLS 库	openmls 0.9.1，全平台（native + wasm32）
+屏幕采集	GStreamer d3d11screencapturesrc + nvh264enc
+实时媒体	LiveKit 内建 E2EE（AES-GCM）
+离线媒体	SFrame，key 从 MLS exporter 派生（purpose 分离）
+媒体元数据	MLS App Message side channel（不改 SFrame 帧格式）
+媒体会话	kaede-media（UI 无关，trait 抽象 sourcesink）
+快照存储	AES-256-GCM 加密，key 从设备标识派生（TODO OS keystore）
+UI 框架	Dioxus 0.7（RSX + use_signal  use_store）
+状态机	kaede-client 显式 ClientState enum
+事件语义	events() 是 broadcast（fanout），非 competing
+3.4 Desktop 渲染路径
+默认：Wry WebView（生产路径）
+
+实验：Native（Blitz + Vello + WGPU），native feature flag
+
+kaede-ui 的 RSX 代码只写一份，两个 feature 下都能编译。
+
+4. 密钥体系
+4.1 总体原则
+S1  S2 废弃
+
+服务器不持有 crypto_root_hex
+
+所有密钥从 MLS export_secret 派生
+
+文本走 MLS Application Message
+
+实时媒体走 LiveKit E2EE（AES-GCM）
+
+离线媒体走 SFrame（key 从 MLS exporter 派生）
+
+4.2 SFrame key 派生
+单一 channel 的所有媒体流原本共用同一 SFrame key，导致 AES-GCM nonce 复用。现已两层隔离：
+
+1. Purpose 分离 —— 音频  视频  屏幕  文件各自独立 key
+
+text
+exporter context = channel_id  0x00  purpose
+purpose ∈ {default, text, voice-audio, voice-video,
+           screen-video, screen-audio, file}
+2. Sender 分区 —— 同一 channel 多 sender 共用 key 时，counter 高 32 位是 sender_id，低 32 位是帧序号
+
+text
+sender_id = SHA256(uid)[0..4]        （跨设备一致）
+counter  = (sender_id as u64)  32  seq
+两条修复合起来，保证同一 epoch 内 (key, nonce) 永不复用。
+
+4.3 SFrame 帧格式（与 v1 逐字节对齐）
+text
+[ key_id    4 BE ]
+[ counter   8 BE ]
+[ payload   AES-256-GCM(ct  16-byte tag) ]
+Nonce：[0,0,0,0]  counter(8B BE)
+
+AAD：12 字节帧头（key_id  counter）—— 篡改 key_idcounter 会导致 GCM tag 校验失败
+
+KAT 锚定 v1（kaede-cryptosrcsframe.rsprint_kat）
+
+4.4 E2EE 共享 key（LiveKit，v2.1）
+apilivekite2ee-key 确定性派生：
+
+text
+key = HMAC-SHA256(LIVEKIT_API_SECRET, kaede-e2ee-v1  channel_id)
+同一 channel_id → 同一 key，房间内所有成员一致
+
+不同 channel_id → 不同 key
+
+server 无需存储状态
+
+实现：kaede-serversrclivekit.rsderive_e2ee_key
+
+client API：RoomSessionget_livekit_e2ee_key(channel_id)
+
+历史 bug（2026-10-16 修）：原实现每次调用 randthread_rng().fill_bytes() 生成新 key，房间内成员拿到不同 key，永远解不开。
+
+4.5 MediaMeta 侧信道
+媒体格式元数据（采样率  声道  codec）不走 SFrame 帧头，走 MLS Application Message：
+
+text
+MediaMetaPayload { kind media_meta, channel_id, uid,
+                   purpose, codec, key_id, sender_id,
+                   sample_rate, channels, action }
+接收端从 ClientEventMediaMetaReceived 拿。SFrame 帧格式不变。
+
+4.6 MLS 签名密钥
+不用 openmls_basic_credential（依赖 openmls_traits 0.4，与 openmls 0.9.1 的 0.6 冲突）。
+
+自己在 kaede-mlssrcidentity.rs 实现 40 行的 SignatureKeyPair。
+
+4.7 Snapshot cipher
+KaedeMlsProvider 的 snapshot 用 AES-256-GCM 加密
+
+Key 从设备标识派生（SHA256(kaede-snapshot-v1 + uid +  + server_url)）
+
+TODO：接 OS keystore（DPAPI  Keychain  WebCrypto），见 TD-3
+
+4.8 媒体加密密钥边界
+UI 只调 RoomSessionexport__key(channel)，不直接碰 MLS：
+
+text
+RoomSessionexport_voice_audio_key(ch) - [u8; 32]
+RoomSessionexport_voice_video_key(ch) - [u8; 32]
+RoomSessionexport_screen_video_key(ch) - [u8; 32]
+RoomSessionexport_screen_audio_key(ch) - [u8; 32]
+RoomSessionsender_id() - u32
+然后喂给 MediaSessionstart(source, sink, key, epoch, sender_id)。
+
+5. 协议
+5.1 编码
+CBOR (ciborium)
+
+顶层 enum：ClientMessage  ServerMessage
+
+internally tagged t
+
+大小上限：16 MiB
+
+5.2 版本协商
+ClientHello 携带 protocol_version
+
+服务器检查后回 ServerHello 或 Error { code UnsupportedVersion }
+
+握手后第一条消息必须是 ClientHello
+
+5.3 服务器职责
+HTTP：
+
+账户：register  login  logout（argon2id）
+
+频道 CRUD + 广播（op3+ 才能写）
+
+成员管理 + 权限（op1-op5）
+
+好友：请求  接受  移除
+
+DM：dmminmax，服务器验证成员
+
+消息历史：apimessages + apidm{conv}messages
+
+附件：上传 + 下载（32 MiB 上限，明文）
+
+KeyPackage 目录：批量上传 + 单次消费
+
+LiveKit token（JWT HS256）
+
+LiveKit E2EE key（确定性派生）
+
+WebSocket：
+
+信令转发 + 房间在线状态 + MLS 消息中继
+
+永不解密 MLS payload（Mls 变体的 payload 是不透明字节流）
+
+sender 字段由 auth uid 覆盖，客户端不能伪造
+
+5.4 踢人流程
+服务器发 Error { Kicked } 通知 + 主动断开 WS
+
+房主客户端推进 MLS epoch（Remove proposal）
+
+其它成员 epoch 前进
+
+6. 存储
+6.1 平台存储
+平台	MLS 存储	消息存储
+Web WASM	KaedeMlsProvider snapshot via rexie	IndexedDB
+Desktop	KaedeMlsProvider snapshot via sqlx	SQLite
+服务器	无（不解密）	SQLite (sqlx)
+MLS 存储用 KaedeMlsProvider 的 snapshot 机制（自建，不用 openmls_sqlx_storage）
+
+Snapshot 用 AES-256-GCM 加密，key 从设备标识派生（TODO OS keystore）
+
+6.2 Server DB
+SQLite，schema 内联在 db.rsmigrate()
+
+技术债：无 migrations（见 TD-2）
+
+7. 媒体层
+7.1 设计原则
+UI 不感知平台差异：只看到 MediaSession  AudioSession  LiveKit，不关心 Web  Native
+
+UI 不感知加密：加密在 session 内部，UI 只把 key 喂进去
+
+UI 不感知线程：EncodedSource 同步，session 内部用专用 OS 线程驱动
+
+事件驱动：events() fanout，多订阅者各拿全部事件
+
+7.2 核心类型
+MediaSession  AudioSession（SFrame 路径）
+rust
+impl MediaSession {
+    pub async fn startS, K(
+        source S, sink K,
+        sframe_key SframeKey,
+        key_id u32,        一般 = MLS epoch
+        sender_id u32,     从 RoomSessionsender_id() 拿
+    ) - ResultArcSelf, MediaError
+    where S EncodedSource, K MediaSink;
+
+    pub fn state(&self) - MediaState;
+    pub fn stats(&self) - MediaStats;
+    pub fn events(&self) - broadcastReceiverMediaEvent;
+    pub async fn stop(&self);
+}
+AudioSessionstart 签名一致，source 换成 AudioSource。
+
+LiveKitSession  LiveKitAudioSession（v2.1，实时路径）
+rust
+impl LiveKitSession {
+    pub async fn startS(source S, config LiveKitConfig) - ResultArcSelf, MediaError
+    where S EncodedSource;
+}
+
+impl LiveKitAudioSession {
+    pub async fn startS(
+        source S, config LiveKitConfig,
+        sample_rate u32, channels u32,
+    ) - ResultArcSelf, MediaError
+    where S AudioSource;
+}
+MediaEvent  MediaState  MediaStats
+rust
+pub enum MediaEvent {
+    Started,
+    FrameEncrypted { pts_ms i64, bytes usize, is_keyframe bool },
+    FrameDropped { pts_ms i64 },
+    Stopped { reason StopReason },
+    Error { message String },
+}
+
+pub enum StopReason { UserRequest, SourceEnded, SinkFailed(String), SessionDropped }
+pub enum MediaState { Idle, Starting, Active, Stopping, Stopped, Failed }
+
+pub struct MediaStats {
+    pub state MediaState,
+    pub frames_encrypted u64,
+    pub frames_sent u64,
+    pub frames_dropped u64,
+    pub bytes_encrypted u64,
+    pub bytes_sent u64,
+    pub last_keyframe_pts_ms Optioni64,
+}
+7.3 线程模型
+text
+stdthread（采集 + 加密编码）
+    → async_channel(8)  try_send 满则丢帧（实时优先）
+    → tokio task（sink.send  push_encoded  push_pcm）
+
+events：broadcast(64)，多订阅者 fanout，慢订阅者看 Lagged(n) 继续
+stop()：200ms 超时检查 + 2s 硬上限，防 pipeline 崩溃时 UI 卡死
+7.4 采集（kaede-capture，Windows）
+屏幕：
+
+text
+d3d11screencapturesrc ! d3d11download ! videoconvert !
+videox-raw,format=NV12 ! nvh264enc ! h264parse !
+videox-h264,stream-format=byte-stream,alignment=au ! appsink
+NVENC 硬件编码（实测 2K60 稳定，理论 8K60）
+
+关键帧检测（GstBufferFlagsDELTA_UNIT）
+
+帧率可控（默认 60fps）
+
+背压：appsink max-buffers=4 drop=true
+
+音频（系统 loopback）：
+
+text
+wasapi2src loopback=true low-latency=true !
+audioconvert ! audioresample ! wavenc ! filesink
+音频（麦克风）：
+
+text
+wasapi2src low-latency=true !
+audioconvert ! audioresample !
+audiox-raw,format=S16LE,channels=N,rate=R !
+audiobuffersplit output-buffer-duration=201000 ! appsink
+限制：wasapi2src 不支持 PID 过滤（TD-9）。
+
+7.5 已知限制
+限制	说明
+wasapi2src 不支持 PID 过滤	系统音频只能采全系统
+Linux 屏幕采集未实现	计划 pipewiresrc + VAAPI
+macOS 屏幕采集未实现	计划 avfvideosrc + VideoToolbox
+stop() 长尾	主循环 200ms 检查一次；正常 300ms，最坏 2s 上限
+7.6 完整示例
+examplesencrypt_to_file.rs —— 屏幕 → NVENC → SFrame → 落盘
+
+examplesaudio_share.rs —— 系统 loopback → SFrame → 落盘
+
+examplesmic_record.rs —— 麦克风 → SFrame → 落盘
+
+examplesmp4_record.rs —— 屏幕 → MP4（无加密）
+
+examplesaudio_record.rs —— 系统音频 → WAV（无加密）
+
+8. LiveKit 传输层
+8.1 架构（v2.1 起）
+媒体流最终形态：LiveKit 内建 E2EE 单一加密，不叠加 SFrame。
+
+text
+EncodedSource ─┐
+               ├── LiveKitSession  LiveKitAudioSession ── LiveKit RTP
+AudioSource ───┘        （明文帧，E2EE 在 RTP 层）
+
+MediaSession  AudioSession（SFrame 路径）继续存在，
+用于：文件落盘、离线导出、未来自建 SFU（str0m）。
+8.2 两个并行链路
+用途	入口	加密
+实时（LiveKit）	LiveKitSession  LiveKitAudioSession	LiveKit E2EE（AES-GCM）
+本地SFrame	MediaSession  AudioSession	SFrame（MLS exporter 派生 key）
+LiveKitSession 内部不持有 SFrame key，LiveKitPusherpush_encoded 直接吃明文 H.264 Annex B。
+
+视频：NativeVideoSourcenew_encoded + VideoEncoderBackendPreEncoded
+
+音频：NativeAudioSource
+
+8.3 视频推流
+rust
+use kaede_media{LiveKitConfig, LiveKitSession};
+
+let config = LiveKitConfignew(wslocalhost7880, token)
+    .with_resolution(1920, 1080)
+    .with_e2ee(passphrase);           或 .with_e2ee_key(vec![..32 bytes..])
+
+let session = LiveKitSessionstart(video_source, config).await;
+
+session.stats();         frames_encrypted = 采集帧数，bytes_encrypted = 0（不适用）
+session.pusher();        底层 LiveKitPusher，可查 injected  dropped  bytes_injected
+session.events();
+session.stop().await;
+8.4 音频推流
+rust
+use kaede_media{LiveKitAudioSession, LiveKitConfig};
+
+let config = LiveKitConfignew(wslocalhost7880, token).with_e2ee(passphrase);
+
+let session = LiveKitAudioSessionstart(
+    audio_source,        impl AudioSource
+    config,
+    48000,               sample_rate
+    2,                   channels
+).await;
+8.5 视频显示（I420）
+rust
+use livekitprelude;
+use livekitwebrtcvideo_streamnativeNativeVideoStream;
+use kaede_mediaLiveKitVideoSink;
+
+let sink = LiveKitVideoSinknew();
+let mut stream = NativeVideoStreamnew(video.rtc_track());
+
+while let Some(frame) = stream.next().await {
+    let buf = frame.buffer.as_ref();
+    let (w, h) = (buf.width(), buf.height());
+    let i420 = buf.to_i420();
+    let (y, u, v) = i420.data();
+    let mut packed = Vecwith_capacity(y.len() + u.len() + v.len());
+    packed.extend_from_slice(y);
+    packed.extend_from_slice(u);
+    packed.extend_from_slice(v);
+    sink.push_i420(&packed, w, h, frame.timestamp_us  1000);
+}
+I420 而非 RGB：libwebrtc 的 VideoFormatType 命名与 GStreamer caps 字节序约定不一致，实测 BGRARGBA 均偏色（紫红）。I420 无字节序歧义，且带宽更小（12 vs 32 bitpixel）。
+
+8.6 反压策略（LiveKitVideoSink）
+appsrc max-bytes=64MB + leaky-type=downstream + block=false
+
+下游消费不过来时丢新帧，不排队
+
+push_i420 返回 Ok(false) 表示反压丢弃
+
+管线做 1280x720 缩放，避免 2560x1440 BGRA 撑爆 PCIe 带宽
+
+8.7 E2EE key 从 server 拿
+rust
+ 从 kaede-server 拿（确定性派生，同 channel 成员一致）
+let key [u8; 32] = room.get_livekit_e2ee_key(voice).await;
+
+let config = LiveKitConfignew(ws_url, token)
+    .with_e2ee_key(key.to_vec());
+8.8 完整示例
+exampleslivekit_push.rs —— 屏幕 → LiveKit E2EE
+
+exampleslivekit_audio_push.rs —— 麦克风 → LiveKit E2EE
+
+exampleslivekit_recv.rs —— 音频订阅 + 播放
+
+exampleslivekit_recv_video.rs —— 视频订阅 + I420 显示
+
+8.9 与 MediaSession 的关系
+场景	用哪个
+实时视频会议  屏幕共享	LiveKitSession
+实时语音	LiveKitAudioSession
+本地录制（加密落盘）	MediaSession（SFrame）
+离线导出  自建 SFU	MediaSession  AudioSession
+8.10 Web 分支
+浏览器沙箱无解，屏幕共享走 LiveKit JS SDK：
+
+getDisplayMedia() 拿 MediaStream
+
+room.localParticipant.publishTrack(track, { source 'screen_share' })
+
+走 LiveKit 内建加密（不走 SFrame）
+
+这部分在 kaede-uisrcvoice.rs 的 #[cfg(target_arch = wasm32)] 分支。
+
+9. 状态管理
+注：kaede-ui 是占位实现，将完全重做。本文档描述的原则（use_signal vs use_store）在新 UI 中仍然有效，但具体组件结构会变。
+
+9.1 Dioxus 0.7 的两种原语
+use_signal —— 原子值
+rust
+let mut count = use_signal( 0);
+let value = count.read();
+count.set(value + 1);
+用于：backend_status  signaling_state  profile（单对象） 当前选中频道 ID  UI 开关  临时表单状态。
+
+use_store —— 嵌套集合，路径级响应式
+rust
+#[derive(Store, Default)]
+struct AccountsState {
+    accounts HashMapServerId, ServerAccount,
+    current OptionServerId,
+}
+用于：accounts（多服务器） peer_pubkeys  messages_by_channel  频道树  成员列表。
+
+不使用 use_state
+Dioxus 0.7 明确 use_state 已被 use_signal 取代。
+
+9.2 路径级响应式示例
+rust
+#[derive(Store, Default)]
+struct AppState {
+    crypto CryptoState,
+    messages MessageState,
+    ui UiState,
+}
+
+#[derive(Store, Default)]
+struct CryptoState { epoch u64, peer_keys HashMapUserId, PeerKey }
+
+#[derive(Store, Default)]
+struct MessageState { by_channel HashMapChannelId, VecMessage }
+当 crypto.epoch 变化时：
+
+订阅 crypto.epoch 的组件重渲染
+
+订阅 messages.by_channel 的组件不重渲染
+
+这是旧项目 appStore 36 KB 单文件想要但没做到的事。
+
+9.3 Zustand → Dioxus 映射
+text
+appStore
+  backend_status        - use_signal
+  signaling_state       - use_signal
+  settingsOpen 等 UI    - use_signal
+  dmConversations       - use_store
+  echoReceived          - use_signal（环形缓冲）
+
+accountStore
+  accounts              - use_store
+  currentServerId       - use_signal
+  currentChannelId      - use_signal
+
+cryptoStore
+  identity              - use_signal（单对象，创建后不变）
+  peerPubkeys           - use_store
+  peerPqPubkeys         - use_store
+  ready  busy          - use_signal
+
+channelKeyStore        （IndexedDB，不进 Store）
+  - use_store 缓存活跃 channel 的 key
+
+messageStore
+  messagesByChannel     - use_store
+  hasMoreBefore         - use_store
+  loadingBefore         - use_store
+
+profileStore
+  profile               - use_signal
+
+voiceStore
+  channelMembers        - use_store
+
+dialogStore  lightboxStore  searchStore
+  - use_signal
+9.4 ClientState 状态机
+text
+Idle - Connecting - Authenticated - MlsJoining - MlsReady
+                                                        
+          v                v                 v             v
+      Disconnected     Disconnected      Authenticated  MlsJoining
+      （重连）         （重连）           （回退）       （成员变更）
+规则见 kaede-clientsrclib.rs 的 can_transition_to。
+
+UI 层订阅 ClientState 变化：
+
+Idle  Disconnected → 登录页
+
+Connecting → Loading
+
+Authenticated → 服务器列表  房间选择
+
+MlsJoining → Loading
+
+MlsReady → 主聊天界面
+
+10. 构建与运行
+10.1 服务器
+powershell
+cd Ddev2kaedeniwa
+
+$envLIVEKIT_API_KEY    = devkey
+$envLIVEKIT_API_SECRET = secret
+$envLIVEKIT_WS_URL     = wslocalhost7880
+
+cargo run -p kaede-server
+# - listening on http0.0.0.08080
+10.2 Web UI
+powershell
+cd crateskaede-wasm
+dx serve --platform web
+# - http127.0.0.164071
+10.3 Desktop UI
+powershell
+cargo run -p kaede-desktop
+10.4 媒体验证
+powershell
+# LiveKit 视频推流
+.targetreleaseexampleslivekit_push.exe
+
+# LiveKit 音频推流
+.targetreleaseexampleslivekit_audio_push.exe
+
+# LiveKit 音频订阅
+.targetreleaseexampleslivekit_recv.exe
+
+# LiveKit 视频订阅 + 显示
+.targetreleaseexampleslivekit_recv_video.exe
+
+# SFrame 加密落盘
+cargo run --release -p kaede-media --example encrypt_to_file
+cargo run --release -p kaede-media --example mp4_record
+cargo run --release -p kaede-media --example audio_record
+cargo run --release -p kaede-media --example audio_share
+cargo run --release -p kaede-media --example mic_record
+10.5 编译内存提示
+WebRTC C++ 编译吃内存，必要时：
+
+powershell
+Remove-Item EnvCL -ErrorAction SilentlyContinue  # 不要设 Zm4000（会报错）
+cargo build --release -j 1 -p kaede-media --example livekit_push
+-j 1 单线程编译，避免 OOM。
+
+11. 测试与验证
+11.1 单元 & 集成测试
+powershell
+cargo test --workspace --lib -- --test-threads=1
+统计：123 passed  0 failed  1 ignored（KAT）
+
+Crate	单元	集成
+protocol	13	—
+crypto	31 + 1 ignored	—
+mls	27	—
+storage	5	—
+client	41	2 e2e
+media	6	—
+server	0	5 e2e
+11.2 已验证的端到端场景
+两个真客户端通过真 WebSocket 互换 MLS 加密消息 ✅
+
+MLS 快照恢复（AES-GCM 加密，重启不掉群组） ✅
+
+屏幕采集 + NVENC + MP4（画质无损） ✅
+
+系统音频 loopback + WAV（音质无损） ✅
+
+麦克风输入 + SFrame 加密（249 帧 0 丢） ✅
+
+采集 → SFrame 加密 → 落盘（297 帧 0 丢） ✅
+
+踢人：被踢者收到 Kicked 错误立即断开，其它成员 epoch 前进 ✅
+
+SFrame key purpose 分离（音频视频屏幕文件各不同） ✅
+
+SFrame sender 分区（同一 channel 多 sender 不撞 nonce） ✅
+
+LiveKit 视频推流（905 帧 0 丢  packet_trailer enabled） ✅ v2.1
+
+LiveKit 音频推流（1000 块 0 丢  encryption GCM） ✅ v2.1
+
+LiveKit 视频订阅 + I420 显示 ✅ v2.1
+
+12. 环境依赖
+12.1 开发环境
+组件	版本	说明
+rustc	1.91+	workspace rust-version
+cargo	1.91+	workspace 管理
+GStreamer	1.28.7（MSVC x86_64）	必需，Program Files
+GStreamer 插件	nvcodec  wasapi  d3d11	NVENC + 音频 loopback
+wasm32-unknown-unknown	—	Web 目标
+Visual Studio Build Tools	20192022	MSVC 编译
+12.2 环境变量（必需）
+text
+GSTREAMER_1_0_ROOT_MSVC_X86_64 = CProgram Filesgstreamer1.0msvc_x86_64
+PKG_CONFIG_PATH                = CProgram Filesgstreamer1.0msvc_x86_64libpkgconfig
+PATH                          += CProgram Filesgstreamer1.0msvc_x86_64bin
+12.3 服务器附加（可选）
+text
+LIVEKIT_API_KEY    = devkey
+LIVEKIT_API_SECRET = secret
+LIVEKIT_WS_URL     = wslocalhost7880
+KAEDE_BIND         = 0.0.0.08080
+KAEDE_DB           = sqlitekaede.dbmode=rwc
+不设置也能跑（用默认值）。
+
+13. 关键决策时间线
+2026-10-12 全平台 MLS 可编译
+问题：openmls 0.9.1 在 wasm32-unknown-unknown 下的编译
+
+真实根因：getrandom 0.2 需要显式 features = [js]
+
+修复：
+
+kaede-mlsCargo.toml 的 wasm feature 加 openmlsjs
+[target.'cfg(target_arch = wasm32)'.dependencies] 下加 getrandom 0.2 + js feature
+.cargoconfig.toml 里 getrandom_backend=wasm_js 覆盖 0.3+
+结论：全平台 MLS 无障碍
+
+2026-10-13 端到端集成测试通过
+起真 server（kaede-serverspawn_test_server）
+
+两个 RoomSession 通过真 WebSocket 连接
+
+Alice 建组 → Bob 上传 KP → Alice Add Bob → Bob 通过 Welcome 加入
+
+双方 epoch 一致，SFrame key 一致
+
+Alice → Bob 加密消息：✅
+
+Bob → Alice 加密消息：✅
+
+2026-10-15 SFrame nonce 复用修复
+问题：
+
+同一 channel 的音频视频屏幕共享共用同一 SFrame key
+同一 channel 的多个 sender 各自从 counter=0 开始加密
+两处叠加 → AES-GCM nonce 复用
+修复：
+
+exporter context 加 purpose → 音频视频屏幕文件独立 key
+counter 高 32 位 = sender_id（SHA256(uid)[0..4]）→ 多 sender 空间不重叠
+顺带把 sframe.rs 里半成品设计落地（原注释说高 32 位是发送者分区，代码没实现）
+测试：kaede-mls +5，kaede-crypto +3，kaede-client +2
+
+验证：全 workspace 123 tests passed
+
+2026-10-15 媒体层 stop() hang 修复
+问题：MediaSession  AudioSessionstop() 设 flag 后 join 采集线程，但采集线程卡在 rx.recv()，flag 永远读不到 → UI 卡死。
+
+修复：
+
+主循环改用带 200ms 超时的 next_frame_timeout  next_audio_timeout
+超时后 continue，回循环头检查 stop_flag
+stop() 加 2s 上限（防 pipeline 崩溃）
+测试：2 个卡死源回归测试
+
+2026-10-15 删除 kaede-stream
+问题：kaede-stream 是 kaede-media 的历史前身，只有 143 行、无单元测试、无其它 crate 依赖。
+
+结论：删除。功能被 kaede-media 的超集覆盖。
+
+2026-10-16 LiveKit E2EE 单一化，去 SFrame 双层冗余
+背景：v2.0 媒体路径 = SFrame 加密 → LiveKitSink 解密 → LiveKit E2EE 再加密。两层加密冗余，且 LiveKit 预编码路径无法直接吃 SFrame 密文。
+
+决策：
+
+实时媒体走 LiveKit 内建 E2EE（AES-GCM），不叠加 SFrame
+LiveKitSink 重写为 LiveKitPusher + LiveKitSession（视频） LiveKitAudioPusher + LiveKitAudioSession（音频）
+MediaSession  AudioSession（SFrame 路径）保留给文件落盘、离线、自建 SFU
+顺带修的：
+
+P2：close() 空操作 → 新 LiveKitPusherclose() 有明确语义
+
+P3：unbounded mpsc → async_channel(8) + try_send 满则丢帧
+
+P6：LiveKitConfigwith_e2ee(&str) 保留；新增 with_e2ee_key(Vecu8) 吃 raw bytes
+
+2026-10-16 apilivekite2ee-key 确定性派生
+问题：原实现每次调用 randthread_rng().fill_bytes() 生成新 key。房间内 alice  bob 各调一次拿到不同 key，互相解不开。
+
+修复：HMAC-SHA256(LIVEKIT_API_SECRET, kaede-e2ee-v1  channel_id)
+
+server 无需存储状态
+
+请求体加 channel_id
+
+client API 改为 get_e2ee_key(channel_id)
+
+替代方案（未采纳）：
+
+HashMapchannel_id, key 缓存：需 AppState 增加可变状态
+
+从 MLS exporter 派生：不可行，server 不解密 MLS
+
+2026-10-16 LiveKit 媒体验证结果
+视频（livekit_push）：905 帧  0 丢  server 端 packet_trailer enabled
+
+音频（livekit_audio_push）：1000 块  0 丢  server 端 encryption GCM + source MICROPHONE
+
+订阅（livekit_recv）：收到远端 mic track from=alice-audio 并播放
+
+视频显示（livekit_recv_video）：2560x1440 远端屏幕，I420 显示正常
+
+关键 API 决策
+MLS 签名密钥
+不用 openmls_basic_credential —— 它依赖 openmls_traits 0.4，与 openmls 0.9.1 的 0.6 冲突。自己在 kaede-mlssrcidentity.rs 实现 40 行的 SignatureKeyPair。
+
+WASM WebSocket
+不用 futures_utilfutureselect 等 open —— 太脆弱
+
+方案：connect 立即返回，onerror  onclose 直接 in_tx.close()，让 recv 返回 Closed
+
+首次 send 时浏览器会内部排队
+
+平台无关 spawn
+native：tokiospawn
+
+wasm：wasm_bindgen_futuresspawn_local
+
+统一在 kaede-clientroomspawn_detached 里
+
+14. 技术债清单
+按严重性排序。修复时优先动上面。
+
+高
+TD-1 AppStatebroadcast_ 锁内 send
+位置：crateskaede-serversrcstate.rs
+
+问题：broadcast_all  broadcast_except 在 MutexRoom 锁内调 mpscUnboundedSendersend
+
+现状：unbounded sender 的 send 非阻塞，所以现在不会死锁
+
+风险：若将来换成有 backpressure 的 tokiosyncmpscSender，锁内 await 会死锁
+
+修法：收集 tx 快照，释放锁后再 send
+
+TD-2 kaede-serverdb.rs 无 migrations
+位置：crateskaede-serversrcdb.rs
+
+问题：schema 内联在 migrate() 里，加字段要手写 ALTER TABLE
+
+风险：生产环境迁移会踩坑（无法回滚、无法自动化）
+
+修法：迁移到 sqlxmigrate! + migrations 目录
+
+代码里已标： TODO(migrations, priority=low)
+
+TD-3 Snapshot cipher key 非 OS keystore
+位置：crateskaede-clientsrcroom.rsderive_device_key
+
+问题：AES key 从 SHA256(kaede-snapshot-v1 + uid +  + server_url) 派生——salt 和 KDF 公开，攻击者读源码即可
+
+现状：防御sqlite3  IndexedDB 随手打开的偶然窥探
+
+风险：不防御有源码访问权限的攻击者
+
+修法：
+
+Windows：DPAPI (CryptProtectData)
+
+macOS：Keychain
+
+Web：WebCrypto generateKey(non-extractable) + 存 IndexedDB
+
+代码里已标： TODO(keystore, priority=medium)
+
+中
+TD-4 MediaSession  AudioSession 90% 重复
+位置：crateskaede-mediasrcsession.rs（558 行）
+
+问题：两份 struct + start + stop + Drop，约 400 行重复
+
+修法：抽 SessionS FrameSource，或者 macro
+
+风险：低（不影响功能），但每次改动要同步两处
+
+TD-5 kaede-ui 25 个 warning
+位置：crateskaede-uisrc
+
+问题：主要是 let mut x = use_signal(...) 里 mut 多余（Dioxus Signal 是 Copy，不需要 mut）
+
+现状：UI 将重做，不必逐个修
+
+修法：重做时一次性写对
+
+TD-7 kaede-server PostMessageReq.sender 死字段
+位置：crateskaede-serversrchttp.rs337  dm.rs154
+
+问题：字段存在但故意不读（服务器用 auth uid 覆盖）
+
+目的：让 CBORJSON 反序列化不失败（兼容客户端旧版本）
+
+修法：加 #[allow(dead_code)] 或注释说明
+
+风险：低
+
+低
+TD-8 Linux  macOS 采集未实现
+位置：crateskaede-capturesrcencoded.rs
+
+问题：只有 Windows pipeline
+
+计划：
+
+Linux：pipewiresrc + vaapih264enc
+
+macOS：avfvideosrc + vtenc_h264
+
+依赖：平台部署需求驱动
+
+TD-9 wasapi2src 不支持 PID 过滤
+位置：crateskaede-mediasrcaudio_gst.rs
+
+问题：系统音频只能采全系统，不能按进程采（一起听歌局限）
+
+替代：Windows AudioSession API（需另写 GStreamer 元素或自己封装）
+
+现状：传 pid Some(_) 会返回 MediaErrorCapture
+
+TD-10 WASM 优化未接 CI
+位置：docsWASM_OPTIMIZATION.md
+
+未做：
+
+wasm-opt -Oz CI 接入
+
+WASM-Split（阶段 2 引）
+
+首屏体积 CI 阈值检查
+
+依赖：CICD 建立（阶段 4 中期）
+
+TD-11 kaede-server WS 未接 RateLimit
+位置：crateskaede-serversrcws.rs
+
+问题：ErrorCodeRateLimited 定义了但未使用
+
+风险：恶意客户端可刷消息  KP 目录
+
+修法：per-uid 令牌桶 + 定期清理
+
+v2.1 新增
+TD-12 LiveKit 媒体未接 UI（✅ 已解决 2026-10-21）
+位置：kaede-ui（占位）
+
+现状：LiveKitSession  LiveKitAudioSession  LiveKitVideoSink 可用，但 UI 未接
+
+计划：UI 重做时对接
+
+TD-13 example 里 E2EE passphrase 未从 server 拿
+位置：crateskaede-mediaexampleslivekit_.rs
+
+现状：passphrase 由本地 HMAC-SHA256 派生（与 server 同算法），但未走 HTTP RoomSessionget_livekit_e2ee_key(channel_id)
+
+修法：UI 集成时一并做
+
+TD-14 Web 端 LiveKit E2EE 与 Rust 端 PBKDF2 一致性未验证
+位置：kaede-uisrcvoice.rs（wasm 分支）
+
+风险：JS SDK setKey(string) 走 PBKDF2，Rust 端 with_shared_key(bytes) 也走 PBKDF2 + ratchet_salt。若 raw bytes 语义不同，两端解不开
+
+验证：浏览器订阅 + Rust 推流实测
+
+TD-15 AudioPlayerpush 的 pts 恒为 0（接收端）
+位置：exampleslivekit_recv.rs
+
+现状：NativeAudioStream 给的 AudioFrame 没直接暴露 pts，接收端播放时 pts 传 0
+
+影响：播放器只能靠 arrive-time 排程，长时间播放可能漂移
+
+修法：从 frame 里算或让 LiveKit stream 暴露时间戳
+
+TD-6（部分解决）
+音频接收已通过 livekit_recv 打通（订阅 + 播放）
+
+视频接收 + 显示已通过 livekit_recv_video 打通（I420）
+
+修复顺序建议
+TD-1（deadlock 隐患）—— 服务器稳定后必做
+
+TD-3（keystore）—— 打包发布前必做
+
+TD-2（migrations）—— 有真实用户数据后必做
+
+TD-1213（UI 集成）—— UI 重做时一起做
+
+TD-4（session 重复）—— 下次加音频功能时顺便做
+
+其余按需
+
+15. 路线图
+图例：✅ 已完成 ｜ 🟡 进行中 ｜ ⬜ 未开始
+
+阶段 1：基础（✅ 完成）
+✅ workspace 骨架 + Cargo profile 优化（release-wasm）
+
+✅ kaede-protocol CBOR 类型（含协议版本协商）
+
+✅ kaede-crypto 原语（AEAD  HKDF  SFrame + KAT）
+
+✅ kaede-storage enum + WASM  原生实现（memory  SQLite  IndexedDB）
+
+✅ kaede-server axum + WebSocket + SQLite
+
+✅ kaede-client 状态机 + HTTP + WS + RoomSession
+
+✅ kaede-ui Dioxus 组件（登录 + 主界面，占位）
+
+✅ kaede-wasm Web 入口 + kaede-desktop Desktop 入口（Wry）
+
+阶段 2：加密完整（✅ 完成）
+✅ MLS 群组创建  加入  成员管理（Add  Remove  Update  Commit）
+
+✅ Application Message 加解密
+
+✅ SFrame key 从 MLS exporter 派生
+
+✅ 全平台 MLS 编译（native + wasm32）
+
+✅ 端到端集成测试：2 个真 WS 客户端互换加密消息
+
+✅ 消息持久化（apimessages + apidm{conv}messages）
+
+✅ MLS 存储持久化（KaedeMlsProvider snapshot，AES-GCM 加密）
+
+✅ KeyPackage 生命周期（批量上传  单次消费）
+
+✅ 成员移除（MLS Remove proposal）
+
+✅ 自更新（MLS Update  Commit）
+
+2.1 安全加固（✅ 完成）
+✅ SFrame purpose 分离：音频视频屏幕文件各自独立 key
+
+✅ Sender counter 分区：counter 高 32 位 = sender_id，消除多 sender nonce 复用
+
+✅ 快照加密：MLS snapshot 用 AES-256-GCM（key 派生自设备标识，未来接 OS keystore）
+
+✅ sender 字段防冒充：服务器用 auth uid 覆盖
+
+阶段 3：媒体（🟡 进行中）
+3.1 kaede-media 会话层（✅）
+✅ MediaSession（视频）+ AudioSession（音频）
+
+✅ EncodedSource  AudioSource trait
+
+✅ MediaSink trait + NullSink
+
+✅ 采集线程 + async_channel(8) + try_send 丢帧
+
+✅ stats  events  state 机
+
+✅ events() fanout（broadcast）
+
+✅ stop() 200ms 检查 + 2s 上限
+
+3.2 kaede-capture 采集（✅ Windows）
+✅ d3d11screencapturesrc + nvh264enc（NVENC 硬编）
+
+✅ H.264 Annex B 输出，keyframe 检测
+
+✅ wasapi2src loopback（系统音频）
+
+✅ wasapi2src（麦克风输入）
+
+⬜ Linux（pipewiresrc + VAAPI）
+
+⬜ macOS（avfvideosrc + VideoToolbox）
+
+3.3 集成（✅ 大部分）
+✅ SFrame key 从 MLS 派生（purpose 分离 + sender 分区）
+
+✅ MediaMeta side channel（音频格式  codec 广播）
+
+✅ 实机验证：视频 297 帧 0 丢  音频 250 帧 0 丢  麦克风 249 帧 0 丢
+
+✅ 音频接收 + 播放（LiveKit）
+
+✅ 视频接收 + 显示（LiveKit + I420）
+
+✅ 私密频道级 MLS 隔离（B2 · 2026-10-21）
+   每个私密频道独立 MLS group；服务端 channel_members 准入 + argon2 密码；
+   非成员拿到 ciphertext 也解不开。e2e: channel_b2_e2e 3/3 全绿。
+✅ UI 接线（2026-10-21 完成）
+3.4 LiveKit 推流（✅ 2026-10-16）
+✅ LiveKit Rust SDK 0.9.5 原生接入（NativeVideoSourcenew_encoded + NativeAudioSource）
+
+✅ LiveKit 内建 E2EE（AES-GCM）单一化，去 SFrame 双层冗余
+
+✅ 视频推流（livekit_push）：905 帧  0 丢  packet_trailer enabled
+
+✅ 音频推流（livekit_audio_push）：1000 块  0 丢  server 确认 encryption=GCM
+
+✅ 音频订阅（livekit_recv）：远端 mic track → AudioPlayer 播放
+
+✅ 视频订阅 + 显示（livekit_recv_video）：I420 → GStreamer
+
+✅ apilivekite2ee-key 确定性派生（修随机生成 bug）
+
+⬜ Web 端走 LiveKit JS SDK（骨架有）
+
+⬜ E2EE key 从 server HTTP 拿（example 目前本地同算法派生）
+
+3.5 8K 直播（附加，⬜）
+⬜ 8K60 实机验证（理论支持）
+
+⬜ Dioxus Native (WGPU) 8K 预览
+
+阶段 4：移动端（⬜ 未开始）
+⬜ Dioxus Mobile
+
+⬜ 移动端专用 UI
+
+技术采纳清单
+✅ Dioxus 0.7（Stores + Subsecond + WASM-Split）
+
+✅ openmls 0.9（全平台，含 wasm32）
+
+✅ axum 0.8 + sqlx 0.8
+
+✅ tokio-tungstenite（native WS）
+
+✅ web-sys WebSocket（wasm WS）
+
+✅ GStreamer 0.25（采集 + 编码 + 显示）
+
+✅ LiveKit Rust SDK 0.9.5（v2.1）
+
+⬜ Dioxus Native（等成熟）
+
+⬜ Loro  CRDT（如需要）
+
+下一步计划
+立即（1 周内）
+
+UI 重做启动（Dioxus，不再占位）
+
+example 走 RoomSessionget_livekit_e2ee_key(channel_id) HTTP API
+
+短期（2-4 周）
+
+OS keystore cipher（DPAPI  Keychain  WebCrypto）
+
+SQLite migrations（sqlxmigrate!）
+
+GStreamer DLL 打包（NSIS）
+
+中期
+
+移动端（Dioxus Mobile）
+
+8K60 实机验证
+
+RNNoise 降噪（绑定 C 库）
+
+CICD（GitHub Actions）
+
+长期（可选）
+
+Dioxus Native UI（Blitz + Vello）—— 待生态成熟
+
+PQ MLS ciphersuite（等待 openmls 上游）
+
+自建 SFU（str0m）
+
+16. WASM 体积优化
+16.1 目标
+kaede-wasm 的 release 产物尽量小。
+
+首屏  2 MB（gzip 后  800 KB）
+
+MLS 相关代码懒加载（WASM-Split）
+
+未来移动端 4G 首屏  3s
+
+16.2 Profile
+根 Cargo.toml 有两个 release profile：
+
+toml
+[profile.release]
+opt-level       = 3
+lto             = thin
+codegen-units   = 1
+panic           = abort
+strip           = true
+overflow-checks = false
+
+[profile.release-wasm]
+inherits      = release
+opt-level     = z
+lto           = fat
+codegen-units = 1
+panic         = abort
+strip         = true
+用途：
+
+cargo build --release → 用 release（Server  Desktop）
+
+cargo build --profile release-wasm → 用 release-wasm（Web）
+
+dx build --release → 由 dx 选择
+
+16.3 关键优化项
+优化	影响
+opt-level = z	优先体积，速度略降
+lto = fat	跨 crate 内联，体积下降
+codegen-units = 1	更好的 LTO，编译慢
+panic = abort	去掉 unwinding，约 -30%
+strip = true	去掉符号表
+overflow-checks = false	去掉整数溢出检查
+参考数据：2.80 MB → 1.68 MB（-39.9%）
+
+16.4 wasm-opt
+Dioxus CLI 自动调用 wasm-opt。手工构建时：
+
+powershell
+wasm-opt -Oz ^
+  --enable-bulk-memory ^
+  --enable-nontrapping-float-to-int ^
+  --enable-sign-ext ^
+  input.wasm -o output.wasm
+三项 --enable- 是现代 WASM 特性，缺失会导致 wasm-validator 报错。
+
+16.5 WASM-Split
+Dioxus 0.7 支持代码分割和懒加载：
+
+主 bundle 只包含 UI 骨架和路由
+
+MLS 相关代码放在独立 chunk
+
+用户进入加密房间时按需加载
+
+在 Cargo.toml 的 [package.metadata.dioxus] 下配置（阶段 2 引入）。
+
+16.6 检查清单
+☑ release-wasm profile 定义
+☑ panic = abort
+☑ strip = true
+□ wasm-opt -Oz（CI 接入）
+□ WASM-Split（阶段 2）
+□ 首屏体积测量（CI 加入阈值检查）
+17. 附录
+17.1 目录结构
+text
+Ddev2kaedeniwa
+├── crates
+│   ├── kaede-protocol          线协议（CBOR）
+│   ├── kaede-crypto            AEAD  SFrame  KAT
+│   ├── kaede-mls               openmls 封装 + cipher
+│   ├── kaede-storage           memory  SQLite  IndexedDB
+│   ├── kaede-client            状态机 + transport + HTTP
+│   ├── kaede-server            axum HTTP + WS + SQLite
+│   ├── kaede-ui                Dioxus 组件（占位，将重做）
+│   ├── kaede-wasm              Web 入口
+│   ├── kaede-desktop           Desktop 入口（Wry）
+│   ├── kaede-capture           屏幕采集 + NVENC + 音频
+│   ├── kaede-media             媒体会话层
+│   └── kaede-livekit-spike     LiveKit API 验证（实验）
+├── docs
+│   ├── COMPLETE.md             本文件（整合版）
+│   ├── ARCHITECTURE.md
+│   ├── DECISIONS.md
+│   ├── ROADMAP.md
+│   ├── MEDIA_API.md
+│   ├── STATE_MANAGEMENT.md
+│   ├── TECH_DEBT.md
+│   ├── WASM_OPTIMIZATION.md
+│   └── KaedeNiwa v2 项目现状文档.txt
+├── scripts
+│   └── bundle.ps1
+├── tools
+│   └── livekit
+│       └── livekit-server.exe
+├── _trash                     备份  历史文件
+├── _webrtc                    WebRTC 原生库（实验）
+├── Cargo.toml                 workspace
+├── Cargo.lock
+└── README.md
+17.2 关键 API 速查
+媒体 key 派生（UI 只调这个）
+rust
+use kaede_clientSframePurpose;
+
+let key = room.export_screen_video_key(voice);   [u8; 32]
+let sender_id = room.sender_id();                   u32
+let epoch = room.epoch() as u32;
+MediaSession（SFrame 路径）
+rust
+use kaede_capture{EncodedVideoStream, VideoConfig, EncoderKind};
+use kaede_cryptosframeSframeKey;
+use kaede_media{MediaSession, MediaSink, NullSink};
+
+let source = EncodedVideoStreamstart(VideoConfigdefault());
+let key = SframeKeyfrom_bytes(key_bytes);
+
+ sender_id 从 uid 派生；key_id = MLS epoch
+let session = MediaSessionstart(source, NullSink, key, epoch, sender_id).await;
+
+ 订阅事件（fanout，多订阅者都拿全部事件）
+let mut events = session.events();
+tokiospawn(async move {
+    loop {
+        match events.recv().await {
+            Ok(ev) = println!({}, ev),
+            Err(tokiosyncbroadcasterrorRecvErrorLagged(n)) = {
+                eprintln!(lagged {}, n);
+            }
+            Err(_) = break,
+        }
+    }
+});
+
+ 查统计
+let s = session.stats();
+println!({} 帧加密, {} 帧发送, s.frames_encrypted, s.frames_sent);
+
+ 停止（幂等 + 最多 2s 返回）
+session.stop().await;
+LiveKitSession（实时视频）
+rust
+use kaede_media{LiveKitConfig, LiveKitSession};
+
+let config = LiveKitConfignew(wslocalhost7880, token)
+    .with_resolution(1920, 1080)
+    .with_e2ee_key(key.to_vec());    key [u8; 32]
+
+let session = LiveKitSessionstart(source, config).await;
+ ...
+session.stop().await;
+LiveKitAudioSession（实时音频）
+rust
+use kaede_media{AudioCaptureConfig, AudioSourceKind, GstAudioSource, LiveKitAudioSession};
+
+let source = GstAudioSourcestart(AudioCaptureConfig {
+    sample_rate 48000,
+    channels 2,
+    kind AudioSourceKindMicrophone,    或 SystemLoopback
+    ..Defaultdefault()
+});
+
+let session = LiveKitAudioSessionstart(source, config, 48000, 2).await;
+AudioSession（SFrame 路径）
+rust
+use kaede_media{AudioCaptureConfig, AudioSourceKind, GstAudioSource, AudioSession};
+
+let source = GstAudioSourcestart(AudioCaptureConfig {
+    sample_rate 48000,
+    channels 2,
+    kind AudioSourceKindMicrophone,
+    ..Defaultdefault()
+});
+
+let session = AudioSessionstart(source, NullSink, key, epoch, sender_id).await;
+RoomSession（高层）
+rust
+use kaede_clientRoomSession;
+
+let room = RoomSessionconnect(
+    httplocalhost8080,
+    wslocalhost8080ws,
+    alice, alice1234,
+    None,
+).await;
+
+room.spawn_event_loop();
+room.join_room().await;
+room.become_host().await;
+room.send_text_to(general, Hello).await;
+
+ 广播媒体信令
+room.publish_media_meta(
+    voice,
+    kaede_clientSframePurposeVoiceAudio,
+    pcm-s16le,
+    Some(48000),
+    Some(2),
+).await;
+
+ 踢人（同步 MLS epoch）
+room.remove_member(bob).await;
+
+ SFrame key（喂给 MediaSession）
+let key = room.export_voice_audio_key(voice);
+
+ LiveKit E2EE key（喂给 LiveKitConfig）
+let e2ee_key = room.get_livekit_e2ee_key(voice).await;
+17.3 备份策略
+_trash 目录存放：
+
+会话前的文件备份（如 livekit_sink.rs.before-planA）
+
+历史快照（如 dedup_20261015_020933）
+
+调试输出（livekit_push.log、livekit-stderr.log）
+
+_trash 不进 git（已在 .gitignore）。
+
+17.4 联系与相关文档
+主仓库：Ddev2kaedeniwa
+
+旧项目：DKaedeNiwa（C++20 + React，v2 完全替代）
+
+详细子文档（保留供参考）：
+
+docsARCHITECTURE.md —— 架构 + 依赖方向 + 密钥体系
+
+docsDECISIONS.md —— 关键决策 + 已解决问题
+
+docsROADMAP.md —— 路线图
+
+docsMEDIA_API.md —— 媒体 API 契约
+
+docsSTATE_MANAGEMENT.md —— Dioxus 状态管理
+
+docsTECH_DEBT.md —— 技术债清单
+
+docsWASM_OPTIMIZATION.md —— WASM 体积优化
+
+docsKaedeNiwa v2 项目现状文档.txt —— 快照式现状
+
+17.5 文档维护约定
+本文档（docsCOMPLETE.md）是整合入口，随功能新增同步更新
+
+保留子文档用于专题深入；本文档引用其核心内容
+
+决策时间线（第 13 节）追加式增长，不删历史
+
+版本号跟随 workspace Cargo.toml 的 [workspace.package] version
+
+文档结束
+

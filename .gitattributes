@@ -1,0 +1,15 @@
+# Normalize line endings: LF in repository, platform-native on checkout
+* text=auto eol=lf
+
+# Binary files (no line-ending conversion)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.gif binary
+*.lib binary
+*.exe binary
+*.dll binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary

@@ -1,0 +1,54 @@
+{
+  "app": {
+    "name": "KaedeNiwa"
+  },
+  "nav": {
+    "server": "服务器",
+    "dm": "私信",
+    "friends": "好友",
+    "defaultServer": "服务器"
+  },
+  "channel": {
+    "loadEarlier": "加载更早的消息",
+    "inputPlaceholder": "输入消息…",
+    "send": "发送",
+    "selectChannel": "选择频道",
+    "reply": "回复",
+    "react": "表情",
+    "cancel": "取消",
+    "selected": "已选中 {author}：{text}"
+  },
+  "member": {
+    "online": "在线 — {count}",
+    "offline": "离线 — {count}",
+    "toggle": "显示成员列表"
+  },
+  "voice": {
+    "mic": "麦克风",
+    "speaker": "扬声器",
+    "screen": "屏幕共享",
+    "leave": "断开连接"
+  },
+  "login": {
+    "server": "服务器",
+    "serverHint": "kaede.example.com 或 http://localhost:8080",
+    "serverError": "服务器地址",
+    "username": "用户名",
+    "password": "密码",
+    "submit": "登录",
+    "error": "请输入用户名和密码"
+  },
+  "settings": {
+    "language": "语言",
+    "languageZh": "中文",
+    "languageEn": "English",
+    "close": "关闭",
+    "title": "设置"
+  },
+  "dm": {
+    "placeholder": "私信 — 待实现"
+  },
+  "friends": {
+    "placeholder": "好友 — 待实现"
+  }
+}

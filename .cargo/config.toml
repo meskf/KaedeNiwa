@@ -1,0 +1,40 @@
+# 项目级 cargo 配置。
+# 全局镜像在 ~/.cargo/config.toml。
+
+[alias]
+ck     = "check --workspace --all-targets"
+cb     = "build --workspace"
+cbr    = "build --workspace --profile release-wasm"
+ct     = "test --workspace"
+ct1    = "test --workspace -- --test-threads=1"
+cf     = "fmt --all"
+cc     = "clippy --workspace --all-targets -- -D warnings"
+cwasm  = "check -p kaede-wasm --target wasm32-unknown-unknown"
+cwd    = "check --workspace --target wasm32-unknown-unknown"
+
+# ============================================================
+# Windows target 配置
+# ============================================================
+# LiveKit 的 libwebrtc-sys 使用静态 CRT (/MT)，
+# Rust 默认使用动态 CRT (/MD)，必须统一为静态。
+# 参考: https://github.com/livekit/rust-sdks/issues/364
+[target.'cfg(windows)']
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# ============================================================
+# WASM target 配置
+# ============================================================
+[target.wasm32-unknown-unknown]
+# getrandom 0.3+ 需要 cfg 指定 wasm backend
+# 见 https://docs.rs/getrandom/#webassembly-support
+rustflags = [
+    '--cfg', 'getrandom_backend="wasm_js"',
+]
+
+# ============================================================
+# 开发环境变量
+# ============================================================
+[env]
+# 未来可加：WASM_BINDGEN_DEBUG=1
+
+LK_CUSTOM_WEBRTC = "D:\\dev2\\kaedeniwa\\_webrtc"

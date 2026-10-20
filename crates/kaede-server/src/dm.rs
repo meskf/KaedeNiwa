@@ -1,0 +1,288 @@
+//! DM（1v1 私聊）HTTP API。
+//!
+//! # 数据模型
+//!
+//! DM 会话 id = `dm:<min_uid>:<max_uid>`（uid 字典序，保证唯一）。
+//! 消息存进 `messages` 表，channel_id = 该会话 id。
+//!
+//! # 权限
+//!
+//! 只有会话双方能读/写。
+
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    routing::{get, post},
+};
+use serde::{Deserialize, Serialize};
+
+use crate::error::ApiError;
+use crate::http::authenticate;
+use crate::state::AppState;
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/dm", get(list_conversations))
+        .route("/api/dm/{peer}", post(open_conversation))
+        .route(
+            "/api/dm/{conv_id}/messages",
+            get(get_messages).post(post_message),
+        )
+        .with_state(state)
+}
+
+/// 会话 id 生成。
+pub fn conv_id_for(a: &str, b: &str) -> String {
+    let (x, y) = if a < b { (a, b) } else { (b, a) };
+    format!("dm:{}:{}", x, y)
+}
+
+/// 解析会话 id 里的两个成员。失败返回 None。
+pub fn parse_conv_id(conv_id: &str) -> Option<(&str, &str)> {
+    let rest = conv_id.strip_prefix("dm:")?;
+    let (a, b) = rest.split_once(':')?;
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    Some((a, b))
+}
+
+pub(crate) fn is_member(conv_id: &str, uid: &str) -> bool {
+    match parse_conv_id(conv_id) {
+        Some((a, b)) => a == uid || b == uid,
+        None => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 会话
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct Conversation {
+    conv_id: String,
+    peer_login_id: String,
+    peer_nickname: String,
+}
+
+#[derive(Serialize)]
+struct ConversationsResp {
+    conversations: Vec<Conversation>,
+}
+
+async fn list_conversations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ConversationsResp>, ApiError> {
+    let uid = authenticate(&state, &headers).await?;
+    let me = uid.as_str();
+
+    // 从 messages 表里找所有 dm: 前缀且包含我的 channel_id
+    // 简化做法：查所有包含 `dm:` 的 channel_id（去重），过滤成员
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT DISTINCT channel_id FROM messages WHERE channel_id LIKE 'dm:%'")
+            .fetch_all(&state.pool)
+            .await?;
+
+    let mut conversations = Vec::new();
+    for (cid,) in rows {
+        if !is_member(&cid, me) {
+            continue;
+        }
+        let peer: String = match parse_conv_id(&cid) {
+            Some((a, b)) => (if a == me { b } else { a }).to_string(),
+            None => continue,
+        };
+        let nick = get_nickname(&state, &peer).await;
+        conversations.push(Conversation {
+            conv_id: cid,
+            peer_login_id: peer,
+            peer_nickname: nick,
+        });
+    }
+
+    Ok(Json(ConversationsResp { conversations }))
+}
+
+#[derive(Serialize)]
+struct OpenConversationResp {
+    conv_id: String,
+    peer_login_id: String,
+    peer_nickname: String,
+}
+
+async fn open_conversation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(peer): Path<String>,
+) -> Result<Json<OpenConversationResp>, ApiError> {
+    let uid = authenticate(&state, &headers).await?;
+    let me = uid.as_str();
+
+    if peer == me {
+        return Err(ApiError::BadRequest("cannot dm yourself".into()));
+    }
+
+    // 检查 peer 存在
+    let exists: Option<(String,)> =
+        sqlx::query_as("SELECT login_id FROM accounts WHERE login_id = ?")
+            .bind(&peer)
+            .fetch_optional(&state.pool)
+            .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound("user".into()));
+    }
+
+    let conv_id = conv_id_for(me, &peer);
+    let nick = get_nickname(&state, &peer).await;
+
+    Ok(Json(OpenConversationResp {
+        conv_id,
+        peer_login_id: peer,
+        peer_nickname: nick,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// 消息
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct PostMessageReq {
+    /// S-3: 客户端自报 ts，服务器用 `db::now_ms()` 覆盖；仅为反序列化兼容保留。
+    #[allow(dead_code)]
+    ts: i64,
+    /// 客户端自报的 sender。
+    ///
+    /// **服务器故意不读此字段**——用 auth uid 覆盖，防止 DM 冒充。
+    /// 保留字段是为了兼容客户端旧版本的 CBOR/JSON 反序列化。
+    #[allow(dead_code)]
+    sender: String,
+    ciphertext: String,
+}
+
+#[derive(Serialize)]
+struct MessageRecord {
+    ts: i64,
+    sender: String,
+    ciphertext: String,
+}
+
+#[derive(Serialize)]
+struct MessagesResp {
+    messages: Vec<MessageRecord>,
+}
+
+#[derive(Deserialize)]
+struct GetMessagesQuery {
+    before_ts: Option<i64>,
+    limit: Option<i64>,
+}
+
+async fn post_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conv_id): Path<String>,
+    Json(req): Json<PostMessageReq>,
+) -> Result<StatusCode, ApiError> {
+    // C3：用 auth uid 覆盖客户端自报的 sender，防止 DM 冒充
+    let uid = authenticate(&state, &headers).await?;
+
+    if !is_member(&conv_id, uid.as_str()) {
+        return Err(ApiError::Unauthorized);
+    }
+
+    let ct = base64_decode(&req.ciphertext)?;
+    if ct.len() > 4 * 1024 * 1024 {
+        return Err(ApiError::BadRequest("message too large".into()));
+    }
+
+    // S-3: 忽略客户端 ts，用服务器时间
+    let ts = crate::db::now_ms();
+
+    sqlx::query("INSERT INTO messages (channel_id, ts, sender, ciphertext) VALUES (?, ?, ?, ?)")
+        .bind(&conv_id)
+        .bind(ts)
+        .bind(uid.as_str()) // ← 服务器权威
+        .bind(&ct)
+        .execute(&state.pool)
+        .await?;
+    // B3：WS 推送给对端（sender 靠本地回显，server 不推回 sender）
+    if let Some((a, b)) = parse_conv_id(&conv_id) {
+        let peer = if a == uid.as_str() { b } else { a };
+        let peer_uid = kaede_protocol::UserId::new(peer);
+        let pushed = state.send_to(
+            &peer_uid,
+            kaede_protocol::ServerMessage::DmReceived {
+                conv_id: conv_id.clone(),
+                from: uid.clone(),
+                ts,
+                ciphertext: ct,
+            },
+        );
+        if !pushed {
+            tracing::debug!("dm: peer {} offline, message persisted only", peer);
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conv_id): Path<String>,
+    Query(q): Query<GetMessagesQuery>,
+) -> Result<Json<MessagesResp>, ApiError> {
+    let uid = authenticate(&state, &headers).await?;
+
+    if !is_member(&conv_id, uid.as_str()) {
+        return Err(ApiError::Unauthorized);
+    }
+
+    let before = q.before_ts.unwrap_or(i64::MAX);
+    let limit = q.limit.unwrap_or(200).clamp(1, 500); // C-8: clamp 防 limit=-1 全表扫描
+
+    let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT ts, sender, ciphertext FROM messages \
+         WHERE channel_id = ? AND ts < ? \
+         ORDER BY ts DESC LIMIT ?",
+    )
+    .bind(&conv_id)
+    .bind(before)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut out: Vec<MessageRecord> = rows
+        .into_iter()
+        .map(|(ts, sender, ct)| MessageRecord {
+            ts,
+            sender,
+            ciphertext: crate::db::base64_url(&ct),
+        })
+        .collect();
+    out.reverse();
+
+    Ok(Json(MessagesResp { messages: out }))
+}
+
+// ---------------------------------------------------------------------------
+
+async fn get_nickname(state: &AppState, login_id: &str) -> String {
+    let r: Option<(String,)> = sqlx::query_as("SELECT nickname FROM members WHERE login_id = ?")
+        .bind(login_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten();
+    r.map(|(n,)| n).unwrap_or_else(|| login_id.to_string())
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, ApiError> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    URL_SAFE_NO_PAD
+        .decode(s)
+        .map_err(|e| ApiError::BadRequest(format!("base64: {}", e)))
+}

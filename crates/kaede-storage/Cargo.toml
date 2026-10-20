@@ -1,0 +1,24 @@
+[package]
+license.workspace = true
+name = "kaede-storage"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+wasm    = ["dep:rexie", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys"]
+native  = ["dep:sqlx"]
+
+[dependencies]
+async-trait    = { workspace = true }
+thiserror      = { workspace = true }
+
+rexie                = { version = "0.6", optional = true }
+wasm-bindgen         = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys               = { workspace = true, optional = true }
+
+sqlx = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

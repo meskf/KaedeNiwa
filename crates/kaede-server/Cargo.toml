@@ -1,0 +1,40 @@
+[package]
+license.workspace = true
+name = "kaede-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "kaede-server"
+path = "src/main.rs"
+
+[lib]
+name = "kaede_server"
+path = "src/lib.rs"
+
+[dependencies]
+kaede-protocol = { workspace = true }
+
+anyhow             = { workspace = true }
+axum               = { workspace = true, features = ["ws", "macros"] }
+tokio              = { workspace = true }
+sqlx               = { workspace = true, features = ["migrate"] }
+argon2             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde              = { workspace = true }
+serde_json         = "1"
+ciborium           = { workspace = true }
+thiserror          = { workspace = true }
+base64             = "0.22"
+hmac               = "0.12"
+sha2               = { workspace = true }
+rand               = "0.8"
+futures-util       = "0.3"
+
+[dev-dependencies]
+tokio-tungstenite = { workspace = true }
+tokio             = { workspace = true }
+futures-util      = "0.3"
+reqwest           = { version = "0.12", default-features = false, features = ["json"] }
+serde_json        = "1"

@@ -1,0 +1,28 @@
+[package]
+license.workspace = true
+name = "kaede-wasm"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "kaede-wasm"
+path = "src/main.rs"
+
+[dependencies]
+kaede-client = { workspace = true, features = ["wasm"] }
+kaede-ui     = { workspace = true }
+
+dioxus                   = { workspace = true }
+dioxus-web               = { workspace = true }
+wasm-bindgen             = { workspace = true }
+wasm-bindgen-futures     = { workspace = true }
+console_error_panic_hook = { workspace = true }
+tracing                  = { workspace = true }
+tracing-wasm             = { workspace = true }
+
+# WASM target 专用：getrandom backend 需要显式 feature
+# 见 https://docs.rs/getrandom/#webassembly-support
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }

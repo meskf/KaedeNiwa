@@ -1,0 +1,25 @@
+﻿[package]
+license.workspace = true
+name = "kaede-media-session"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kaede-media   = { path = "../kaede-media", version = "0.0.1" }
+kaede-capture = { path = "../kaede-capture", version = "0.0.1" }
+
+livekit       = "0.9.5"
+tokio         = { workspace = true }
+tracing       = { workspace = true }
+thiserror     = { workspace = true }
+async-channel = "2"
+async-trait = "0.1"
+futures-util  = "0.3"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+hmac               = "0.12"
+sha2               = { workspace = true }
+base64             = "0.22"
+serde_json         = "1"
+futures-util       = "0.3"

@@ -1,0 +1,11 @@
+[application]
+name      = "kaedeniwa"
+out_dir   = "dist"
+asset_dir = "assets"
+
+[web.app]
+title = "KaedeNiwa"
+
+[web.watcher]
+reload_html = true
+watch_path  = ["src", "index.html"]

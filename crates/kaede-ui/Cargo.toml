@@ -1,0 +1,25 @@
+﻿[package]
+license.workspace = true
+name = "kaede-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kaede-client   = { workspace = true }
+kaede-protocol = { workspace = true }
+dioxus         = { workspace = true }
+dioxus-i18n-json = "0.0.5"
+tracing        = { workspace = true }
+async-channel  = "2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dioxus = { workspace = true, features = ["desktop"] }
+tokio = { workspace = true }
+kaede-media   = { path = "../kaede-media", version = "0.0.1" }
+kaede-capture = { path = "../kaede-capture", version = "0.0.1" }
+kaede-media-session = { path = "../kaede-media-session", version = "0.0.1" }
+kaede-crypto  = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Window", "Storage"] }
+wasm-bindgen-futures = { workspace = true }

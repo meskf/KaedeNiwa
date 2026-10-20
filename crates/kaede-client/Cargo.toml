@@ -1,0 +1,69 @@
+﻿[package]
+license.workspace = true
+name = "kaede-client"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+wasm   = ["kaede-mls/wasm"]
+native = ["kaede-mls/native"]
+
+[dependencies]
+kaede-crypto   = { workspace = true }
+kaede-mls      = { workspace = true }
+kaede-protocol = { workspace = true }
+
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
+async-trait   = { workspace = true }
+serde         = { workspace = true }
+serde_json    = "1"
+base64        = "0.22"
+async-channel = "2"
+futures-lite  = "2"
+futures-util  = "0.3"
+sha2          = { workspace = true }
+zeroize       = { workspace = true }
+
+# openmls：LeafNodeIndex 等类型暴露给上层
+openmls        = { workspace = true }
+openmls_traits = { workspace = true }
+
+# kaede-storage 用 target-conditional，自动根据 target 选 feature
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+kaede-storage     = { workspace = true, features = ["native"] }
+reqwest           = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio             = { workspace = true }
+tokio-tungstenite = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+kaede-storage        = { workspace = true, features = ["wasm"] }
+reqwest              = { version = "0.12", default-features = false, features = ["json"] }
+wasm-bindgen         = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys               = { workspace = true }
+rexie = "0.6"
+web-sys = { version = "0.3", features = [
+    "WebSocket", "MessageEvent", "BinaryType", "Event",
+    "Crypto", "SubtleCrypto", "CryptoKey",
+] }
+
+# openmls 在 wasm32 需要 js feature
+[target.'cfg(target_arch = "wasm32")'.dependencies.openmls]
+workspace = true
+features = ["js"]
+
+[dev-dependencies]
+tokio = { workspace = true }
+kaede-server = { path = "../kaede-server", version = "0.0.1" }
+axum = "0.8"
+
+
+# Windows DPAPI（CryptProtectData / CryptUnprotectData）
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+] }
+

@@ -1,0 +1,15 @@
+[package]
+license.workspace = true
+name = "kaede-capture"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+anyhow    = { workspace = true }
+tracing   = { workspace = true }
+gstreamer     = "0.25"
+gstreamer-app = "0.25"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
