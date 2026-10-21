@@ -170,6 +170,13 @@ pub enum LayoutMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MobileDetailKind {
+    #[default]
+    Channel,
+    Dm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MainTab {
     #[default]
     Server,
@@ -198,6 +205,8 @@ pub struct UiState {
     pub layout_mode: Signal<LayoutMode>,
     /// 移动端是否处于详情页（频道消息 / 私聊会话），None = 列表页。
     pub mobile_detail: Signal<Option<String>>,
+    /// 详情页类型。mobile_detail 有值时一定伴随非 None。
+    pub mobile_detail_kind: Signal<Option<MobileDetailKind>>,
     pub members_open: Signal<bool>,
     pub create_channel_kind: Signal<Option<&'static str>>,
     pub join_channel_open: Signal<bool>,
@@ -243,6 +252,7 @@ impl UiState {
             main_tab: Signal::new(MainTab::default()),
             layout_mode: Signal::new(LayoutMode::default()),
             mobile_detail: Signal::new(None),
+            mobile_detail_kind: Signal::new(None),
             members_open: Signal::new(true),
             create_channel_kind: Signal::new(None),
             join_channel_open: Signal::new(false),

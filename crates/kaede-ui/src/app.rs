@@ -23,6 +23,7 @@ pub struct ObserverRef(pub Arc<UiObserver>);
 
 #[component]
 pub fn App() -> Element {
+    #[allow(unused_mut)] // wasm 下 use_effect 内 set 需要 mut，native 不需要
     let mut ui = use_context_provider(UiState::new);
     let app_state = use_context_provider(AppState::new);
     let voice_state = use_context_provider(VoiceState::new);

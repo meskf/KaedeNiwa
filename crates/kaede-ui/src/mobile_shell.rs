@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 
 use crate::icons::{IconMail, IconSettings, IconUserList, IconUsers};
 use crate::mobile_pages::{MobileDmPage, MobileFriendsPage, MobileGroupsPage};
-use crate::state::{MainTab, UiState};
+use crate::state::{MainTab, MobileDetailKind, UiState};
 
 #[component]
 pub fn MobileShell() -> Element {
@@ -14,7 +14,10 @@ pub fn MobileShell() -> Element {
     let tab = *ui.main_tab.read();
     let detail = ui.mobile_detail.read().clone();
 
-    let on_back = move |_| ui.mobile_detail.set(None);
+    let on_back = move |_| {
+        ui.mobile_detail.set(None);
+        ui.mobile_detail_kind.set(None);
+    };
 
     rsx! {
         div {
@@ -23,9 +26,20 @@ pub fn MobileShell() -> Element {
             div {
                 style: "flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px;",
                 if detail.is_some() {
-                    div {
-                        style: "display: flex; align-items: center; justify-content: center; height: 100%; color: var(--fg-faint);",
-                        "消息详情页（M2 填充）"
+                    match *ui.mobile_detail_kind.read() {
+                        Some(MobileDetailKind::Channel) => rsx! {
+                            div {
+                                style: "height: 100%; display: flex; flex-direction: column;",
+                                crate::content::ContentArea {}
+                            }
+                        },
+                        Some(MobileDetailKind::Dm) => rsx! {
+                            div {
+                                style: "padding: 32px 16px; text-align: center; color: var(--fg-faint); font-size: 14px;",
+                                "私聊消息（M3 实现）"
+                            }
+                        },
+                        None => rsx! {},
                     }
                 } else {
                     match tab {
@@ -98,6 +112,7 @@ fn TabButton(target: MainTab, current: MainTab, label: String, icon: String) -> 
         button {
             onclick: move |_| {
                 ui.mobile_detail.set(None);
+                ui.mobile_detail_kind.set(None);
                 ui.main_tab.set(target);
             },
             style: "flex: 1; height: 44px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; background: transparent; border: none; color: {color}; font-size: 10px;",
