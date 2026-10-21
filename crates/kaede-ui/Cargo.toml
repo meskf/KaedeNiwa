@@ -22,9 +22,15 @@ kaede-media   = { path = "../kaede-media", version = "0.0.1" }
 kaede-capture = { path = "../kaede-capture", version = "0.0.1" }
 kaede-media-session = { path = "../kaede-media-session", version = "0.0.1" }
 kaede-crypto  = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-web-sys = { version = "0.3", features = ["Window", "Storage"] }
+web-sys = { version = "0.3", features = [
+    "Window", "Storage", "Document",
+    "Blob", "ImageBitmap", "HtmlCanvasElement", "CanvasRenderingContext2d",
+] }
 kaede-livekit-web = { workspace = true }
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 gloo-timers = { version = "0.3", features = ["futures"] }

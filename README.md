@@ -42,13 +42,12 @@ Rust 原生的 E2EE 实时协作平台。
 
 ## 已知限制
 
-- **协议版本 v3**：私密频道实时消息需要服务端与客户端同时升级；旧客户端会被拒绝。
-- **Web（wasm）语音/屏幕共享不可用**：语音按钮只切换 UI 状态，媒体层是 native-only；
-  Web 端目前只能聊天。
-- **SfuToken / SDP / ICE 信令未实现**：媒体统一走 LiveKit HTTP token；协议里的
-  WebRTC 点对点信令是遗留路径。
-- **画质档位（8K/4K/码率）未接入媒体层**：当前只影响 UI 显示与日志。
-- **好友请求无实时推送**：需要刷新好友列表才能看到新请求。
+- **协议版本 v5**：新增好友变更实时事件；私密频道实时消息 + DM/私密频道密文 v2
+  （发送者/接收者绑定与重放保护）。需要服务端与客户端同时升级；旧客户端会被拒绝。
+- **Web 语音 E2EE** 依赖 `livekit-client@2.14.0` 的 e2ee worker；离线 PWA 需缓存该 worker 脚本。
+- **媒体统一走 LiveKit HTTP token**；旧版 SDP/ICE/SfuToken 协议变体已移除。
+- **画质档位（8K/4K/码率）**：native 传入编码器，Web 通过 `getDisplayMedia` 分辨率约束生效；
+  共享中切换档位会自动重建共享。
 - **私密频道暂不支持表情反应**（会经主群广播泄露频道 id，已显式禁用）。
 - **媒体 seed TTL 8 小时**：崩溃/关页不会调用 `/leave`，seed 最迟在 8 小时后轮换。
 - **Windows 并发编译**：`webrtc-sys` 和 `tao` 在多核并发编译时偶发元数据竞争失败。
@@ -60,4 +59,5 @@ Rust 原生的 E2EE 实时协作平台。
 
 ## 文档
 
-- docs/KaedeNiwa v2 完整技术文档.txt    单一入口（整合版）
+- [docs/README.md](docs/README.md) — 文档索引（审计 / 产品方案 / 测试清单）
+- [SECURITY.md](SECURITY.md) — 安全策略

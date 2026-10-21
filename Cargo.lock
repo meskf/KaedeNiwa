@@ -4449,6 +4449,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4518,6 +4519,7 @@ name = "kaede-livekit-web"
 version = "0.0.1"
 dependencies = [
  "js-sys",
+ "kaede-protocol",
  "thiserror 2.0.21",
  "tracing",
  "wasm-bindgen",
@@ -4649,6 +4651,8 @@ dependencies = [
  "dioxus 0.7.10",
  "dioxus-i18n-json",
  "gloo-timers",
+ "image",
+ "js-sys",
  "kaede-capture",
  "kaede-client",
  "kaede-crypto",
@@ -4658,6 +4662,7 @@ dependencies = [
  "kaede-protocol",
  "tokio",
  "tracing",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
  "zeroize",
@@ -7414,12 +7419,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots",
 ]

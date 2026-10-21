@@ -33,7 +33,7 @@ openmls_traits = { workspace = true }
 # kaede-storage 用 target-conditional，自动根据 target 选 feature
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 kaede-storage     = { workspace = true, features = ["native"] }
-reqwest           = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest           = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio             = { workspace = true }
 tokio-tungstenite = { workspace = true }
 
@@ -49,6 +49,8 @@ rexie = "0.6"
 web-sys = { version = "0.3", features = [
     "WebSocket", "MessageEvent", "BinaryType", "Event",
     "Crypto", "SubtleCrypto", "CryptoKey",
+    "Window", "Navigator",
+    "XmlHttpRequest", "XmlHttpRequestUpload", "ProgressEvent",
 ] }
 
 # openmls 在 wasm32 需要 js feature
