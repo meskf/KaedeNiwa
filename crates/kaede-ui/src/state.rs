@@ -166,6 +166,7 @@ pub enum LayoutMode {
     Desktop,
     #[allow(dead_code)] // M3 平板双栏启用
     Tablet,
+    #[allow(dead_code)] // wasm 下通过 innerWidth 检测构造，native 不构造
     Mobile,
 }
 
@@ -207,6 +208,8 @@ pub struct UiState {
     pub mobile_detail: Signal<Option<String>>,
     /// 详情页类型。mobile_detail 有值时一定伴随非 None。
     pub mobile_detail_kind: Signal<Option<MobileDetailKind>>,
+    /// 移动端语音面板 Sheet 是否展开。
+    pub voice_sheet_open: Signal<bool>,
     pub members_open: Signal<bool>,
     pub create_channel_kind: Signal<Option<&'static str>>,
     pub join_channel_open: Signal<bool>,
@@ -253,6 +256,7 @@ impl UiState {
             layout_mode: Signal::new(LayoutMode::default()),
             mobile_detail: Signal::new(None),
             mobile_detail_kind: Signal::new(None),
+            voice_sheet_open: Signal::new(false),
             members_open: Signal::new(true),
             create_channel_kind: Signal::new(None),
             join_channel_open: Signal::new(false),

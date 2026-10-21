@@ -51,12 +51,14 @@ pub fn MobileShell() -> Element {
             }
             MobileVoiceBar {}
             MobileTabBar {}
+            crate::mobile_voice::MobileVoiceSheet {}
         }
     }
 }
 
 #[component]
 fn MobileVoiceBar() -> Element {
+    let mut ui = use_context::<UiState>();
     let voice = use_context::<VoiceState>();
     let ch = voice.active_channel.read().clone();
     let Some(ch) = ch else {
@@ -66,10 +68,12 @@ fn MobileVoiceBar() -> Element {
     let name = ch.name.clone();
     rsx! {
         div {
-            style: "padding: 10px 14px; background: var(--positive); color: #fff; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 8px; flex-shrink: 0;",
+            onclick: move |_| ui.voice_sheet_open.set(true),
+            style: "padding: 10px 14px; background: var(--positive); color: #fff; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 8px; flex-shrink: 0; cursor: pointer;",
             span { "🔊" }
             span { "{name}" }
             span { style: "opacity: 0.8; font-size: 11px;", "· {count} 人" }
+            span { style: "margin-left: auto; opacity: 0.8;", "▲" }
         }
     }
 }
