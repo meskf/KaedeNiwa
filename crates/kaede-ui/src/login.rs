@@ -78,6 +78,10 @@ pub fn LoginView() -> Element {
                                     app.messages.write().insert(key, msgs);
                                 }
                                 app.room.set(Some(room.clone()));
+                                // 登录后拉一次未读计数（服务器已持久化 last_read）。
+                                spawn(async move {
+                                    app.refresh_unread().await;
+                                });
                                 // 关键顺序：先让 app.room 就位，再启动 event loop。
                                 // 否则 `Joined` 事件可能在 room 赋值前被处理而丢失，
                                 // 房主就永远不知道需要把老成员加进主群。

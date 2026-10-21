@@ -12,7 +12,7 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
             "/api/dm/{conv_id}/messages",
             get(get_messages).post(post_message),
         )
+        .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
         .with_state(state)
 }
 
@@ -169,6 +170,15 @@ struct MessageRecord {
     ciphertext: String,
 }
 
+/// DM 发送响应：返回服务器权威 ts，供发送方本地回显使用。
+///
+/// 发送方不再用客户端时钟回显，否则重新打开会话时服务器历史
+/// （服务器 ts）与本地回显（客户端 ts）无法按 ts 去重。
+#[derive(Serialize)]
+struct PostMessageResp {
+    ts: i64,
+}
+
 #[derive(Serialize)]
 struct MessagesResp {
     messages: Vec<MessageRecord>,
@@ -185,12 +195,12 @@ async fn post_message(
     headers: HeaderMap,
     Path(conv_id): Path<String>,
     Json(req): Json<PostMessageReq>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<PostMessageResp>, ApiError> {
     // C3：用 auth uid 覆盖客户端自报的 sender，防止 DM 冒充
     let uid = authenticate(&state, &headers).await?;
 
     // C11: per-uid 限流，防 DM flood
-    if !state.check_rate(&uid, 10.0, 30.0) {
+    if !state.check_rate_scoped(&uid, "dm_messages", 10.0, 30.0) {
         return Err(ApiError::BadRequest("dm message rate limited".into()));
     }
 
@@ -254,7 +264,7 @@ async fn post_message(
         }
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(PostMessageResp { ts }))
 }
 
 async fn get_messages(

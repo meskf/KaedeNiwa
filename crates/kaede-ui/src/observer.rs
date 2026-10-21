@@ -7,7 +7,7 @@ use kaede_client::{ClientEvent, ClientObserver, DecodedPayload};
 use kaede_protocol::UserId;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-use crate::state::{AppState, UiMessage, UiState, VoiceState};
+use crate::state::{AppState, MainTab, UiMessage, UiState, View, VoiceState};
 
 pub struct UiObserver {
     tx: Sender<ClientEvent>,
@@ -123,6 +123,30 @@ pub fn apply_event(
             }
         }
 
+        ClientEvent::FriendsChanged { server_id } => {
+            // 只刷新当前 server 的缓存；切服时 use_effect 会重新拉取。
+            let is_current = app.current_server.read().as_deref() == Some(server_id.as_str());
+            if is_current {
+                spawn(async move {
+                    crate::friends_view::load_friends_into(app).await;
+                });
+            }
+        }
+
+        ClientEvent::AttachmentProgress {
+            server_id: _,
+            name,
+            sent,
+            total,
+        } => {
+            let pct = if total == 0 {
+                0
+            } else {
+                ((sent.saturating_mul(100) / total).min(100)) as u32
+            };
+            ui.upload_progress.set(Some((name, pct)));
+        }
+
         ClientEvent::AppMessage {
             server_id,
             from,
@@ -134,7 +158,7 @@ pub fn apply_event(
                 .read()
                 .as_ref()
                 .map(|r| r.uid().as_str().to_string());
-            if let Some(uid) = self_uid
+            if let Some(uid) = self_uid.as_deref()
                 && from.as_str() == uid
             {
                 return;
@@ -156,6 +180,16 @@ pub fn apply_event(
                                 msg.channel_id
                             );
                             return;
+                        }
+                        let viewing = *ui.view.read() == View::Main
+                            && *ui.main_tab.read() == MainTab::Server
+                            && ui.selected_channel.read().as_deref()
+                                == Some(msg.channel_id.as_str());
+                        if !viewing {
+                            let mention_me = self_uid
+                                .as_deref()
+                                .is_some_and(|uid| msg.mentions.iter().any(|m| m == uid));
+                            app.bump_unread(&server_id, &msg.channel_id, mention_me);
                         }
                         let mut s = app.messages.write();
                         let key = AppState::channel_key(&server_id, &msg.channel_id);
@@ -206,7 +240,20 @@ pub fn apply_event(
                     attachments: p.a,
                     reply_to: p.r,
                     reactions: Vec::new(),
+                    mentions: p.m,
                 };
+                let viewing = *ui.view.read() == View::Main
+                    && *ui.main_tab.read() == MainTab::Server
+                    && ui.selected_channel.read().as_deref() == Some(channel_id.as_str());
+                if !viewing {
+                    let me = app
+                        .room
+                        .read()
+                        .as_ref()
+                        .map(|r| r.uid().as_str().to_string());
+                    let mention_me = me.is_some_and(|uid| msg.mentions.iter().any(|m| m == &uid));
+                    app.bump_unread(&server_id, &channel_id, mention_me);
+                }
                 let mut s = app.messages.write();
                 let key = AppState::channel_key(&server_id, &channel_id);
                 let list = s.entry(key).or_default();
@@ -218,7 +265,7 @@ pub fn apply_event(
         }
 
         ClientEvent::DmReceived {
-            server_id: _,
+            server_id,
             conv_id,
             from,
             ts,
@@ -234,8 +281,9 @@ pub fn apply_event(
                         from
                     );
                 }
-                // C18: DM 也优先用真实 ts
-                let actual_ts = if p.ts > 0 { p.ts } else { ts };
+                // 统一使用服务器 ts：排序、去重、翻页游标必须同源。
+                // 仅在旧服务器没有 ts 时回退到 payload ts。
+                let actual_ts = if ts > 0 { ts } else { p.ts };
                 let msg = UiMessage {
                     id: format!("dm-{}-{}", conv_id, actual_ts),
                     channel_id: conv_id.clone(),
@@ -253,7 +301,23 @@ pub fn apply_event(
                     attachments: p.a,
                     reply_to: p.r,
                     reactions: vec![],
+                    mentions: p.m,
                 };
+                let viewing = *ui.view.read() == View::Main
+                    && *ui.main_tab.read() == MainTab::Dm
+                    && ui.selected_dm_conv.read().as_deref() == Some(conv_id.as_str());
+                if !viewing {
+                    let me = app
+                        .room
+                        .read()
+                        .as_ref()
+                        .map(|r| r.uid().as_str().to_string());
+                    let is_me = me.as_deref() == Some(from.as_str());
+                    let mention_me = me.is_some_and(|uid| msg.mentions.iter().any(|m| m == &uid));
+                    if !is_me {
+                        app.bump_unread(&server_id, &conv_id, mention_me);
+                    }
+                }
                 let mut map = app.dm_messages.write();
                 let list = map.entry(conv_id).or_default();
                 if !list.iter().any(|m| m.ts == actual_ts) {
@@ -318,7 +382,9 @@ pub fn apply_event(
             }
         }
 
-        ClientEvent::ChannelEpochChanged { channel_id, epoch, .. } => {
+        ClientEvent::ChannelEpochChanged {
+            channel_id, epoch, ..
+        } => {
             // 块 B：私密频道 epoch 变化。只有正在该频道语音时才重连。
             let active = voice.active_channel.read().as_ref().map(|c| c.id.clone());
             if active.as_deref() == Some(channel_id.as_str()) {
@@ -506,6 +572,8 @@ fn maybe_auto_reconnect(
             }
             app.members.write().insert(server_id.clone(), members);
             app.is_host.set(Some(is_host));
+            // 重连后刷新未读（离线期间的消息计数）。
+            app.refresh_unread().await;
 
             let epoch = room.epoch();
             {
@@ -612,6 +680,7 @@ fn decode_message_payload(
         attachments: p.a,
         reply_to: p.r,
         reactions: Vec::new(),
+        mentions: p.m,
     })
 }
 
@@ -674,6 +743,7 @@ pub fn history_to_ui(
         attachments: h.attachments,
         reply_to: h.reply_to,
         reactions: Vec::new(),
+        mentions: h.mentions,
     }
 }
 

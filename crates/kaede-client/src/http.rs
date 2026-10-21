@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ClientError;
 
+/// 上传进度回调：`(已发送字节, 总字节)`。
+#[cfg(not(target_arch = "wasm32"))]
+pub type UploadProgress = std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type UploadProgress = std::sync::Arc<dyn Fn(u64, u64)>;
+
 /// HTTP 客户端。
 ///
 /// 每个 server 一个实例。
@@ -37,12 +43,18 @@ pub struct RegisterReq {
     pub password: String,
     #[serde(default)]
     pub nickname: String,
+    /// 设备名，用于“登录设备”列表。
+    #[serde(default)]
+    pub device_name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LoginReq {
     pub login_id: String,
     pub password: String,
+    /// 设备名，用于“登录设备”列表。
+    #[serde(default)]
+    pub device_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,6 +62,21 @@ pub struct AuthResp {
     pub login_id: String,
     pub nickname: String,
     pub session_token: String,
+}
+
+/// 一个登录会话（设备）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub device_name: String,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+    pub current: bool,
+}
+
+#[derive(Deserialize)]
+struct SessionsResp {
+    sessions: Vec<SessionInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +162,43 @@ pub struct UpdateMemberReq {
 #[derive(Debug, Clone, Deserialize)]
 struct ChannelsResp {
     channels: Vec<kaede_protocol::Channel>,
+}
+
+/// 频道成员（`GET /api/channels/{id}/members`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelMember {
+    pub login_id: String,
+    pub nickname: String,
+    pub joined_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChannelMembersResp {
+    members: Vec<ChannelMember>,
+}
+
+/// 未读计数（频道 + DM，键为频道 id / conv_id）。
+#[derive(Debug, Clone, Default)]
+pub struct UnreadCounts {
+    pub channels: std::collections::HashMap<String, u32>,
+    pub dms: std::collections::HashMap<String, u32>,
+}
+
+#[derive(Deserialize)]
+struct UnreadResp {
+    #[serde(default)]
+    channels: Vec<UnreadRaw>,
+    #[serde(default)]
+    dms: Vec<UnreadRaw>,
+}
+
+#[derive(Deserialize)]
+struct UnreadRaw {
+    #[serde(default)]
+    channel_id: Option<String>,
+    #[serde(default)]
+    conv_id: Option<String>,
+    count: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -259,6 +323,51 @@ impl HttpApi {
         Ok(auth)
     }
 
+    /// 列出当前账号的登录会话（设备）。
+    pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>, ClientError> {
+        let resp = self
+            .http
+            .get(format!("{}/api/sessions", self.base_url))
+            .bearer_auth(self.bearer()?)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        let body = parse_json::<SessionsResp>(resp).await?;
+        Ok(body.sessions)
+    }
+
+    /// 撤销指定会话。
+    pub async fn revoke_session(&self, session_id: &str) -> Result<(), ClientError> {
+        let resp = self
+            .http
+            .delete(format!("{}/api/sessions/{}", self.base_url, session_id))
+            .bearer_auth(self.bearer()?)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(parse_api_error(resp).await)
+        }
+    }
+
+    /// 撤销其他所有会话。
+    pub async fn revoke_other_sessions(&self) -> Result<(), ClientError> {
+        let resp = self
+            .http
+            .post(format!("{}/api/sessions/revoke-others", self.base_url))
+            .bearer_auth(self.bearer()?)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(parse_api_error(resp).await)
+        }
+    }
+
     /// 当前账户。
     pub async fn me(&self) -> Result<MeResp, ClientError> {
         let resp = self
@@ -356,6 +465,57 @@ impl HttpApi {
         } else {
             Err(parse_api_error(resp).await)
         }
+    }
+
+    /// 上报频道/DM 的最后已读 ts。
+    pub async fn mark_read(
+        &self,
+        channel_id: Option<&str>,
+        conv_id: Option<&str>,
+        ts: i64,
+    ) -> Result<(), ClientError> {
+        let req = serde_json::json!({
+            "channel_id": channel_id,
+            "conv_id": conv_id,
+            "ts": ts,
+        });
+        let resp = self
+            .http
+            .post(format!("{}/api/reads", self.base_url))
+            .bearer_auth(self.bearer()?)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(parse_api_error(resp).await)
+        }
+    }
+
+    /// 拉取未读计数。
+    pub async fn get_unread(&self) -> Result<UnreadCounts, ClientError> {
+        let resp = self
+            .http
+            .get(format!("{}/api/unread", self.base_url))
+            .bearer_auth(self.bearer()?)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        let body = parse_json::<UnreadResp>(resp).await?;
+        let mut out = UnreadCounts::default();
+        for c in body.channels {
+            if let Some(id) = c.channel_id {
+                out.channels.insert(id, c.count.max(0) as u32);
+            }
+        }
+        for d in body.dms {
+            if let Some(id) = d.conv_id {
+                out.dms.insert(id, d.count.max(0) as u32);
+            }
+        }
+        Ok(out)
     }
 
     /// 拉取历史消息。返回的密文由调用方 MLS 解密。
@@ -463,6 +623,48 @@ impl HttpApi {
             let status = resp.status().as_u16();
             let message = format!("join_channel: {}", resp.status());
             Err(ClientError::Http { status, message })
+        }
+    }
+
+    /// 频道成员列表。公开频道所有登录用户可看；私密频道仅成员可看。
+    pub async fn list_channel_members(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<ChannelMember>, ClientError> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/api/channels/{}/members",
+                self.base_url, channel_id
+            ))
+            .bearer_auth(self.bearer()?)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        let body = parse_json::<ChannelMembersResp>(resp).await?;
+        Ok(body.members)
+    }
+
+    /// 把成员移出私密频道（仅 op5 可用）。
+    pub async fn remove_channel_member(
+        &self,
+        channel_id: &str,
+        login_id: &str,
+    ) -> Result<(), ClientError> {
+        let resp = self
+            .http
+            .delete(format!(
+                "{}/api/channels/{}/members/{}",
+                self.base_url, channel_id, login_id
+            ))
+            .bearer_auth(self.bearer()?)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(parse_api_error(resp).await)
         }
     }
 
@@ -577,16 +779,52 @@ impl HttpApi {
         mime: Option<&str>,
         bytes: Vec<u8>,
     ) -> Result<kaede_protocol::Attachment, ClientError> {
+        self.upload_attachment_with_progress(name, mime, bytes, None)
+            .await
+    }
+
+    /// 上传附件并上报进度。
+    ///
+    /// - native：`reqwest::Body::wrap_stream` 分块发送，逐块回调；
+    /// - wasm：`XMLHttpRequest` 的 `upload.onprogress`。
+    ///
+    /// 回调参数为 `(已发送字节, 总字节)`。
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn upload_attachment_with_progress(
+        &self,
+        name: &str,
+        mime: Option<&str>,
+        bytes: Vec<u8>,
+        progress: Option<UploadProgress>,
+    ) -> Result<kaede_protocol::Attachment, ClientError> {
         let mut url = format!("{}/api/attachments?name={}", self.base_url, urlencode(name));
         if let Some(m) = mime {
             url.push_str(&format!("&mime={}", urlencode(m)));
         }
+
+        let total = bytes.len() as u64;
+        let stream = futures_util::stream::unfold(
+            (0usize, bytes, progress, total),
+            |(sent, data, cb, total)| async move {
+                if sent >= data.len() {
+                    return None;
+                }
+                const CHUNK: usize = 64 * 1024;
+                let end = (sent + CHUNK).min(data.len());
+                let chunk = data[sent..end].to_vec();
+                if let Some(cb) = &cb {
+                    cb(end as u64, total);
+                }
+                Some((Ok::<Vec<u8>, std::io::Error>(chunk), (end, data, cb, total)))
+            },
+        );
+
         let resp = self
             .http
             .post(&url)
             .bearer_auth(self.bearer()?)
             .header("content-type", "application/octet-stream")
-            .body(bytes)
+            .body(reqwest::Body::wrap_stream(stream))
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -597,6 +835,89 @@ impl HttpApi {
         }
         let body = parse_json::<UploadResp>(resp).await?;
         Ok(body.attachment)
+    }
+
+    /// wasm：用 XHR 获得真实的 upload.onprogress。
+    #[cfg(target_arch = "wasm32")]
+    pub async fn upload_attachment_with_progress(
+        &self,
+        name: &str,
+        mime: Option<&str>,
+        bytes: Vec<u8>,
+        progress: Option<UploadProgress>,
+    ) -> Result<kaede_protocol::Attachment, ClientError> {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::closure::Closure;
+
+        let mut url = format!("{}/api/attachments?name={}", self.base_url, urlencode(name));
+        if let Some(m) = mime {
+            url.push_str(&format!("&mime={}", urlencode(m)));
+        }
+
+        let xhr = web_sys::XmlHttpRequest::new()
+            .map_err(|e| ClientError::Transport(format!("xhr new: {:?}", e)))?;
+        xhr.open_with_async("POST", &url, true)
+            .map_err(|e| ClientError::Transport(format!("xhr open: {:?}", e)))?;
+        xhr.set_request_header("Authorization", &format!("Bearer {}", self.bearer()?))
+            .map_err(|e| ClientError::Transport(format!("xhr auth: {:?}", e)))?;
+        xhr.set_request_header("content-type", "application/octet-stream")
+            .map_err(|e| ClientError::Transport(format!("xhr content-type: {:?}", e)))?;
+
+        let (tx, rx) = async_channel::bounded::<(u16, String)>(1);
+
+        if let Some(cb) = progress {
+            let total = bytes.len() as u64;
+            let up = xhr
+                .upload()
+                .map_err(|e| ClientError::Transport(format!("xhr upload: {:?}", e)))?;
+            let closure = Closure::<dyn FnMut(web_sys::ProgressEvent)>::new(
+                move |e: web_sys::ProgressEvent| {
+                    cb(e.loaded() as u64, total);
+                },
+            );
+            up.set_onprogress(Some(closure.as_ref().unchecked_ref()));
+            closure.forget();
+        }
+
+        let xhr_ok = xhr.clone();
+        let tx_ok = tx.clone();
+        let onload = Closure::<dyn FnMut()>::new(move || {
+            let status = xhr_ok.status().unwrap_or(0);
+            let body = xhr_ok.response_text().ok().flatten().unwrap_or_default();
+            let _ = tx_ok.try_send((status, body));
+        });
+        xhr.set_onload(Some(onload.as_ref().unchecked_ref()));
+        onload.forget();
+
+        let xhr_err = xhr.clone();
+        let tx_err = tx.clone();
+        let onerror = Closure::<dyn FnMut()>::new(move || {
+            let _ = tx_err.try_send((0, xhr_err.status_text().unwrap_or_default()));
+        });
+        xhr.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+        onerror.forget();
+
+        xhr.send_with_opt_u8_array(Some(bytes.as_slice()))
+            .map_err(|e| ClientError::Transport(format!("xhr send: {:?}", e)))?;
+
+        let (status, body) = rx
+            .recv()
+            .await
+            .map_err(|e| ClientError::Transport(format!("xhr wait: {}", e)))?;
+        if !(200..300).contains(&status) {
+            return Err(ClientError::Protocol(format!(
+                "upload attachment failed: HTTP {}",
+                status
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct UploadResp {
+            attachment: kaede_protocol::Attachment,
+        }
+        let parsed = serde_json::from_str::<UploadResp>(&body)
+            .map_err(|e| ClientError::Protocol(format!("upload response: {}", e)))?;
+        Ok(parsed.attachment)
     }
 
     /// 下载附件。
@@ -733,13 +1054,19 @@ impl HttpApi {
         Ok(body.messages)
     }
 
+    /// 发送 DM 消息，返回服务器权威 `ts`。
     pub async fn dm_post_message(
         &self,
         conv_id: &str,
         ts: i64,
         sender: &str,
         ciphertext: &[u8],
-    ) -> Result<(), ClientError> {
+    ) -> Result<i64, ClientError> {
+        #[derive(Deserialize)]
+        struct DmPostResp {
+            ts: i64,
+        }
+
         let resp = self
             .http
             .post(format!("{}/api/dm/{}/messages", self.base_url, conv_id))
@@ -752,11 +1079,7 @@ impl HttpApi {
             .send()
             .await
             .map_err(map_reqwest_err)?;
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err(parse_api_error(resp).await)
-        }
+        Ok(parse_json::<DmPostResp>(resp).await?.ts)
     }
 
     // -----------------------------------------------------------------

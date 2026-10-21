@@ -404,8 +404,8 @@ async fn rate_limit_kicks_in() {
 // Batch 4：P0-D（ensure_joined）回归测试
 // ============================================================================
 //
-// 修复位置：`ws.rs::handle_message` 里 SdpOffer/SdpAnswer/IceCandidate/
-// MlsWelcome/MlsCommit/MlsProposal/MlsAppMessage/SetPresence 分支都改为
+// 修复位置：`ws.rs::handle_message` 里 MlsWelcome/ChannelSync/
+// MlsCommit/MlsProposal/MlsAppMessage/SetPresence 分支都改为
 // `ensure_joined(state, my_uid, my_session_id)?`，未 Join 时返回 Err，
 // 消息被静默丢弃（**不发**给目标 peer，也不 broadcast）。
 //
@@ -495,22 +495,22 @@ async fn setup_attacker_and_victim() -> (Ws, Ws) {
     (a_ws, v_ws)
 }
 
-/// **P0-D #1**：未 Join 发 SdpOffer → victim 收不到。
+/// **P0-D #1**：未 Join 发 MlsWelcome → victim 收不到。
 #[tokio::test]
-async fn p0d_sdp_offer_without_join_dropped() {
+async fn p0d_mls_welcome_without_join_dropped() {
     let (mut a_ws, mut v_ws) = setup_attacker_and_victim().await;
 
-    // 攻击：未 Join 发 SdpOffer
+    // 攻击：未 Join 发 MlsWelcome
     send(
         &mut a_ws,
-        ClientMessage::SdpOffer {
+        ClientMessage::MlsWelcome {
             to: UserId::new("p0d-victim"),
-            sdp: "should-be-dropped".to_string(),
+            payload: b"should-be-dropped".to_vec(),
         },
     )
     .await;
 
-    // 屏障：Ping → Pong，确认 server 已处理完前面的 SdpOffer
+    // 屏障：Ping → Pong，确认 server 已处理完前面的 MlsWelcome
     send(&mut a_ws, ClientMessage::Ping { nonce: 111 }).await;
     recv_pong(&mut a_ws, 111).await;
 
@@ -519,10 +519,10 @@ async fn p0d_sdp_offer_without_join_dropped() {
         try_recv(&mut v_ws, Duration::from_millis(150))
             .await
             .is_none(),
-        "P0-D violated: SdpOffer without Join leaked to victim"
+        "P0-D violated: MlsWelcome without Join leaked to victim"
     );
 
-    // 正向控制：attacker Join 后，SdpOffer 能正常投递
+    // 正向控制：attacker Join 后，MlsWelcome 能正常投递
     send(&mut a_ws, ClientMessage::Join).await;
     match recv(&mut a_ws).await {
         ServerMessage::Joined { .. } => {}
@@ -541,22 +541,22 @@ async fn p0d_sdp_offer_without_join_dropped() {
         _ => unreachable!(),
     }
 
-    // 再发 SdpOffer — 这次应到达
+    // 再发 MlsWelcome — 这次应到达
     send(
         &mut a_ws,
-        ClientMessage::SdpOffer {
+        ClientMessage::MlsWelcome {
             to: UserId::new("p0d-victim"),
-            sdp: "after-join".to_string(),
+            payload: b"after-join".to_vec(),
         },
     )
     .await;
 
-    match recv_until(&mut v_ws, |m| matches!(m, ServerMessage::SdpOffer { .. })).await {
-        ServerMessage::SdpOffer { from, sdp } => {
+    match recv_until(&mut v_ws, |m| matches!(m, ServerMessage::MlsWelcome { .. })).await {
+        ServerMessage::MlsWelcome { from, payload } => {
             assert_eq!(from, UserId::new("p0d-attacker"));
             assert_eq!(
-                sdp, "after-join",
-                "victim should receive post-join SdpOffer"
+                payload, b"after-join",
+                "victim should receive post-join MlsWelcome"
             );
         }
         _ => unreachable!(),
@@ -736,12 +736,12 @@ async fn p0d_leave_revokes_join() {
     })
     .await;
 
-    // 现在 attacker 处于 Leave 后状态 — 再发 SdpOffer 应该被静默丢弃
+    // 现在 attacker 处于 Leave 后状态 — 再发 MlsWelcome 应该被静默丢弃
     send(
         &mut a_ws,
-        ClientMessage::SdpOffer {
+        ClientMessage::MlsWelcome {
             to: UserId::new("p0d-leave-victim"),
-            sdp: "after-leave".to_string(),
+            payload: b"after-leave".to_vec(),
         },
     )
     .await;
@@ -751,20 +751,20 @@ async fn p0d_leave_revokes_join() {
     })
     .await;
 
-    // 只断言"没有 SdpOffer"——队列里可能还有 PeerLeft / PresenceUpdated 等
+    // 只断言"没有 MlsWelcome"——队列里可能还有 PeerLeft / PresenceUpdated 等
     // 正常广播（来自 attacker 的 Leave），那些不影响 P0-D 的安全性质。
     //
-    // 用 250ms 窗口 + 忽略非 SdpOffer 消息：
+    // 用 250ms 窗口 + 忽略非 MlsWelcome 消息：
     let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            break; // 250ms 内没收到 SdpOffer → 通过
+            break; // 250ms 内没收到 MlsWelcome → 通过
         }
         match try_recv(&mut v_ws, remaining).await {
             None => break, // 队列空 → 通过
-            Some(ServerMessage::SdpOffer { .. }) => {
-                panic!("P0-D violated: SdpOffer after Leave leaked to victim")
+            Some(ServerMessage::MlsWelcome { .. }) => {
+                panic!("P0-D violated: MlsWelcome after Leave leaked to victim")
             }
             Some(_) => continue, // PeerLeft / PresenceUpdated / 其他 → 忽略
         }

@@ -25,6 +25,8 @@ pub struct UiMessage {
     pub attachments: Vec<Attachment>,
     pub reply_to: Option<ReplyRef>,
     pub reactions: Vec<Reaction>,
+    /// @ 提及的 login_id（来自解密后的 payload）。
+    pub mentions: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -90,6 +92,13 @@ impl UiServer {
 // AppState
 // ============================================================================
 
+/// 未读状态：条数 + 其中 @ 自己的条数。
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub struct UnreadView {
+    pub count: u32,
+    pub mentions: u32,
+}
+
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub servers: Signal<HashMap<String, UiServer>>,
@@ -116,6 +125,8 @@ pub struct AppState {
     /// 防止同一 peer 的多个 PeerJoined 事件并发触发 add，导致 epoch 前进竞争。
     /// 内容 = 正在处理中的 uid 集合；task 完成/失败后移除（panic 除外，见 observer.rs 注释）。
     pub pending_adds: Signal<std::collections::HashSet<String>>,
+    /// 未读计数，键为 `server::channel_id` / `server::conv_id`。
+    pub unread: Signal<HashMap<String, UnreadView>>,
 }
 
 impl AppState {
@@ -135,11 +146,64 @@ impl AppState {
             reconnecting: Signal::new(false),
             is_host: Signal::new(None),
             pending_adds: Signal::new(std::collections::HashSet::new()),
+            unread: Signal::new(HashMap::new()),
         }
     }
 
     pub fn channel_key(server_id: &str, channel_id: &str) -> String {
         format!("{}::{}", server_id, channel_id)
+    }
+
+    /// 从服务器刷新未读计数（频道 + DM）。
+    ///
+    /// 服务器返回的计数不含 @ 信息；本地 mention 计数在刷新时清零，
+    /// 之后由实时消息重新累加。
+    pub async fn refresh_unread(mut self) {
+        let Some(room) = self.room.read().clone() else {
+            return;
+        };
+        let Some(sid) = self.current_server.read().clone() else {
+            return;
+        };
+        let Ok(counts) = room.unread_counts().await else {
+            return;
+        };
+        let prefix = format!("{}::", sid);
+        let mut map = self.unread.write();
+        map.retain(|k, _| !k.starts_with(&prefix));
+        for (ch, count) in counts.channels {
+            if count > 0 {
+                map.insert(
+                    Self::channel_key(&sid, &ch),
+                    UnreadView { count, mentions: 0 },
+                );
+            }
+        }
+        for (conv, count) in counts.dms {
+            if count > 0 {
+                map.insert(
+                    Self::channel_key(&sid, &conv),
+                    UnreadView { count, mentions: 0 },
+                );
+            }
+        }
+    }
+
+    /// 新消息到达时累加未读。
+    pub fn bump_unread(mut self, server_id: &str, id: &str, mention_me: bool) {
+        let key = Self::channel_key(server_id, id);
+        let mut map = self.unread.write();
+        let entry = map.entry(key).or_default();
+        entry.count = entry.count.saturating_add(1);
+        if mention_me {
+            entry.mentions = entry.mentions.saturating_add(1);
+        }
+    }
+
+    /// 打开频道/DM 时清零未读。
+    pub fn clear_unread(mut self, server_id: &str, id: &str) {
+        let key = Self::channel_key(server_id, id);
+        self.unread.write().remove(&key);
     }
 }
 
@@ -228,6 +292,12 @@ pub struct UiState {
     pub join_channel_then_voice: Signal<bool>,
     /// 成员选择器（好友添加 / 新建 DM）
     pub member_picker: Signal<Option<MemberPickerMode>>,
+    /// 频道成员列表弹窗：值为频道 id。
+    pub channel_members_open: Signal<Option<String>>,
+    /// 本地消息搜索弹窗。
+    pub search_open: Signal<bool>,
+    /// 附件上传进度：(文件名, 已发送百分比 0..=100)。
+    pub upload_progress: Signal<Option<(String, u32)>>,
 }
 
 /// 成员选择器的使用场景。
@@ -271,6 +341,9 @@ impl UiState {
             join_channel_prefill_id: Signal::new(None),
             join_channel_then_voice: Signal::new(false),
             member_picker: Signal::new(None),
+            channel_members_open: Signal::new(None),
+            search_open: Signal::new(false),
+            upload_progress: Signal::new(None),
         }
     }
 
@@ -325,7 +398,7 @@ pub struct VoiceState {
             kaede_media_session::ConsumerHandle,
         )>,
     >,
-    /// 当前选择的视频画质档位（Phase 3a：UI 状态，未接入 media 层）。
+    /// 当前选择的视频画质档位；屏幕共享与共享中重建都按此配置编码器。
     pub current_profile: Signal<kaede_protocol::VideoProfile>,
     /// 屏幕共享实时统计（开启时才有值）。
     pub screen_stats: Signal<Option<ScreenStatsView>>,
@@ -483,6 +556,7 @@ impl AppState {
             attachments: vec![],
             reply_to: None,
             reactions: vec![],
+            mentions: vec![],
         };
 
         let key = AppState::channel_key(&sid, "general");

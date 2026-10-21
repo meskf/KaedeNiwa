@@ -45,7 +45,9 @@
 pub mod encoded;
 pub mod error;
 
-pub use encoded::{EncodedFrame, EncodedVideoStream, EncoderKind, VideoCodec, VideoConfig};
+pub use encoded::{
+    EncodedFrame, EncodedVideoStream, EncoderKind, VideoCodec, VideoConfig, primary_display_size,
+};
 pub use error::CaptureError;
 
 /// 初始化 GStreamer。

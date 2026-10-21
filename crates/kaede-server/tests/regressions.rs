@@ -29,14 +29,20 @@ async fn start_server() -> (String, SqlitePool) {
     let pool = db::init(&cfg.database_url).await.unwrap();
     let state = AppState::new(pool.clone(), cfg);
     let app = http::router(state.clone())
+        .merge(kaede_server::friends::router(state.clone()))
         .merge(kaede_server::dm::router(state.clone()))
         .merge(channels::router(state.clone()))
         .merge(members::router(state.clone()))
+        .merge(kaede_server::reads::router(state.clone()))
+        .merge(kaede_server::sessions_api::router(state.clone()))
         .merge(ws::router(state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        ).await;
     });
     (format!("ws://{}/ws", addr), pool)
 }
@@ -221,19 +227,19 @@ async fn same_account_second_connection_takes_over() {
     })
     .await;
 
-    // 新连接必须真正成为 peers 里的 handle：给自己发一条 SdpOffer，
+    // 新连接必须真正成为 peers 里的 handle：给自己发一条 MlsWelcome，
     // 服务器会转发到 alice 的 handle（也就是 B 自己）。
     send(
         &mut b,
-        ClientMessage::SdpOffer {
+        ClientMessage::MlsWelcome {
             to: UserId::new("alice"),
-            sdp: "v=0".into(),
+            payload: b"v=0".to_vec(),
         },
     )
     .await;
-    let got = recv_until(&mut b, |m| matches!(m, ServerMessage::SdpOffer { .. })).await;
+    let got = recv_until(&mut b, |m| matches!(m, ServerMessage::MlsWelcome { .. })).await;
     match got {
-        ServerMessage::SdpOffer { from, .. } => assert_eq!(from.as_str(), "alice"),
+        ServerMessage::MlsWelcome { from, .. } => assert_eq!(from.as_str(), "alice"),
         _ => unreachable!(),
     }
 }
@@ -516,4 +522,451 @@ async fn removing_member_cleans_orphan_rows() {
             .await
             .unwrap();
     assert_eq!(dm_rows, 0, "dm_conversations orphan rows");
+}
+
+/// v5：好友请求 / 接受 / 删除必须实时推送给双方。
+#[tokio::test]
+async fn friend_changes_push_realtime() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let alice = register(&base, "alice").await;
+    let bob = register(&base, "bob").await;
+
+    let mut a = connect_auth(&url, &alice).await;
+    join(&mut a).await;
+    let mut b = connect_auth(&url, &bob).await;
+    join(&mut b).await;
+
+    let client = reqwest::Client::new();
+
+    // 请求
+    let resp = client
+        .post(format!("{}/api/friends/bob", base))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    recv_until(&mut a, |m| matches!(m, ServerMessage::FriendsChanged)).await;
+    recv_until(&mut b, |m| matches!(m, ServerMessage::FriendsChanged)).await;
+
+    // 接受
+    let resp = client
+        .post(format!("{}/api/friends/alice/accept", base))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    recv_until(&mut a, |m| matches!(m, ServerMessage::FriendsChanged)).await;
+    recv_until(&mut b, |m| matches!(m, ServerMessage::FriendsChanged)).await;
+
+    // 删除
+    let resp = client
+        .delete(format!("{}/api/friends/bob", base))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    recv_until(&mut a, |m| matches!(m, ServerMessage::FriendsChanged)).await;
+    recv_until(&mut b, |m| matches!(m, ServerMessage::FriendsChanged)).await;
+}
+
+/// 频道成员列表：公开可看、私密仅成员可看。
+#[tokio::test]
+async fn channel_members_visibility() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let alice = register(&base, "alice").await;
+    let bob = register(&base, "bob").await;
+    let carol = register(&base, "carol").await;
+    let client = reqwest::Client::new();
+
+    // 公开频道：任意登录用户可看（创建者自动在 channel_members 中）。
+    let public: serde_json::Value = client
+        .post(format!("{}/api/channels", base))
+        .bearer_auth(&alice)
+        .json(&serde_json::json!({ "name": "public", "kind": "text" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let public_id = public["id"].as_str().unwrap().to_string();
+
+    let resp = client
+        .get(format!("{}/api/channels/{}/members", base, public_id))
+        .bearer_auth(&carol)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["members"][0]["login_id"], "alice");
+
+    // 私密频道：非成员 403，成员 200。
+    let ch = create_private_channel(&base, &alice, "members", "pass1234").await;
+
+    let resp = client
+        .get(format!("{}/api/channels/{}/members", base, ch))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    join_private(&base, &bob, &ch, "pass1234", None).await;
+    let resp = client
+        .get(format!("{}/api/channels/{}/members", base, ch))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let ids: Vec<&str> = body["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["login_id"].as_str())
+        .collect();
+    assert!(ids.contains(&"alice"));
+    assert!(ids.contains(&"bob"));
+
+    // 不存在的频道 → 404。
+    let resp = client
+        .get(format!("{}/api/channels/nope/members", base))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+/// 未读计数与已读位置：频道 + DM。
+#[tokio::test]
+async fn unread_counts_track_reads() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let alice = register(&base, "alice").await;
+    let bob = register(&base, "bob").await;
+    let client = reqwest::Client::new();
+
+    // 公开频道 + alice 发一条消息。
+    let ch: serde_json::Value = client
+        .post(format!("{}/api/channels", base))
+        .bearer_auth(&alice)
+        .json(&serde_json::json!({ "name": "unread", "kind": "text" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ch_id = ch["id"].as_str().unwrap().to_string();
+
+    let resp = client
+        .post(format!("{}/api/messages", base))
+        .bearer_auth(&alice)
+        .json(&serde_json::json!({
+            "channel_id": ch_id,
+            "ts": 0,
+            "sender": "alice",
+            "ciphertext": "AQID",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    // bob 有 1 条未读；alice 自己的消息不计。
+    let unread: serde_json::Value = client
+        .get(format!("{}/api/unread", base))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bob_ch = unread["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["channel_id"] == ch_id.as_str())
+        .cloned()
+        .expect("bob should have unread channel");
+    assert_eq!(bob_ch["count"], 1);
+
+    let alice_unread: serde_json::Value = client
+        .get(format!("{}/api/unread", base))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        alice_unread["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["channel_id"] != ch_id.as_str()),
+        "own message must not be unread"
+    );
+
+    // 标记已读后清零。
+    let resp = client
+        .post(format!("{}/api/reads", base))
+        .bearer_auth(&bob)
+        .json(&serde_json::json!({ "channel_id": ch_id, "ts": i64::MAX }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let unread: serde_json::Value = client
+        .get(format!("{}/api/unread", base))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        unread["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["channel_id"] != ch_id.as_str())
+    );
+
+    // DM 未读。
+    let conv: serde_json::Value = client
+        .post(format!("{}/api/dm/bob", base))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let conv_id = conv["conv_id"].as_str().unwrap().to_string();
+
+    let resp = client
+        .post(format!("{}/api/dm/{}/messages", base, conv_id))
+        .bearer_auth(&alice)
+        .json(&serde_json::json!({
+            "ts": 0,
+            "sender": "alice",
+            "ciphertext": "AQID",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let unread: serde_json::Value = client
+        .get(format!("{}/api/unread", base))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let dm = unread["dms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["conv_id"] == conv_id.as_str())
+        .cloned()
+        .expect("bob should have unread dm");
+    assert_eq!(dm["count"], 1);
+
+    let resp = client
+        .post(format!("{}/api/reads", base))
+        .bearer_auth(&bob)
+        .json(&serde_json::json!({ "conv_id": conv_id, "ts": i64::MAX }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let unread: serde_json::Value = client
+        .get(format!("{}/api/unread", base))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        unread["dms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["conv_id"] != conv_id.as_str())
+    );
+}
+
+/// 登录设备：列表、撤销其他会话、撤销当前会话。
+#[tokio::test]
+async fn sessions_list_and_revoke() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let client = reqwest::Client::new();
+
+    let first = register(&base, "alice").await;
+
+    let login = |device: &'static str| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let v: serde_json::Value = client
+                .post(format!("{}/api/login", base))
+                .json(&serde_json::json!({
+                    "login_id": "alice",
+                    "password": "password1234",
+                    "device_name": device,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            v["session_token"].as_str().unwrap().to_string()
+        }
+    };
+    let second = login("second-device").await;
+
+    let sessions: serde_json::Value = client
+        .get(format!("{}/api/sessions", base))
+        .bearer_auth(&second)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let list = sessions["sessions"].as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list.iter().filter(|s| s["current"] == true).count(), 1);
+    assert!(
+        list.iter()
+            .any(|s| s["device_name"] == "second-device" && s["current"] == true)
+    );
+    let current_id = list.iter().find(|s| s["current"] == true).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 撤销其他设备 → 第一个 token 失效。
+    let resp = client
+        .post(format!("{}/api/sessions/revoke-others", base))
+        .bearer_auth(&second)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let resp = client
+        .get(format!("{}/api/me", base))
+        .bearer_auth(&first)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 撤销当前会话 → 该 token 立即失效。
+    let resp = client
+        .delete(format!("{}/api/sessions/{}", base, current_id))
+        .bearer_auth(&second)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let resp = client
+        .get(format!("{}/api/me", base))
+        .bearer_auth(&second)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+/// op5 移除私密频道成员：目标收到 ChannelRemoved，权威收到 ChannelMemberLeft。
+#[tokio::test]
+async fn remove_channel_member_notifies() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let alice = register(&base, "alice").await;
+    let bob = register(&base, "bob").await;
+    let charlie = register(&base, "charlie").await;
+
+    let ch = create_private_channel(&base, &alice, "kick", "pass1234").await;
+    join_private(&base, &bob, &ch, "pass1234", None).await;
+
+    let mut a = connect_auth(&url, &alice).await;
+    join(&mut a).await;
+    let mut b = connect_auth(&url, &bob).await;
+    join(&mut b).await;
+
+    // 非 op5 不能移除别人。
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/api/channels/{}/members/alice", base, ch))
+        .bearer_auth(&charlie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/api/channels/{}/members/bob", base, ch))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    recv_until(&mut b, |m| {
+        matches!(m, ServerMessage::ChannelRemoved { .. })
+    })
+    .await;
+    let evt = recv_until(&mut a, |m| {
+        matches!(m, ServerMessage::ChannelMemberLeft { .. })
+    })
+    .await;
+    match evt {
+        ServerMessage::ChannelMemberLeft { channel_id, member } => {
+            assert_eq!(channel_id, ch);
+            assert_eq!(member.as_str(), "bob");
+        }
+        _ => unreachable!(),
+    }
+
+    // bob 的频道列表不再包含该私密频道。
+    let chans: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/api/channels", base))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        chans["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["id"] != ch.as_str())
+    );
 }

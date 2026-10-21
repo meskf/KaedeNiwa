@@ -26,6 +26,7 @@ pub fn router(state: AppState) -> Router {
             "/api/members/{login_id}",
             axum::routing::patch(update_member).delete(remove_member),
         )
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }
 
@@ -99,19 +100,25 @@ async fn update_member(
 
     // S-5: 字段长度 + 控制字符 + URL scheme 校验
     if let Some(n) = &req.nickname
-        && (n.chars().count() > 32 || n.trim().is_empty())
+        && (n.chars().count() > 32 || n.trim().is_empty() || n.chars().any(|c| c.is_control()))
     {
-        return Err(ApiError::BadRequest("nickname 1..=32 chars".into()));
+        return Err(ApiError::BadRequest(
+            "nickname 1..=32 chars, no control characters".into(),
+        ));
     }
     if let Some(b) = &req.bio
-        && b.chars().count() > 2048
+        && (b.chars().count() > 2048 || b.chars().any(|c| c.is_control() && c != '\n' && c != '\t'))
     {
-        return Err(ApiError::BadRequest("bio too long (max 2048)".into()));
+        return Err(ApiError::BadRequest(
+            "bio too long or contains control characters".into(),
+        ));
     }
     if let Some(t) = &req.title
-        && t.chars().count() > 64
+        && (t.chars().count() > 64 || t.chars().any(|c| c.is_control()))
     {
-        return Err(ApiError::BadRequest("title too long (max 64)".into()));
+        return Err(ApiError::BadRequest(
+            "title too long or contains control characters".into(),
+        ));
     }
     if let Some(a) = &req.avatar_url {
         if a.chars().count() > 512 {
@@ -139,7 +146,11 @@ async fn update_member(
         }
     }
 
-    // S-8: op 升级限制——不能升到比自己高，也不能降级 op5
+    // S-8: op 变更限制。
+    //
+    // 除了“不能升到比自己高”，还要求操作者**严格高于**目标（改自己除外）。
+    // 否则 op4 可以先把同级 op4 降为 op2，再走删除接口绕过
+    // “op4 不可删除同级账号”的约束。
     if req.op.is_some() {
         let rank = |s: &str| -> u8 {
             match s {
@@ -152,11 +163,13 @@ async fn update_member(
             }
         };
         let new_op_str = req.op.as_deref().unwrap_or("op2");
-        if rank(new_op_str) > rank(&my_op) {
+        let my_rank = rank(&my_op);
+        if rank(new_op_str) > my_rank {
             return Err(ApiError::Unauthorized);
         }
         let target_op = get_op(&state, &target).await?;
-        if target_op == "op5" && my_op != "op5" {
+        let target_rank = rank(&target_op);
+        if target_rank > my_rank || (!is_self && target_rank >= my_rank) {
             return Err(ApiError::Unauthorized);
         }
     }
@@ -216,10 +229,22 @@ async fn update_member(
     q = q.bind(now);
     q = q.bind(&target);
 
-    let affected = q.execute(&state.pool).await?.rows_affected();
+    // members 与 accounts 双写必须一起提交：登录/`/api/me` 读 accounts，
+    // 好友/DM 列表读 members，否则改昵称后两边会长期不一致。
+    let mut tx = state.pool.begin().await?;
+    let affected = q.execute(&mut *tx).await?.rows_affected();
     if affected == 0 {
+        tx.rollback().await?;
         return Err(ApiError::NotFound("member".into()));
     }
+    if let Some(n) = &req.nickname {
+        sqlx::query("UPDATE accounts SET nickname = ? WHERE login_id = ?")
+            .bind(n)
+            .bind(&target)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
 
     // 返回更新后的记录
     let (login_id, nickname, op, bio, title, avatar_url, joined_at): (

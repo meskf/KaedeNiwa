@@ -4,7 +4,9 @@ use crate::i18n::use_i18n;
 use dioxus::prelude::*;
 
 use crate::content::ContentArea;
-use crate::icons::{ IconHelpCircle, IconMail, IconMoon, IconServer, IconSettings, IconSun, IconUserList, IconUsers };
+use crate::icons::{
+    IconHelpCircle, IconMail, IconMoon, IconServer, IconSettings, IconSun, IconUserList, IconUsers,
+};
 
 // native-only window controls（wasm 下不编译，避免 unused_imports 告警）
 #[cfg(not(target_arch = "wasm32"))]
@@ -198,7 +200,7 @@ pub fn MainBody(compact: bool) -> Element {
                     box-shadow: 0 1px 3px rgba(0,0,0,0.04);
                     position: relative;
                 ",
-                if tab == MainTab::Server {
+                if tab == MainTab::Server && !compact {
                     button {
                         title: "{i18n.t(\"member.toggle\")}",
                         onmousedown: move |e| e.stop_propagation(),

@@ -8,7 +8,7 @@ use kaede_client::http::Friend;
 
 use crate::state::AppState;
 
-async fn load_friends_into(mut app: AppState) {
+pub(crate) async fn load_friends_into(mut app: AppState) {
     let room_opt = app.room.read().clone();
     let Some(room) = room_opt else { return };
     let Some(sid) = app.current_server.read().clone() else {
@@ -210,6 +210,7 @@ fn FriendRow(friend: Friend, kind: String) -> Element {
                                                     attachments: h.attachments,
                                                     reply_to: h.reply_to,
                                                     reactions: vec![],
+                                                    mentions: h.mentions,
                                                 })
                                                 .collect();
                                             app.dm_messages.write().insert(cid, ui_msgs);

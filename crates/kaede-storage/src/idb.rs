@@ -167,12 +167,28 @@ impl IndexedDbStore {
         Ok(out)
     }
 
-    // P2-S2-TODO: 大规模数据时可改用 cursor.delete() 减少事务数（当前 N 次事务在浏览器异步执行，性能可接受）
+    /// 同一事务内删除整个 namespace（原子；不会留下半清空状态）。
     pub async fn clear(&self, ns: &str) -> Result<(), StorageError> {
         let keys = self.list_keys(ns).await?;
-        for k in keys {
-            self.delete(ns, &k).await?;
+        if keys.is_empty() {
+            return Ok(());
         }
+        let tx = self
+            .db
+            .transaction(&["kv"], TransactionMode::ReadWrite)
+            .map_err(|e| StorageError::Backend(format!("{:?}", e)))?;
+        let store = tx
+            .store("kv")
+            .map_err(|e| StorageError::Backend(format!("{:?}", e)))?;
+        for k in keys {
+            store
+                .delete(JsValue::from_str(&Self::composite_id(ns, &k)))
+                .await
+                .map_err(|e| StorageError::Backend(format!("{:?}", e)))?;
+        }
+        tx.done()
+            .await
+            .map_err(|e| StorageError::Backend(format!("{:?}", e)))?;
         Ok(())
     }
 }

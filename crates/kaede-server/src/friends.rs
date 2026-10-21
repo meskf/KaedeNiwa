@@ -11,6 +11,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use kaede_protocol::{ServerMessage, UserId};
+
 use crate::db;
 use crate::error::ApiError;
 use crate::http::authenticate;
@@ -24,6 +26,7 @@ pub fn router(state: AppState) -> Router {
             post(send_request).delete(remove_friend),
         )
         .route("/api/friends/{login_id}/accept", post(accept_request))
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }
 
@@ -148,6 +151,7 @@ async fn send_request(
             .bind(now)
             .execute(&state.pool)
             .await?;
+            notify_friends_changed(&state, &[&me, &target]);
             return Ok(StatusCode::OK);
         }
         if s == "accepted" {
@@ -165,6 +169,8 @@ async fn send_request(
     .bind(now)
     .execute(&state.pool)
     .await?;
+
+    notify_friends_changed(&state, &[&me, &target]);
 
     Ok(StatusCode::CREATED)
 }
@@ -211,6 +217,8 @@ async fn accept_request(
     .execute(&state.pool)
     .await?;
 
+    notify_friends_changed(&state, &[&me, &from]);
+
     Ok(StatusCode::OK)
 }
 
@@ -233,7 +241,16 @@ async fn remove_friend(
         .execute(&state.pool)
         .await?;
 
+    notify_friends_changed(&state, &[&me, &target]);
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 通知在线的相关用户重新拉取好友列表；离线用户忽略（DB 已持久化）。
+fn notify_friends_changed(state: &AppState, uids: &[&String]) {
+    for uid in uids {
+        state.send_to(&UserId::new(uid.as_str()), ServerMessage::FriendsChanged);
+    }
 }
 
 async fn get_nickname(state: &AppState, login_id: &str) -> String {

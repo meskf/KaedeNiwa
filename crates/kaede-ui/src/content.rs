@@ -100,8 +100,10 @@ fn MessageList() -> Element {
 
     use_effect(move || {
         let _ = rows.read().len();
+        // 只有用户本来就在底部时才跟随新消息；加载更早历史时不要把人弹回底部。
         let _ = dioxus::document::eval(
-            "setTimeout(function(){var el=document.getElementById('msg-list');if(el)el.scrollTop=el.scrollHeight;},0);",
+            "setTimeout(function(){var el=document.getElementById('msg-list');\
+             if(el && el.scrollHeight-el.scrollTop-el.clientHeight<120)el.scrollTop=el.scrollHeight;},0);",
         );
     });
 
@@ -151,13 +153,48 @@ fn MessageList() -> Element {
                             attachments: h.attachments,
                             reply_to: h.reply_to,
                             reactions: vec![],
+                            mentions: h.mentions,
                         })
                         .collect();
-                    app.messages.write().insert(key, ui_msgs);
+                    // 合并而不是替换：加载期间到达的实时消息不能被历史覆盖。
+                    let mut map = app.messages.write();
+                    let list = map.entry(key).or_default();
+                    for h in ui_msgs {
+                        if !list.iter().any(|m| m.ts == h.ts && m.author == h.author) {
+                            list.push(h);
+                        }
+                    }
+                    list.sort_by_key(|m| m.ts);
                 }
                 Err(e) => tracing::warn!("load_history: {}", e),
             }
         });
+    });
+
+    // 已读：查看中的频道收到/加载新消息时上报 last_read 并清本地未读。
+    use_effect(move || {
+        let sid = app.current_server.read().clone();
+        let ch = ui.selected_channel.read().clone();
+        let (Some(sid), Some(ch)) = (sid, ch) else {
+            return;
+        };
+        let max_ts = app
+            .messages
+            .read()
+            .get(&AppState::channel_key(&sid, &ch))
+            .and_then(|list| list.iter().map(|m| m.ts).max());
+        let Some(ts) = max_ts else {
+            return;
+        };
+        app.clear_unread(&sid, &ch);
+        if let Some(room) = app.room.read().clone() {
+            let ch = ch.clone();
+            spawn(async move {
+                if let Err(e) = room.mark_channel_read(&ch, ts).await {
+                    tracing::debug!("mark_channel_read: {}", e);
+                }
+            });
+        }
     });
 
     rsx! {
@@ -192,6 +229,7 @@ fn MessageList() -> Element {
                                     attachments: h.attachments,
                                     reply_to: h.reply_to,
                                     reactions: vec![],
+                                    mentions: h.mentions,
                                 }).collect();
                                 let mut map = app.messages.write();
                                 let list = map.entry(key).or_default();
@@ -292,15 +330,26 @@ fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
                     span { class: "msg-author", "{msg.author}" }
                     span { class: "msg-time", "{msg.time}" }
                 }
-                if let Some(r) = &msg.reply_to {
-                    div {
-                        class: "msg-reply",
-                        span { class: "msg-reply-author", "{r.author}" }
-                        span { class: "msg-reply-preview", " {r.preview}" }
+            }
+            if let Some(r) = &msg.reply_to {
+                div {
+                    class: "msg-reply",
+                    span { class: "msg-reply-author", "{r.author}" }
+                    span { class: "msg-reply-preview", " {r.preview}" }
+                }
+            }
+            div { class: "msg-body",
+                for seg in split_mentions(&msg.text, &msg.mentions) {
+                    if seg.1 {
+                        span {
+                            style: "padding: 0 2px; border-radius: 3px; background: rgba(88,101,242,0.20); font-weight: 600;",
+                            "{seg.0}"
+                        }
+                    } else {
+                        span { "{seg.0}" }
                     }
                 }
             }
-            div { class: "msg-body", "{msg.text}" }
             if !msg.attachments.is_empty() {
                 div {
                     class: "msg-attachments",
@@ -553,16 +602,17 @@ fn send_attachments(
                 }
             }
         }
+        ui.upload_progress.set(None);
         if atts.is_empty() {
             return;
         }
-        if let Err(e) = room.send_text_with_attachments(&ch, "", &atts).await {
+        // 本地乐观消息与 payload 必须使用同一个 ts，否则 reaction 的
+        // target_ts 永远匹配不上。
+        let ts = crate::observer::now_ms();
+        if let Err(e) = room.send_text_with_attachments_at(&ch, "", &atts, ts).await {
             ui.toast.set(Some((format!("发送附件失败: {}", e), true)));
             return;
         }
-
-        // 服务器不会把消息回声给发送者 → 本地插入。
-        let ts = crate::observer::now_ms();
         let acc = ui.common_account.read();
         let author = if acc.login_id.is_empty() {
             "me".to_string()
@@ -587,6 +637,7 @@ fn send_attachments(
             attachments: atts,
             reply_to: None,
             reactions: Vec::new(),
+            mentions: Vec::new(),
         };
         app.messages
             .write()
@@ -603,6 +654,7 @@ fn send_message(mut ui: UiState, mut app: AppState, text: &str) {
     let Some(sid) = app.current_server.read().clone() else {
         return;
     };
+    let mentions = extract_mentions(text, &known_mentions(&app, &sid));
     let ts = crate::observer::now_ms();
     let acc = ui.common_account.read();
     let author = if acc.login_id.is_empty() {
@@ -637,6 +689,7 @@ fn send_message(mut ui: UiState, mut app: AppState, text: &str) {
         attachments: vec![],
         reply_to: reply_ref.clone(),
         reactions: vec![],
+        mentions: mentions.clone(),
     };
     let key = AppState::channel_key(&sid, &ch);
     app.messages.write().entry(key).or_default().push(msg);
@@ -646,11 +699,18 @@ fn send_message(mut ui: UiState, mut app: AppState, text: &str) {
     if let Some(room) = app.room.read().clone() {
         let ch = ch.clone();
         let t = text.to_string();
+        let mentions_for_send = mentions;
         let mut ui_for_err = ui;
         spawn(async move {
             let result = match reply_ref {
-                Some(r) => room.send_text_with_reply(&ch, &t, r).await,
-                None => room.send_text_to(&ch, &t).await,
+                Some(r) => {
+                    room.send_text_with_reply_mentions_at(&ch, &t, r, &mentions_for_send, ts)
+                        .await
+                }
+                None => {
+                    room.send_text_with_mentions_at(&ch, &t, &mentions_for_send, ts)
+                        .await
+                }
             };
             if let Err(e) = result {
                 tracing::warn!("send failed: {}", e);
@@ -666,6 +726,97 @@ fn send_message(mut ui: UiState, mut app: AppState, text: &str) {
 // ============================================================
 // EmojiPicker（全局弹层）
 // ============================================================
+
+/// 当前 server 中可被 @ 的 login_id：成员 + 已接受好友 + 自己。
+pub(crate) fn known_mentions(app: &AppState, server_id: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    if let Some(list) = app.members.read().get(server_id) {
+        out.extend(list.iter().map(|m| m.login_id.clone()));
+    }
+    if let Some(list) = app.friends.read().get(server_id) {
+        out.extend(
+            list.iter()
+                .filter(|f| f.direction == "friend")
+                .map(|f| f.login_id.clone()),
+        );
+    }
+    if let Some(room) = app.room.read().as_ref() {
+        out.insert(room.uid().as_str().to_string());
+    }
+    out
+}
+
+/// 从文本中提取 `@login_id`，只保留已知用户。
+pub(crate) fn extract_mentions(
+    text: &str,
+    known: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cursor = 0;
+    while let Some(pos) = text[cursor..].find('@') {
+        let start = cursor + pos + 1;
+        let mut end = start;
+        for (idx, ch) in text[start..].char_indices() {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                end = start + idx + ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if end > start {
+            let token = &text[start..end];
+            if known.contains(token) && !out.iter().any(|m| m == token) {
+                out.push(token.to_string());
+            }
+        }
+        cursor = end.max(start);
+        if cursor >= text.len() {
+            break;
+        }
+    }
+    out
+}
+
+/// 把文本切成普通片段与 @ 片段，供消息正文高亮。
+pub(crate) fn split_mentions(text: &str, mentions: &[String]) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    let mut plain = String::new();
+    while cursor < text.len() {
+        let Some(pos) = text[cursor..].find('@') else {
+            plain.push_str(&text[cursor..]);
+            break;
+        };
+        let at = cursor + pos;
+        plain.push_str(&text[cursor..at]);
+        let start = at + 1;
+        let mut end = start;
+        for (idx, ch) in text[start..].char_indices() {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                end = start + idx + ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if end > start {
+            let token = &text[start..end];
+            if mentions.iter().any(|m| m == token) {
+                if !plain.is_empty() {
+                    out.push((std::mem::take(&mut plain), false));
+                }
+                out.push((format!("@{token}"), true));
+                cursor = end;
+                continue;
+            }
+        }
+        plain.push('@');
+        cursor = at + 1;
+    }
+    if !plain.is_empty() {
+        out.push((plain, false));
+    }
+    out
+}
 
 const EMOJIS: &[&str] = &[
     "👍", "❤️", "😂", "🎉", "😮", "😢", "🔥", "👀", "✅", "❌", "🚀", "💯",

@@ -80,7 +80,12 @@ fn MobileVoiceBar() -> Element {
 
 #[component]
 fn MobileTopBar(detail: Option<String>, on_back: EventHandler<MouseEvent>) -> Element {
-    let title = if detail.is_some() { "会话".to_string() } else { "KaedeNiwa".to_string() };
+    let mut ui = use_context::<UiState>();
+    let title = if detail.is_some() {
+        "会话".to_string()
+    } else {
+        "KaedeNiwa".to_string()
+    };
 
     rsx! {
         div {
@@ -100,7 +105,15 @@ fn MobileTopBar(detail: Option<String>, on_back: EventHandler<MouseEvent>) -> El
             } else {
                 span { style: "display: inline-block; width: 44px; height: 44px;", "" }
             }
-            span { style: "font-weight: 600; font-size: 17px;", "{title}" }
+            span { style: "font-weight: 600; font-size: 17px; flex: 1;", "{title}" }
+            if detail.is_none() {
+                button {
+                    onclick: move |_| ui.search_open.set(true),
+                    style: "width: 44px; height: 44px; border-radius: 10px; background: transparent; color: var(--fg); font-size: 18px;",
+                    title: "搜索本地消息",
+                    "🔍"
+                }
+            }
         }
     }
 }
@@ -121,7 +134,6 @@ fn MobileTabBar() -> Element {
             TabButton { target: MainTab::Server,  current: tab, label: "群组", icon: "users" }
             TabButton { target: MainTab::Dm,      current: tab, label: "私聊", icon: "mail" }
             TabButton { target: MainTab::Friends, current: tab, label: "好友", icon: "userlist" }
-            TabButton { target: MainTab::Friends, current: tab, label: "个人", icon: "settings" }
         }
     }
 }
@@ -130,7 +142,11 @@ fn MobileTabBar() -> Element {
 fn TabButton(target: MainTab, current: MainTab, label: String, icon: String) -> Element {
     let mut ui = use_context::<UiState>();
     let active = target == current;
-    let color = if active { "var(--accent-bg)" } else { "var(--fg-muted)" };
+    let color = if active {
+        "var(--accent-bg)"
+    } else {
+        "var(--fg-muted)"
+    };
 
     rsx! {
         button {

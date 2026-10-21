@@ -17,6 +17,8 @@ pub enum ApiError {
     NotFound(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("internal error: {0}")]
     Internal(String),
     /// 端点曾经存在但已废弃（410 Gone）。用于 e2ee-key 等已下线端点。
@@ -47,6 +49,7 @@ impl IntoResponse for ApiError {
             ),
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, "not_found", m.clone()),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m.clone()),
+            ApiError::Forbidden(m) => (StatusCode::FORBIDDEN, "forbidden", m.clone()),
             ApiError::Internal(m) => {
                 tracing::error!("internal: {}", m);
                 (

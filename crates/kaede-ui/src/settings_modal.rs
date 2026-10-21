@@ -11,6 +11,30 @@ pub fn SettingsModal() -> Element {
     let mut ui = use_context::<UiState>();
     let app = use_context::<AppState>();
     let mut i18n = use_i18n();
+    let mut sessions = use_signal(Vec::<kaede_client::http::SessionInfo>::new);
+    let mut sessions_loading = use_signal(|| false);
+    let mut sessions_error = use_signal(|| Option::<String>::None);
+
+    // 打开设置时拉取登录设备（放在 early return 之前，保证 hook 顺序稳定）。
+    use_effect(move || {
+        if !*ui.settings_open.read() {
+            return;
+        }
+        let room_opt = app.room.read().clone();
+        sessions_loading.set(true);
+        sessions_error.set(None);
+        spawn(async move {
+            let Some(room) = room_opt else {
+                sessions_loading.set(false);
+                return;
+            };
+            match room.list_sessions().await {
+                Ok(list) => sessions.set(list),
+                Err(e) => sessions_error.set(Some(e.to_string())),
+            }
+            sessions_loading.set(false);
+        });
+    });
 
     if !*ui.settings_open.read() {
         return rsx! {};
@@ -84,6 +108,103 @@ pub fn SettingsModal() -> Element {
                                         span { "请勿打扰" }
                                     }
                                 }
+                            }
+                        }
+                    }
+                    div { class: "form-field",
+                        label { class: "form-label", "登录设备" }
+                        div { style: "font-size: 12px; color: var(--fg-faint); margin-bottom: 8px;",
+                            "当前架构为单设备在线：新登录会顶替旧连接。撤销后该设备的 token 立即失效。"
+                        }
+                        if *sessions_loading.read() {
+                            div { style: "font-size: 13px; color: var(--fg-faint);", "加载中…" }
+                        } else if let Some(e) = sessions_error.read().clone() {
+                            div { style: "font-size: 13px; color: var(--negative);", "{e}" }
+                        } else {
+                            div { style: "display: flex; flex-direction: column; gap: 4px;",
+                                for s in sessions.read().iter() {
+                                    {
+                                        let sid = s.id.clone();
+                                        let device = if s.device_name.is_empty() {
+                                            "未知设备".to_string()
+                                        } else {
+                                            s.device_name.clone()
+                                        };
+                                        let last = format!(
+                                            "{} {}",
+                                            crate::observer::day_label(s.last_seen_at),
+                                            crate::observer::format_hhmm(s.last_seen_at)
+                                        );
+                                        let is_current = s.current;
+                                        rsx! {
+                                            div {
+                                                key: "{s.id}",
+                                                style: "display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; background: rgba(0,0,0,0.03);",
+                                                div {
+                                                    style: "flex: 1; min-width: 0;",
+                                                    div {
+                                                        style: "font-size: 13px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                                                        "{device}"
+                                                    }
+                                                    div {
+                                                        style: "font-size: 11px; color: var(--fg-faint); margin-top: 2px;",
+                                                        "最近活跃 {last}"
+                                                    }
+                                                }
+                                                if is_current {
+                                                    span {
+                                                        style: "font-size: 11px; color: var(--fg-muted); padding: 2px 6px; border-radius: 4px; background: var(--active-bg);",
+                                                        "当前设备"
+                                                    }
+                                                } else {
+                                                    button {
+                                                        class: "btn-secondary",
+                                                        style: "padding: 4px 10px; font-size: 12px;",
+                                                        onclick: move |_| {
+                                                            let sid = sid.clone();
+                                                            let mut sessions = sessions;
+                                                            let mut ui2 = ui;
+                                                            spawn(async move {
+                                                                let Some(room) = app.room.read().clone() else { return };
+                                                                match room.revoke_session(&sid).await {
+                                                                    Ok(()) => {
+                                                                        sessions.write().retain(|x| x.id != sid);
+                                                                        ui2.toast.set(Some(("已撤销设备".into(), false)));
+                                                                    }
+                                                                    Err(e) => {
+                                                                        ui2.toast.set(Some((format!("撤销失败: {}", e), true)));
+                                                                    }
+                                                                }
+                                                            });
+                                                        },
+                                                        "撤销"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            button {
+                                class: "btn-secondary",
+                                style: "margin-top: 8px;",
+                                onclick: move |_| {
+                                    let mut sessions = sessions;
+                                    let mut ui2 = ui;
+                                    spawn(async move {
+                                        let Some(room) = app.room.read().clone() else { return };
+                                        match room.revoke_other_sessions().await {
+                                            Ok(()) => {
+                                                sessions.write().retain(|x| x.current);
+                                                ui2.toast.set(Some(("已撤销其他设备".into(), false)));
+                                            }
+                                            Err(e) => {
+                                                ui2.toast.set(Some((format!("撤销失败: {}", e), true)));
+                                            }
+                                        }
+                                    });
+                                },
+                                "撤销其他所有设备"
                             }
                         }
                     }

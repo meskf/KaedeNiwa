@@ -20,6 +20,9 @@ pub struct MessagePayload {
     pub a: Vec<Attachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r: Option<ReplyRef>,
+    /// @ 提及的 login_id 列表（E2EE 内部字段，服务端不可见）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub m: Vec<String>,
 }
 
 impl MessagePayload {
@@ -37,6 +40,7 @@ impl MessagePayload {
             ts: crate::room::now_ms(), // C18: 自动打上当前发送时间
             a: attachments,
             r: reply_to,
+            m: Vec::new(),
         }
     }
 

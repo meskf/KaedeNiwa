@@ -278,10 +278,16 @@ mod wasm_ws {
             });
             ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
 
-            // 等 open / error
+            // 等 open / error / 10s 超时（浏览器对不可达主机可能长时间不回调）
             let wait = futures_lite::future::or(
-                async { open_rx.recv().await.ok().map(|_| Ok::<(), String>(())) },
-                async { err_rx.recv().await.ok().map(Err::<(), String>) },
+                futures_lite::future::or(
+                    async { open_rx.recv().await.ok().map(|_| Ok::<(), String>(())) },
+                    async { err_rx.recv().await.ok().map(Err::<(), String>) },
+                ),
+                async {
+                    gloo_timers::future::TimeoutFuture::new(10_000).await;
+                    Some(Err::<(), String>("ws open timeout (10s)".into()))
+                },
             )
             .await;
 

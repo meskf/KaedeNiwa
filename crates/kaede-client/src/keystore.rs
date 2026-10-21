@@ -236,6 +236,7 @@ pub mod fallback {
 /// 返回当前平台的 snapshot cipher。
 ///
 /// - Windows → DPAPI
+/// - Web 且 WebCrypto DEK 已就绪 → WebCrypto DEK（与读取端一致）
 /// - 其它 → SHA256 派生 AES-GCM（fallback）
 pub fn device_cipher(uid: &str, server_url: &str) -> Box<dyn SnapshotCipher> {
     #[cfg(windows)]
@@ -243,9 +244,43 @@ pub fn device_cipher(uid: &str, server_url: &str) -> Box<dyn SnapshotCipher> {
         let _ = (uid, server_url);
         Box::new(DpapiCipher::new())
     }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), target_arch = "wasm32"))]
+    {
+        if let Some(dek) = crate::keystore_web::cached_dek() {
+            return Box::new(kaede_mls::AesGcmCipher::from_bytes(dek));
+        }
+        Box::new(fallback::cipher(uid, server_url))
+    }
+    #[cfg(all(not(windows), not(target_arch = "wasm32")))]
     {
         Box::new(fallback::cipher(uid, server_url))
+    }
+}
+
+/// Web 端迁移期 cipher：优先用 DEK 解密，失败后回退到 SHA256 fallback。
+///
+/// 历史 snapshot 是用 fallback 写入的，而当前写入已经切到 DEK；读取时
+/// 允许两者都试一次，避免升级后一次性丢失旧身份。加密永远走 primary。
+#[cfg(all(not(windows), target_arch = "wasm32"))]
+struct WebDekWithFallback {
+    primary: kaede_mls::AesGcmCipher,
+    secondary: kaede_mls::AesGcmCipher,
+}
+
+#[cfg(all(not(windows), target_arch = "wasm32"))]
+impl SnapshotCipher for WebDekWithFallback {
+    fn alg_id(&self) -> u8 {
+        kaede_mls::ALG_AES_GCM
+    }
+
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, kaede_mls::MlsError> {
+        self.primary.encrypt(plaintext)
+    }
+
+    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, kaede_mls::MlsError> {
+        self.primary
+            .decrypt(ciphertext)
+            .or_else(|_| self.secondary.decrypt(ciphertext))
     }
 }
 
@@ -272,7 +307,10 @@ pub fn device_cipher_for_snapshot(
         #[cfg(target_arch = "wasm32")]
         kaede_mls::ALG_AES_GCM => {
             if let Some(dek) = crate::keystore_web::cached_dek() {
-                Box::new(kaede_mls::AesGcmCipher::from_bytes(dek))
+                Box::new(WebDekWithFallback {
+                    primary: kaede_mls::AesGcmCipher::from_bytes(dek),
+                    secondary: fallback::cipher(uid, server_url),
+                })
             } else {
                 Box::new(fallback::cipher(uid, server_url))
             }

@@ -1,6 +1,7 @@
 //! 共享状态：数据库池 + 房间成员表 + per-uid 限流。
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -104,15 +105,19 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub cfg: Config,
     pub room: Arc<Mutex<Room>>,
-    pub rate_buckets: Arc<Mutex<HashMap<UserId, RateBucket>>>,
+    /// 限流桶：Key = `"{uid}:{scope}"`，见 `check_rate_scoped`。
+    pub rate_buckets: Arc<Mutex<HashMap<String, RateBucket>>>,
     /// P0-1：连接 session id 生成器。
     pub next_session_id: Arc<std::sync::atomic::AtomicU64>,
     /// P1-10：WS 连接并发上限。
     pub ws_semaphore: Arc<tokio::sync::Semaphore>,
     /// P0-2：login 并发上限（防 Argon2 内存 DoS）。
     pub login_semaphore: Arc<tokio::sync::Semaphore>,
-    /// P0-2：login 失败计数 uid -> (次数, 首次失败时间)。
-    pub login_failures: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
+    /// P0-2：login 失败计数 `(uid, 来源 IP)` -> (次数, 首次失败时间)。
+    ///
+    /// 按 IP 隔离可避免攻击者用 5 次错误密码把任意已知账号锁死 15 分钟。
+    #[allow(clippy::type_complexity)]
+    pub login_failures: Arc<Mutex<HashMap<(String, IpAddr), (u32, Instant)>>>,
     /// P0-2：每个 LiveKit room 的媒体会话状态。
     ///
     /// - 同一媒体会话内所有参与者拿同一个 seed；
@@ -128,11 +133,15 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(pool: SqlitePool, cfg: Config) -> Self {
-        let rate_buckets = Arc::new(Mutex::new(HashMap::<UserId, RateBucket>::new()));
+        let rate_buckets = Arc::new(Mutex::new(HashMap::<String, RateBucket>::new()));
         // P1-6：后台清理任务，防恶意注册 uid 撑爆 rate_buckets。
         let buckets_clone = rate_buckets.clone();
         let kp_budget = Arc::new(Mutex::new(HashMap::<String, (u32, Instant)>::new()));
         let kp_budget_clone = kp_budget.clone();
+        let login_failures = Arc::new(Mutex::new(
+            HashMap::<(String, IpAddr), (u32, Instant)>::new(),
+        ));
+        let login_failures_clone = login_failures.clone();
         let room_media_seeds = Arc::new(Mutex::new(HashMap::<String, RoomMedia>::new()));
         let room_media_clone = room_media_seeds.clone();
         let pool_clone = pool.clone();
@@ -148,6 +157,10 @@ impl AppState {
                 {
                     let mut m = kp_budget_clone.lock().unwrap();
                     m.retain(|_, (_, start)| start.elapsed() < Duration::from_secs(600));
+                }
+                {
+                    let mut m = login_failures_clone.lock().unwrap();
+                    m.retain(|_, (_, first)| first.elapsed() < Duration::from_secs(900));
                 }
                 {
                     // 先剔除超过 TTL 未续期的参与者（崩溃/关页不会调用 /leave），
@@ -168,7 +181,7 @@ impl AppState {
             next_session_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ws_semaphore: Arc::new(tokio::sync::Semaphore::new(5000)),
             login_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
-            login_failures: Arc::new(Mutex::new(HashMap::new())),
+            login_failures,
             room_media_seeds,
             kp_fetch_budget: kp_budget,
         }
@@ -277,19 +290,30 @@ impl AppState {
     /// 桶与 uid 绑定：同一 uid 断线重连后速率状态不重置。
     /// 空闲超过 `RATE_BUCKET_TTL` 的桶下次访问时惰性重置（防止 map 无限增长）。
     pub fn check_rate(&self, uid: &UserId, rate: f64, capacity: f64) -> bool {
+        self.check_rate_scoped(uid, "default", rate, capacity)
+    }
+
+    /// per-uid + per-scope 限流。
+    ///
+    /// 不同端点（发言 / 拉 KP / 语音 token / 上传）的速率和容量差异很大，
+    /// 共用一个桶会让聊天把 KeyPackage 拉取额度挤掉。scope 用于隔离它们。
+    pub fn check_rate_scoped(&self, uid: &UserId, scope: &str, rate: f64, capacity: f64) -> bool {
+        let key = format!("{}:{}", uid.as_str(), scope);
         let mut map = self.rate_buckets.lock().unwrap();
-        let bucket = map
-            .entry(uid.clone())
-            .or_insert_with(|| RateBucket::new(capacity));
+        let bucket = map.entry(key).or_insert_with(|| RateBucket::new(capacity));
         if bucket.last.elapsed() > RATE_BUCKET_TTL {
             *bucket = RateBucket::new(capacity);
         }
         bucket.try_consume(1.0, rate, capacity)
     }
 
-    /// 主动清除某个 uid 的限流桶（如踢人时）。
+    /// 主动清除某个 uid 的所有限流桶（如踢人时）。
     pub fn clear_rate(&self, uid: &UserId) {
-        self.rate_buckets.lock().unwrap().remove(uid);
+        let prefix = format!("{}:", uid.as_str());
+        self.rate_buckets
+            .lock()
+            .unwrap()
+            .retain(|k, _| !k.starts_with(&prefix));
     }
 
     /// 广播给除 `sender` 外的所有成员。

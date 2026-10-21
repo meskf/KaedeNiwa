@@ -29,9 +29,18 @@ pub(crate) async fn load_messages(mut app: AppState, conv_id: String) {
                     attachments: h.attachments,
                     reply_to: h.reply_to,
                     reactions: vec![],
+                    mentions: h.mentions,
                 })
                 .collect();
-            app.dm_messages.write().insert(conv_id, ui_msgs);
+            // 合并而不是替换：避免丢掉加载期间收到的实时 DM。
+            let mut map = app.dm_messages.write();
+            let list = map.entry(conv_id).or_default();
+            for h in ui_msgs {
+                if !list.iter().any(|m| m.ts == h.ts && m.author == h.author) {
+                    list.push(h);
+                }
+            }
+            list.sort_by_key(|m| m.ts);
         }
         Err(e) => tracing::warn!("dm_load_history: {}", e),
     }
@@ -68,6 +77,7 @@ async fn load_older_messages(mut app: AppState, conv_id: String) {
                     attachments: h.attachments,
                     reply_to: h.reply_to,
                     reactions: vec![],
+                    mentions: h.mentions,
                 })
                 .collect();
             let mut map = app.dm_messages.write();
@@ -82,7 +92,7 @@ async fn load_older_messages(mut app: AppState, conv_id: String) {
     }
 }
 
-async fn load_conversations(mut app: AppState) {
+pub(crate) async fn load_conversations(mut app: AppState) {
     let room_opt = app.room.read().clone();
     let Some(room) = room_opt else { return };
     let Some(sid) = app.current_server.read().clone() else {
@@ -107,6 +117,32 @@ pub fn DmView() -> Element {
         .as_ref()
         .and_then(|cid| app.dm_messages.read().get(cid).cloned())
         .unwrap_or_default();
+
+    // 已读：查看中的 DM 收到/加载新消息时上报 last_read 并清本地未读。
+    use_effect(move || {
+        let sid = app.current_server.read().clone();
+        let conv = ui.selected_dm_conv.read().clone();
+        let (Some(sid), Some(conv)) = (sid, conv) else {
+            return;
+        };
+        let max_ts = app
+            .dm_messages
+            .read()
+            .get(&conv)
+            .and_then(|list| list.iter().map(|m| m.ts).max());
+        let Some(ts) = max_ts else {
+            return;
+        };
+        app.clear_unread(&sid, &conv);
+        if let Some(room) = app.room.read().clone() {
+            let conv = conv.clone();
+            spawn(async move {
+                if let Err(e) = room.mark_dm_read(&conv, ts).await {
+                    tracing::debug!("mark_dm_read: {}", e);
+                }
+            });
+        }
+    });
 
     let header: String = selected
         .as_ref()
@@ -190,7 +226,16 @@ pub fn DmView() -> Element {
                             }
                             div {
                                 style: "font-size: 14px; color: var(--fg); margin-top: 2px; white-space: pre-wrap; word-wrap: break-word;",
-                                "{m.text}"
+                                for seg in crate::content::split_mentions(&m.text, &m.mentions) {
+                                    if seg.1 {
+                                        span {
+                                            style: "padding: 0 2px; border-radius: 3px; background: rgba(88,101,242,0.20); font-weight: 600;",
+                                            "{seg.0}"
+                                        }
+                                    } else {
+                                        span { "{seg.0}" }
+                                    }
+                                }
                             }
                             // M57: DM 附件渲染（复用 content.rs 的 URL 白名单）
                             if !m.attachments.is_empty() {
@@ -256,12 +301,25 @@ pub fn DmView() -> Element {
                             move |_| {
                                 let text = input.read().clone();
                                 if text.is_empty() { return; }
+                                let mentions = app
+                                    .current_server
+                                    .read()
+                                    .clone()
+                                    .map(|sid| {
+                                        crate::content::extract_mentions(
+                                            &text,
+                                            &crate::content::known_mentions(&app, &sid),
+                                        )
+                                    })
+                                    .unwrap_or_default();
                                 let cid2 = cid.clone();
                                 let mut ui_for_err = ui;
                                 spawn(async move {
                                     let room_opt = app.room.read().clone();
                                     let Some(room) = room_opt else { return };
-                                    let result = room.send_dm(&cid2, &text).await;
+                                    let result = room
+                                        .send_dm_with_attachments_mentions(&cid2, &text, &[], &mentions)
+                                        .await;
                                     if let Err(e) = &result {
                                         tracing::warn!("send_dm: {}", e);
                                         ui_for_err
@@ -304,6 +362,7 @@ fn send_dm_attachments(
                 }
             }
         }
+        ui.upload_progress.set(None);
         if atts.is_empty() {
             return;
         }
@@ -320,6 +379,16 @@ fn ConvItem(conv: DmConversation, selected: bool) -> Element {
     let cnick = conv.peer_nickname.clone();
     let cpeer = conv.peer_login_id.clone();
     let cid = conv.conv_id.clone();
+    let (unread_count, mention_count) = {
+        let sid = app.current_server.read().clone();
+        sid.and_then(|sid| {
+            app.unread
+                .read()
+                .get(&AppState::channel_key(&sid, &cid))
+                .map(|u| (u.count, u.mentions))
+        })
+        .unwrap_or((0, 0))
+    };
 
     rsx! {
         div {
@@ -336,8 +405,22 @@ fn ConvItem(conv: DmConversation, selected: bool) -> Element {
                 });
             },
             div {
-                style: "font-size: 13px; font-weight: 500; color: var(--fg);",
-                "{cnick}"
+                style: "display: flex; align-items: center; gap: 6px;",
+                div {
+                    style: "flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                    "{cnick}"
+                }
+                if unread_count > 0 {
+                    span {
+                        title: if mention_count > 0 { "@ 提及" } else { "未读消息" },
+                        style: if mention_count > 0 {
+                            "flex-shrink: 0; min-width: 18px; text-align: center; padding: 1px 5px; border-radius: 9px; background: var(--negative); color: #fff; font-size: 10px; font-weight: 700;"
+                        } else {
+                            "flex-shrink: 0; min-width: 18px; text-align: center; padding: 1px 5px; border-radius: 9px; background: var(--active-bg); color: var(--fg); font-size: 10px; font-weight: 600;"
+                        },
+                        "{unread_count}"
+                    }
+                }
             }
             div {
                 style: "font-size: 11px; color: var(--fg-faint);",

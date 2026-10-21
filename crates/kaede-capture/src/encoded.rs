@@ -41,6 +41,33 @@ pub enum VideoCodec {
     AV1,
 }
 
+/// 主显示器分辨率（None 配置时用于编码器档位选择/SDP 通告）。
+///
+/// Windows 上读取系统指标；其它平台回退 1920×1080。
+pub fn primary_display_size() -> (u32, u32) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+        };
+        // SAFETY: 两个调用都是无副作用的只读系统指标查询。
+        let (w, h) = unsafe {
+            (
+                GetSystemMetrics(SM_CXSCREEN as i32),
+                GetSystemMetrics(SM_CYSCREEN as i32),
+            )
+        };
+        if w > 0 && h > 0 {
+            return (w as u32, h as u32);
+        }
+        (1920, 1080)
+    }
+    #[cfg(not(windows))]
+    {
+        (1920, 1080)
+    }
+}
+
 impl VideoCodec {
     /// 根据分辨率和帧率推荐编码格式。
     ///
@@ -280,8 +307,6 @@ fn build_gpu_pipeline(config: &VideoConfig, actual_codec: VideoCodec) -> Option<
         }
     };
 
-    let w = config.width.unwrap_or(1920);
-    let h = config.height.unwrap_or(1080);
     let fps = config.fps;
 
     let enc_params = nvenc_params(enc_elem, actual_codec, config.bitrate_kbps, fps);
@@ -289,19 +314,26 @@ fn build_gpu_pipeline(config: &VideoConfig, actual_codec: VideoCodec) -> Option<
     let out_caps = actual_codec.output_capsfilter();
 
     // 关键：caps= 后必须写 memory:D3D11Memory，告诉 d3d11convert 输出 GPU 纹理
-    // 括号不是空格，gst::parse::launch 不会把整段切成元素名
-    let gpu_caps = format!(
-        "capsfilter caps=video/x-raw(memory:D3D11Memory),format=NV12,width={w},height={h},framerate={fps}/1"
-    );
+    // 括号不是空格，gst::parse::launch 不会把整段切成元素名。
+    // 未显式配置分辨率时**不要**写 width/height，让采集保持原生分辨率。
+    let gpu_caps = match (config.width, config.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => format!(
+            "capsfilter caps=video/x-raw(memory:D3D11Memory),format=NV12,width={w},height={h},framerate={fps}/1"
+        ),
+        _ => {
+            format!("capsfilter caps=video/x-raw(memory:D3D11Memory),format=NV12,framerate={fps}/1")
+        }
+    };
 
     Some(format!(
-        "d3d11screencapturesrc show-cursor={cursor} ! \
+        "d3d11screencapturesrc monitor-index={monitor} show-cursor={cursor} ! \
          d3d11convert ! \
          {gpu_caps} ! \
          {enc_params} ! \
          {parser} ! \
          {out_caps} ! \
          appsink name=sink sync=false max-buffers=4 drop=true emit-signals=false",
+        monitor = config.display_index,
         cursor = config.show_cursor,
         gpu_caps = gpu_caps,
         enc_params = enc_params,
@@ -312,8 +344,9 @@ fn build_gpu_pipeline(config: &VideoConfig, actual_codec: VideoCodec) -> Option<
 
 /// 构建 CPU 路径管道（现有逻辑，作为降级方案）。
 fn build_cpu_pipeline(config: &VideoConfig, actual_codec: VideoCodec) -> String {
-    let w = config.width.unwrap_or(1920);
-    let h = config.height.unwrap_or(1080);
+    let (dw, dh) = primary_display_size();
+    let w = config.width.unwrap_or(dw);
+    let h = config.height.unwrap_or(dh);
     let fps = config.fps;
 
     let (enc_params, _) = config.encoder.resolve(w, h, fps, config.bitrate_kbps);
@@ -328,7 +361,7 @@ fn build_cpu_pipeline(config: &VideoConfig, actual_codec: VideoCodec) -> String 
     };
 
     format!(
-        "d3d11screencapturesrc show-cursor={cursor} ! \
+        "d3d11screencapturesrc monitor-index={monitor} show-cursor={cursor} ! \
          d3d11download ! \
          videoconvert ! \
          {scale_segment}\
@@ -338,6 +371,7 @@ fn build_cpu_pipeline(config: &VideoConfig, actual_codec: VideoCodec) -> String 
          {out_caps} ! \
          appsink name=sink sync=false max-buffers=4 drop=true emit-signals=false",
         cursor = config.show_cursor,
+        monitor = config.display_index,
         scale_segment = scale_segment,
         enc_params = enc_params,
         parser = parser,
@@ -349,8 +383,9 @@ impl EncodedVideoStream {
     pub fn start(config: VideoConfig) -> Result<Self, CaptureError> {
         gst::init().map_err(|e| CaptureError::GStreamer(e.to_string()))?;
 
-        let w = config.width.unwrap_or(1920);
-        let h = config.height.unwrap_or(1080);
+        let (dw, dh) = primary_display_size();
+        let w = config.width.unwrap_or(dw);
+        let h = config.height.unwrap_or(dh);
         let (_, actual_codec) = config
             .encoder
             .resolve(w, h, config.fps, config.bitrate_kbps);

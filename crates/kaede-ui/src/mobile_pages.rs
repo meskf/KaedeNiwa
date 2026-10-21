@@ -7,12 +7,16 @@
 use dioxus::prelude::*;
 use kaede_client::http::{DmConversation, Friend};
 
-use crate::state::{AppState, MobileDetailKind, UiState};
+use crate::state::{
+    AppState, MobileDetailKind, UiState, VoiceChannel, VoiceControls, VoiceMember, VoiceState,
+};
 
 #[component]
 pub fn MobileGroupsPage() -> Element {
     let app = use_context::<AppState>();
     let mut ui = use_context::<UiState>();
+    let mut voice = use_context::<VoiceState>();
+    let controls = use_context::<VoiceControls>();
 
     let channels: Vec<kaede_protocol::Channel> = {
         let sid = app.current_server.read().clone();
@@ -35,6 +39,7 @@ pub fn MobileGroupsPage() -> Element {
                     let ch_id = ch.id.clone();
                     let ch_id2 = ch.id.clone();
                     let ch_name = ch.name.clone();
+                    let ch_name_closure = ch.name.clone();
                     let ch_kind = ch.kind.clone();
                     let is_active = selected.as_deref() == Some(ch.id.as_str());
                     let bg = if is_active { "var(--active-bg)" } else { "transparent" };
@@ -43,6 +48,59 @@ pub fn MobileGroupsPage() -> Element {
                         div {
                             key: "{ch_id}",
                             onclick: move |_| {
+                                if ch_kind == "voice" {
+                                    voice.active_channel.set(Some(VoiceChannel {
+                                        id: ch_id2.clone(),
+                                        name: ch_name_closure.clone(),
+                                        members: vec![VoiceMember {
+                                            uid: "me".into(),
+                                            name: "我".into(),
+                                            initial: "我".into(),
+                                            speaking: false,
+                                        }],
+                                    }));
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        let Some(room) = app.room.read().clone() else {
+                                            ui.toast.set(Some(("未连接".into(), true)));
+                                            voice.active_channel.set(None);
+                                            return;
+                                        };
+                                        let mut voice_h = voice;
+                                        let mut ui_h = ui;
+                                        let cid = ch_id2.clone();
+                                        spawn(async move {
+                                            if let Err(e) = crate::voice_web::connect_voice(
+                                                voice_h, controls, room, cid,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!("[mobile voice] connect: {}", e);
+                                                ui_h.toast
+                                                    .set(Some((format!("语音连接失败: {}", e), true)));
+                                                voice_h.active_channel.set(None);
+                                            }
+                                        });
+                                    }
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        let mut ui_h = ui;
+                                        let cid = ch_id2.clone();
+                                        spawn(async move {
+                                            if let Err(e) = crate::sidebar::connect_voice(
+                                                app, voice, controls, cid,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!("[mobile voice] connect: {}", e);
+                                                ui_h.toast
+                                                    .set(Some((format!("语音连接失败: {}", e), true)));
+                                                voice.active_channel.set(None);
+                                            }
+                                        });
+                                    }
+                                    return;
+                                }
                                 ui.selected_channel.set(Some(ch_id2.clone()));
                                 ui.mobile_detail.set(Some(ch_id2.clone()));
                                 ui.mobile_detail_kind.set(Some(MobileDetailKind::Channel));
@@ -62,6 +120,17 @@ pub fn MobileGroupsPage() -> Element {
 pub fn MobileDmPage() -> Element {
     let app = use_context::<AppState>();
     let mut ui = use_context::<UiState>();
+
+    // 移动端没有挂载桌面版 DmSidebar；这里的 effect 必须自己拉会话列表。
+    use_effect(move || {
+        let sid = app.current_server.read().clone();
+        if sid.is_some() {
+            let app_for_load = app;
+            spawn(async move {
+                crate::dm_view::load_conversations(app_for_load).await;
+            });
+        }
+    });
 
     let convs: Vec<DmConversation> = {
         let sid = app.current_server.read().clone();
@@ -116,15 +185,24 @@ pub fn MobileDmPage() -> Element {
 pub fn MobileFriendsPage() -> Element {
     let app = use_context::<AppState>();
 
+    use_effect(move || {
+        let sid = app.current_server.read().clone();
+        if sid.is_some() {
+            let app_for_load = app;
+            spawn(async move {
+                crate::friends_view::load_friends_into(app_for_load).await;
+            });
+        }
+    });
+
     let friends: Vec<Friend> = {
         let sid = app.current_server.read().clone();
-        let all = sid.and_then(|s| app.friends.read().get(&s).cloned())
+        let all = sid
+            .and_then(|s| app.friends.read().get(&s).cloned())
             .unwrap_or_default();
         // 只显示已接受的好友（status == "friend" 或 "accepted"）
         all.into_iter()
-            .filter(|f| {
-                f.direction.to_lowercase() == "friend"
-            })
+            .filter(|f| f.direction.to_lowercase() == "friend")
             .collect()
     };
 

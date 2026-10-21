@@ -228,6 +228,15 @@ impl LiveKitPusher {
     }
 }
 
+fn hex_key(key: &[u8]) -> String {
+    let mut s = String::with_capacity(key.len() * 2);
+    for b in key {
+        use std::fmt::Write as _;
+        let _ = write!(&mut s, "{b:02x}");
+    }
+    s
+}
+
 fn build_room_options(config: &LiveKitConfig) -> livekit::RoomOptions {
     use livekit::RoomOptions;
     use livekit::e2ee::key_provider::{KeyDerivationAlgorithm, KeyProvider, KeyProviderOptions};
@@ -241,7 +250,9 @@ fn build_room_options(config: &LiveKitConfig) -> livekit::RoomOptions {
             ratchet_salt: b"LKFrameEncryptionKey".to_vec(),
             ..Default::default()
         };
-        let key_provider = KeyProvider::with_shared_key(kp_opts, key.clone());
+        // 与 Web 端 PBKDF2 输入保持一致：hex 文本而不是原始二进制。
+        let password = hex_key(key);
+        let key_provider = KeyProvider::with_shared_key(kp_opts, password.into_bytes());
 
         opts.encryption = Some(E2eeOptions {
             encryption_type: EncryptionType::Gcm,

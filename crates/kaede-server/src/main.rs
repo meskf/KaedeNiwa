@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use kaede_server::{
-    attachments, channels, config::Config, db, dm, friends, http, livekit, members,
-    state::AppState, ws,
+    attachments, channels, config::Config, db, dm, friends, http, livekit, members, reads,
+    sessions_api, state::AppState, ws,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -56,20 +56,21 @@ async fn main() -> Result<()> {
             .merge(livekit::router(state.clone()))
             .merge(channels::router(state.clone()))
             .merge(members::router(state.clone()))
+            .merge(reads::router(state.clone()))
+            .merge(sessions_api::router(state.clone()))
             .merge(ws::router(state)),
     );
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!("listening on http://{}", listener.local_addr()?);
-    // B2: CORS 允许任意 origin（Bearer token，不走 cookie，无 CSRF 风险）；
-    // 生产若需收紧可改为 allow_origin([...]) 白名单。
-    let app = app.layer(
-        tower_http::cors::CorsLayer::new()
-            .allow_origin(tower_http::cors::Any)
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any),
-    );
-    axum::serve(listener, app).await?;
+    // CORS 已由 `with_middleware` 统一配置（KAEDE_CORS_ORIGINS）。
+    // 这里**不能**再叠加一层 allow_origin(Any)，否则响应会出现两条
+    // Access-Control-Allow-Origin，浏览器按规范拒绝。
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

@@ -62,6 +62,10 @@ pub fn MobileVoiceSheet() -> Element {
                     icon: "🎤",
                     on_click: move |_| {
                         let new_val = !mic_on;
+                        if new_val && !crate::voice_web::microphone_supported() {
+                            ui.toast.set(Some(("当前浏览器不支持麦克风采集".into(), true)));
+                            return;
+                        }
                         let mut c2 = controls;
                         let mut u2 = ui;
                         spawn(async move {
@@ -88,10 +92,20 @@ pub fn MobileVoiceSheet() -> Element {
                     icon: "🖥",
                     on_click: move |_| {
                         let new_val = !scr_on;
+                        if new_val && !crate::voice_web::screen_share_supported() {
+                            ui.toast.set(Some((
+                                "当前浏览器不支持屏幕共享（iOS Safari 常见）".into(),
+                                true,
+                            )));
+                            return;
+                        }
                         let mut c2 = controls;
                         let mut u2 = ui;
+                        let profile = *voice.current_profile.read();
                         spawn(async move {
-                            if let Err(e) = crate::voice_web::set_screen_share(new_val).await {
+                            if let Err(e) =
+                                crate::voice_web::set_screen_share(new_val, profile).await
+                            {
                                 u2.toast.set(Some((format!("屏幕共享: {}", e), true)));
                                 return;
                             }
@@ -126,8 +140,16 @@ fn VoiceAction(
     icon: String,
     on_click: EventHandler<MouseEvent>,
 ) -> Element {
-    let bg = if active { "var(--accent-bg)" } else { "var(--active-bg)" };
-    let fg = if active { "var(--accent-fg)" } else { "var(--fg)" };
+    let bg = if active {
+        "var(--accent-bg)"
+    } else {
+        "var(--active-bg)"
+    };
+    let fg = if active {
+        "var(--accent-fg)"
+    } else {
+        "var(--fg)"
+    };
     rsx! {
         button {
             onclick: move |e| on_click.call(e),

@@ -87,12 +87,21 @@ fn display_name(ch: &kaede_protocol::Channel) -> String {
 ///   `Sidebar` 里的局部 `Signal`——否则 Sidebar 重渲染时会 drop handle，断流。
 #[component]
 pub fn Sidebar() -> Element {
-    let ui = use_context::<UiState>();
+    let mut ui = use_context::<UiState>();
     let tab = *ui.main_tab.read();
 
     rsx! {
         div {
             style: "width: 220px; flex-shrink: 0; display: flex; flex-direction: column; min-height: 0;",
+            div {
+                style: "padding: 8px 8px 4px 8px;",
+                button {
+                    class: "btn-secondary",
+                    style: "width: 100%; display: flex; align-items: center; gap: 6px; justify-content: center; font-size: 12px;",
+                    onclick: move |_| ui.search_open.set(true),
+                    "搜索本地消息"
+                }
+            }
             div {
                 style: "flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px;",
                 match tab {
@@ -252,6 +261,16 @@ fn ChannelRow(channel: kaede_protocol::Channel, display: String) -> Element {
     let ch_id_click = ch_id.clone();
     let ch_id_menu = ch_id.clone();
     let ch_name_click = display.clone();
+    let (unread_count, mention_count) = {
+        let sid = app.current_server.read().clone();
+        sid.and_then(|sid| {
+            app.unread
+                .read()
+                .get(&AppState::channel_key(&sid, &ch_id))
+                .map(|u| (u.count, u.mentions))
+        })
+        .unwrap_or((0, 0))
+    };
 
     rsx! {
         button {
@@ -315,6 +334,8 @@ fn ChannelRow(channel: kaede_protocol::Channel, display: String) -> Element {
                     // A1: 私密频道总是弹密码框（不管是否已有 group）
                     if is_private {
                         ui.join_channel_prefill_id.set(Some(ch_id_click.clone()));
+                        // 文字频道不能沿用上一次“加入后自动连语音”的状态。
+                        ui.join_channel_then_voice.set(false);
                         ui.join_channel_open.set(true);
                         return;
                     }
@@ -349,6 +370,17 @@ fn ChannelRow(channel: kaede_protocol::Channel, display: String) -> Element {
                 span {
                     style: "overflow: hidden; text-overflow: ellipsis;",
                     "{display}"
+                }
+                if unread_count > 0 {
+                    span {
+                        title: if mention_count > 0 { "@ 提及" } else { "未读消息" },
+                        style: if mention_count > 0 {
+                            "flex-shrink: 0; min-width: 18px; text-align: center; padding: 1px 5px; border-radius: 9px; background: var(--negative); color: #fff; font-size: 10px; font-weight: 700;"
+                        } else {
+                            "flex-shrink: 0; min-width: 18px; text-align: center; padding: 1px 5px; border-radius: 9px; background: var(--active-bg); color: var(--fg); font-size: 10px; font-weight: 600;"
+                        },
+                        "{unread_count}"
+                    }
                 }
             }
         }
@@ -385,6 +417,7 @@ pub fn ChannelContextMenu() -> Element {
     let ch_name_for_btn = ch_name.clone();
     let ch_id_for_copy = ch_id.clone();
     let ch_id_for_leave = ch_id.clone();
+    let ch_id_for_members = ch_id.clone();
     let sid_for_leave = sid.clone();
 
     rsx! {
@@ -490,6 +523,15 @@ pub fn ChannelContextMenu() -> Element {
                         },
                         "重命名频道"
                     }
+                    button {
+                        style: "width: 100%; text-align: left; padding: 8px 12px; border-radius: 6px; font-size: 14px;",
+                        onclick: move |_| {
+                            ui.channel_members_open.set(Some(ch_id_for_members.clone()));
+                            ui.channel_menu.set(None);
+                            ui.channel_rename_input.set(None);
+                        },
+                        "查看成员"
+                    }
                     if ch_private {
                         button {
                             style: "width: 100%; text-align: left; padding: 8px 12px; border-radius: 6px; color: var(--negative); font-size: 14px;",
@@ -522,7 +564,7 @@ pub fn ChannelContextMenu() -> Element {
                                     }
                                 });
                             },
-                            "退出私密频道"
+                            "退出频道"
                         }
                     }
                     button {
@@ -779,6 +821,21 @@ pub fn JoinChannelModal() -> Element {
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
 
+    // 弹窗常驻组件；关闭/重新打开时必须重置本地输入，否则会锁在上一次的频道。
+    use_effect(move || {
+        let open = *ui.join_channel_open.read();
+        let prefill = ui.join_channel_prefill_id.read().clone();
+        if !open {
+            channel_id.set(String::new());
+            password.set(String::new());
+            error.set(None);
+        } else if let Some(p) = prefill {
+            channel_id.set(p);
+            password.set(String::new());
+            error.set(None);
+        }
+    });
+
     if !*ui.join_channel_open.read() {
         return rsx! {};
     }
@@ -875,8 +932,10 @@ pub fn JoinChannelModal() -> Element {
                                     voice_h.active_channel.set(None);
                                     return;
                                 };
-                                if let Err(e) =
-                                    crate::voice_web::connect_voice(voice_h, controls_h, room, ch_id_wasm).await
+                                if let Err(e) = crate::voice_web::connect_voice(
+                                    voice_h, controls_h, room, ch_id_wasm,
+                                )
+                                .await
                                 {
                                     tracing::warn!("[voice-web] connect: {}", e);
                                     ui_h.toast.set(Some((format!("语音连接失败: {}", e), true)));
@@ -909,7 +968,11 @@ pub fn JoinChannelModal() -> Element {
     rsx! {
         div {
             class: "server-modal-backdrop",
-            onclick: move |_| ui.join_channel_open.set(false),
+            onclick: move |_| {
+                ui.join_channel_open.set(false);
+                ui.join_channel_prefill_id.set(None);
+                ui.join_channel_then_voice.set(false);
+            },
             div {
                 class: "server-modal",
                 style: "width: 420px; height: auto; padding: 24px; flex-direction: column;",
@@ -1026,7 +1089,9 @@ fn VoicePanel() -> Element {
             let ch_id_wasm = ch;
             spawn(async move {
                 crate::voice_web::leave_voice().await;
-                let Some(room) = room_opt else { return; };
+                let Some(room) = room_opt else {
+                    return;
+                };
                 if let Err(e) =
                     crate::voice_web::connect_voice(voice_h, controls_h, room, ch_id_wasm).await
                 {
@@ -1212,10 +1277,20 @@ fn VoicePanel() -> Element {
                         #[cfg(target_arch = "wasm32")]
                         {
                             let new_val = !*controls.screen_on.read();
+                            if new_val && !crate::voice_web::screen_share_supported() {
+                                ui.toast.set(Some((
+                                    "当前浏览器不支持屏幕共享（iOS Safari 常见）".into(),
+                                    true,
+                                )));
+                                return;
+                            }
                             let mut controls_h = controls;
                             let mut ui_h = ui;
+                            let profile = *voice.current_profile.read();
                             spawn(async move {
-                                if let Err(e) = crate::voice_web::set_screen_share(new_val).await {
+                                if let Err(e) =
+                                    crate::voice_web::set_screen_share(new_val, profile).await
+                                {
                                     tracing::warn!("[voice-web] screen: {}", e);
                                     ui_h.toast.set(Some((format!("屏幕共享: {}", e), true)));
                                     return;
@@ -1325,7 +1400,7 @@ fn UserPanel() -> Element {
 // ============================================================================
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn connect_voice(
+pub(crate) async fn connect_voice(
     app: AppState,
     mut voice: VoiceState,
     mut controls: VoiceControls,
@@ -1490,4 +1565,163 @@ async fn connect_voice(
     }
 
     Ok(())
+}
+
+/// 频道成员列表弹窗。
+#[component]
+pub fn ChannelMembersModal() -> Element {
+    let mut ui = use_context::<UiState>();
+    let app = use_context::<AppState>();
+    let mut rows = use_signal(|| None::<Result<Vec<kaede_client::http::ChannelMember>, String>>);
+
+    use_effect(move || {
+        let ch = ui.channel_members_open.read().clone();
+        let Some(ch) = ch else {
+            rows.set(None);
+            return;
+        };
+        let room_opt = app.room.read().clone();
+        rows.set(None);
+        spawn(async move {
+            let Some(room) = room_opt else {
+                rows.set(Some(Err("未连接服务器".into())));
+                return;
+            };
+            match room.list_channel_members(&ch).await {
+                Ok(list) => rows.set(Some(Ok(list))),
+                Err(e) => rows.set(Some(Err(e.to_string()))),
+            }
+        });
+    });
+
+    let Some(ch_id) = ui.channel_members_open.read().clone() else {
+        return rsx! {};
+    };
+
+    let (my_uid, can_remove) = {
+        let me = ui.common_account.read().login_id.clone();
+        let sid = app.current_server.read().clone();
+        let op5 = {
+            let members = app.members.read();
+            sid.as_ref()
+                .and_then(|s| members.get(s))
+                .and_then(|list| list.iter().find(|m| m.login_id == me))
+                .map(|m| m.op == "op5")
+                .unwrap_or(false)
+        };
+        let is_private = {
+            let channels = app.channels.read();
+            sid.as_ref()
+                .and_then(|s| channels.get(s))
+                .and_then(|list| list.iter().find(|c| c.id == ch_id))
+                .map(|c| c.is_private)
+                .unwrap_or(false)
+        };
+        (me, op5 && is_private)
+    };
+
+    let body = match rows() {
+        None => rsx! {
+            div {
+                style: "padding: 24px 0; text-align: center; color: var(--fg-faint); font-size: 13px;",
+                "加载中…"
+            }
+        },
+        Some(Err(e)) => rsx! {
+            div {
+                style: "padding: 24px 0; text-align: center; color: var(--negative); font-size: 13px;",
+                "{e}"
+            }
+        },
+        Some(Ok(list)) => rsx! {
+            div {
+                style: "display: flex; flex-direction: column; gap: 4px; min-height: 0; overflow-y: auto;",
+                if list.is_empty() {
+                    div {
+                        style: "padding: 24px 0; text-align: center; color: var(--fg-faint); font-size: 13px;",
+                        "暂无成员"
+                    }
+                }
+                for m in list {
+                    div {
+                        key: "{m.login_id}",
+                        style: "display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 6px; background: rgba(0,0,0,0.03);",
+                        div {
+                            style: "width: 28px; height: 28px; border-radius: 50%; background: var(--active-bg); color: var(--fg); display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0;",
+                            "{m.nickname.chars().next().map(|c| c.to_string()).unwrap_or_default()}"
+                        }
+                        div {
+                            style: "flex: 1; min-width: 0;",
+                            div {
+                                style: "font-size: 14px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                                "{m.nickname}"
+                            }
+                            div {
+                                style: "font-size: 11px; color: var(--fg-faint); margin-top: 2px;",
+                                "@{m.login_id} · 加入于 {crate::observer::day_label(m.joined_at)} {crate::observer::format_hhmm(m.joined_at)}"
+                            }
+                        }
+                        if can_remove && m.login_id != my_uid {
+                            button {
+                                class: "btn-secondary",
+                                style: "padding: 4px 10px; font-size: 12px; color: var(--negative);",
+                                onclick: {
+                                    let target = m.login_id.clone();
+                                    let ch = ch_id.clone();
+                                    move |_| {
+                                        let target = target.clone();
+                                        let ch = ch.clone();
+                                        let mut ui2 = ui;
+                                        spawn(async move {
+                                            let Some(room) = app.room.read().clone() else { return };
+                                            match room.remove_channel_member(&ch, &target).await {
+                                                Ok(()) => {
+                                                    let mut next = rows.read().clone();
+                                                    if let Some(Ok(list)) = &mut next {
+                                                        list.retain(|x| x.login_id != target);
+                                                    }
+                                                    rows.set(next);
+                                                    ui2.toast.set(Some(("已移除成员".into(), false)));
+                                                }
+                                                Err(e) => {
+                                                    ui2.toast.set(Some((format!("移除失败: {}", e), true)));
+                                                }
+                                            }
+                                        });
+                                    }
+                                },
+                                "移除"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    };
+
+    rsx! {
+        div {
+            class: "server-modal-backdrop",
+            onclick: move |_| ui.channel_members_open.set(None),
+            div {
+                class: "server-modal",
+                style: "width: 420px; height: auto; max-height: 70vh; padding: 24px; flex-direction: column;",
+                onclick: move |e| e.stop_propagation(),
+                div { class: "server-modal-title", "频道成员" }
+                div {
+                    style: "font-size: 11px; color: var(--fg-muted); font-family: ui-monospace, monospace; margin-bottom: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                    "{ch_id}"
+                }
+                {body}
+                div { class: "form-actions", style: "margin-top: 16px;",
+                    div { style: "flex: 1;" }
+                    button {
+                        class: "btn-secondary",
+                        onclick: move |_| ui.channel_members_open.set(None),
+                        "关闭"
+                    }
+                }
+            }
+        }
+    }
 }

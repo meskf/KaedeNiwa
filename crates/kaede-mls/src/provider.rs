@@ -170,13 +170,22 @@ impl KaedeMlsProvider {
             cursor
                 .read_exact(&mut v)
                 .map_err(|e| ProviderError::Deserialize(e.to_string()))?;
-            map.insert(k, v);
+            if map.insert(k, v).is_some() {
+                return Err(ProviderError::Deserialize("duplicate snapshot key".into()));
+            }
+        }
+        if cursor.position() != inner_bytes.len() as u64 {
+            return Err(ProviderError::Deserialize(format!(
+                "trailing bytes in snapshot: {} != {}",
+                cursor.position(),
+                inner_bytes.len()
+            )));
         }
 
         // MM5: 直接访问 openmls_memory_storage 的 pub `values` 字段。
         // 升级 openmls_memory_storage 时必须人工核对字段类型是否兼容。
         let storage = MemoryStorage::default();
-        *storage.values.write().unwrap() = map;
+        *storage.values.write().unwrap_or_else(|e| e.into_inner()) = map;
 
         Ok(Self {
             crypto: RustCrypto::default(),
@@ -201,7 +210,12 @@ impl KaedeMlsProvider {
         &self,
         cipher: &dyn crate::SnapshotCipher,
     ) -> Result<Vec<u8>, ProviderError> {
-        let values = self.storage.values.read().unwrap();
+        // 锁中毒（此前某次 panic）不应让快照功能永久不可用。
+        let values = self
+            .storage
+            .values
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let mut inner = Vec::with_capacity(16 + values.len() * 64);
 
         // inner 版本号

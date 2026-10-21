@@ -101,6 +101,14 @@ impl MlsGroupHandle {
             .map_err(|e| MlsError::OpenMls(format!("credential not UTF-8: {}", e)))?
             .to_string();
         let existing: Vec<String> = self.member_uids();
+        // MLS 不要求 credential 唯一；同一 uid 重复 Add 会产生两个 leaf，
+        // remove_member_by_uid 只会删一个，且两个 leaf 共享 sender_id。
+        if existing.iter().any(|u| u == &candidate_uid) {
+            return Err(MlsError::OpenMls(format!(
+                "member already in group: {}",
+                candidate_uid
+            )));
+        }
         if let Some(other) = kaede_crypto::find_sender_id_collision(
             &candidate_uid,
             existing.iter().map(String::as_str),

@@ -22,6 +22,7 @@
 //! `MlsSession` 用 `std::sync::Mutex` 保护。MLS 操作全部是同步的，
 //! **不跨 await 持锁**。发送消息时先在锁内加密，释放锁后再 await。
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -70,6 +71,37 @@ pub struct ServerConnection {
     main_dirty: AtomicBool,
     /// 当前用户是否是主群 host（op5）。由 RoomSession 注入。
     is_host: AtomicBool,
+    /// DM / 私密频道 v2 密文的 in-memory 重放窗口。
+    dm_replay: Mutex<ReplayGuard>,
+    channel_replay: Mutex<ReplayGuard>,
+}
+
+type ReplayEntry = (HashSet<[u8; 16]>, VecDeque<[u8; 16]>);
+
+/// 每个会话最近 1024 条消息 id 的滑动窗口，用于拒重放。
+#[derive(Default)]
+struct ReplayGuard {
+    seen: HashMap<String, ReplayEntry>,
+}
+
+impl ReplayGuard {
+    fn accept(&mut self, conv_id: &str, id: [u8; 16]) -> bool {
+        const WINDOW: usize = 1024;
+        let (set, order) = self
+            .seen
+            .entry(conv_id.to_string())
+            .or_insert_with(|| (HashSet::new(), VecDeque::new()));
+        if !set.insert(id) {
+            return false;
+        }
+        order.push_back(id);
+        while order.len() > WINDOW {
+            if let Some(old) = order.pop_front() {
+                set.remove(&old);
+            }
+        }
+        true
+    }
 }
 
 /// B3+：DM / 私密频道 group 自动持久化 hook。
@@ -110,6 +142,8 @@ impl ServerConnection {
             dirty_channel_groups: Mutex::new(std::collections::HashSet::new()),
             main_dirty: AtomicBool::new(false),
             is_host: AtomicBool::new(false),
+            dm_replay: Mutex::new(ReplayGuard::default()),
+            channel_replay: Mutex::new(ReplayGuard::default()),
         }
     }
 
@@ -149,6 +183,14 @@ impl ServerConnection {
                 epoch: after,
             });
         }
+    }
+
+    fn self_uid(&self) -> Result<String, ClientError> {
+        let guard = self.mls.lock().unwrap();
+        guard
+            .as_ref()
+            .map(|s| s.uid().to_string())
+            .ok_or_else(|| ClientError::Mls("mls not initialized".into()))
     }
 
     pub fn server_id(&self) -> &str {
@@ -380,11 +422,17 @@ impl ServerConnection {
 
     /// 生成自己的 KeyPackage（供别人 Add）。
     pub fn mls_generate_key_package(&self) -> Result<Vec<u8>, ClientError> {
-        let guard = self.mls.lock().unwrap();
-        let s = guard
-            .as_ref()
-            .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
-        s.generate_key_package()
+        let kp = {
+            let guard = self.mls.lock().unwrap();
+            let s = guard
+                .as_ref()
+                .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
+            s.generate_key_package()?
+        };
+        // KP 私钥存在 provider storage 里；不落盘的话重启后服务端队列里的
+        // 这 20 个 KP 全部无法解密 Welcome。
+        self.mark_main_dirty();
+        Ok(kp)
     }
 
     /// 房主 Add 新成员。
@@ -587,20 +635,34 @@ impl ServerConnection {
         channel_id: &str,
         welcome: &[u8],
     ) -> Result<(), ClientError> {
-        if self.channel_has_group(channel_id) {
-            return Err(ClientError::Mls("channel group already exists".into()));
+        // 先在 fork 出的临时 session 上解析 Welcome，得到新 group_id。
+        // 已有旧 group 且 group_id 不同 → 用新群替换（权威重建频道群）；
+        // 相同 → 重复投递，直接忽略。
+        let probe = {
+            let main_guard = self.mls.lock().unwrap();
+            let main_session = main_guard
+                .as_ref()
+                .ok_or_else(|| ClientError::Mls("no main mls session".into()))?;
+            let mut ch_session = main_session.fork_for_new_group();
+            ch_session.join_with_welcome(welcome)?;
+            ch_session
+        };
+        let new_group_id = probe.group_id().map(|g| g.to_vec());
+
+        let existing_group_id = self
+            .channel_groups
+            .lock()
+            .unwrap()
+            .get(channel_id)
+            .and_then(|s| s.group_id().map(|g| g.to_vec()));
+        if existing_group_id == new_group_id {
+            return Ok(());
         }
-        let main_guard = self.mls.lock().unwrap();
-        let main_session = main_guard
-            .as_ref()
-            .ok_or_else(|| ClientError::Mls("no main mls session".into()))?;
-        let mut ch_session = main_session.fork_for_new_group();
-        ch_session.join_with_welcome(welcome)?;
-        drop(main_guard);
+        // 不同（或本地没有）→ 采纳新群。
         self.channel_groups
             .lock()
             .unwrap()
-            .insert(channel_id.to_string(), ch_session);
+            .insert(channel_id.to_string(), probe);
         self.mark_channel_dirty(channel_id);
         Ok(())
     }
@@ -638,15 +700,23 @@ impl ServerConnection {
     }
 
     /// 本地丢弃某个频道的 group（离开频道时调用）。
-    pub fn channel_drop_group(&self, channel_id: &str) {
-        if self
-            .channel_groups
-            .lock()
-            .unwrap()
-            .remove(channel_id)
-            .is_some()
-        {
-            self.dirty_channel_groups.lock().unwrap().remove(channel_id);
+    ///
+    /// 必须同时删除持久化快照：否则下次登录会把已退出的频道 group
+    /// 恢复回内存，重新加入时会误判“已有 group”而不走 Welcome，
+    /// 导致本地 epoch 永久停留在旧值。
+    pub async fn channel_drop_group(&self, channel_id: &str) {
+        self.channel_groups.lock().unwrap().remove(channel_id);
+        self.dirty_channel_groups.lock().unwrap().remove(channel_id);
+        let hook = self.aux_storage.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            let key = format!("{}/{}", hook.server_url, channel_id);
+            if let Err(e) = hook.store.delete("channel", &key).await {
+                tracing::warn!(
+                    "[channel-drop] delete persisted group for {} failed: {}",
+                    channel_id,
+                    e
+                );
+            }
         }
     }
 
@@ -888,7 +958,9 @@ impl ServerConnection {
         if self.take_main_dirty() {
             match self.mls_snapshot_with_cipher(cipher.as_ref()) {
                 Ok(snap) => {
-                    let key = format!("{}/{}", hook.server_url, hook.uid);
+                    // 必须与 `RoomSession::save_snapshot` 使用完全相同的 Key，
+                    // 否则接收侧推进的 MLS 状态在重启后读不到。
+                    let key = format!("mls/{}/{}", hook.server_url, hook.uid);
                     match hook.store.put("mls", &key, &snap).await {
                         Ok(()) => {}
                         Err(e) => {
@@ -1153,17 +1225,84 @@ impl ServerConnection {
 
     pub fn dm_seal(&self, conv_id: &str, plaintext: &[u8]) -> Result<Vec<u8>, ClientError> {
         let conv_id = &canonical_conv_id(conv_id);
+        let me = self.self_uid()?;
         let key = self.dm_derive_key(conv_id)?;
-        kaede_crypto::dm_cipher::seal(&key, conv_id, plaintext)
+        let (from, to) = dm_parties(conv_id, &me)?;
+        kaede_crypto::dm_cipher::seal(&key, conv_id, &from, &to, plaintext)
             .map_err(|e| ClientError::Protocol(format!("dm seal: {e}")))
     }
 
-    /// 解密一条 DM 消息。
-    pub fn dm_open(&self, conv_id: &str, ciphertext: &[u8]) -> Result<Vec<u8>, ClientError> {
+    /// 解密一条实时 DM 消息（v2；带重放检测，兼容旧 v1）。
+    pub fn dm_open(
+        &self,
+        conv_id: &str,
+        from: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, ClientError> {
         let conv_id = &canonical_conv_id(conv_id);
+        let me = self.self_uid()?;
         let key = self.dm_derive_key(conv_id)?;
-        kaede_crypto::dm_cipher::open(&key, conv_id, ciphertext)
-            .map_err(|e| ClientError::Protocol(format!("dm open: {e}")))
+        match kaede_crypto::dm_cipher::open(&key, conv_id, from, &me, ciphertext) {
+            Ok((pt, msg_id)) => {
+                if !self.dm_replay.lock().unwrap().accept(conv_id, msg_id) {
+                    return Err(ClientError::Protocol("replayed DM message".into()));
+                }
+                Ok(pt)
+            }
+            Err(kaede_crypto::dm_cipher::DmCipherError::UnknownVersion(_)) => {
+                kaede_crypto::dm_cipher::open_legacy(&key, conv_id, ciphertext)
+                    .map_err(|e| ClientError::Protocol(format!("dm open: {e}")))
+            }
+            Err(e) => Err(ClientError::Protocol(format!("dm open: {e}"))),
+        }
+    }
+
+    /// 读取 DM 历史：不参与实时重放窗口（同一消息可能被重复拉取）。
+    pub fn dm_open_history(
+        &self,
+        conv_id: &str,
+        from: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, ClientError> {
+        let conv_id = &canonical_conv_id(conv_id);
+        let me = self.self_uid()?;
+        let key = self.dm_derive_key(conv_id)?;
+        match kaede_crypto::dm_cipher::open(&key, conv_id, from, &me, ciphertext) {
+            Ok((pt, _)) => Ok(pt),
+            Err(kaede_crypto::dm_cipher::DmCipherError::UnknownVersion(_)) => {
+                kaede_crypto::dm_cipher::open_legacy(&key, conv_id, ciphertext)
+                    .map_err(|e| ClientError::Protocol(format!("dm open: {e}")))
+            }
+            Err(e) => Err(ClientError::Protocol(format!("dm open: {e}"))),
+        }
+    }
+
+    /// 解密一条私密频道实时消息（v2；带重放检测）。
+    pub fn channel_open(
+        &self,
+        channel_id: &str,
+        from: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, ClientError> {
+        let key = self.channel_export_key(channel_id)?;
+        match kaede_crypto::dm_cipher::open(&key, channel_id, from, "", ciphertext) {
+            Ok((pt, msg_id)) => {
+                if !self
+                    .channel_replay
+                    .lock()
+                    .unwrap()
+                    .accept(channel_id, msg_id)
+                {
+                    return Err(ClientError::Protocol("replayed channel message".into()));
+                }
+                Ok(pt)
+            }
+            Err(kaede_crypto::dm_cipher::DmCipherError::UnknownVersion(_)) => {
+                kaede_crypto::dm_cipher::open_legacy(&key, channel_id, ciphertext)
+                    .map_err(|e| ClientError::Protocol(format!("channel open: {e}")))
+            }
+            Err(e) => Err(ClientError::Protocol(format!("channel open: {e}"))),
+        }
     }
 
     /// 主动 emit 一条事件到本地 observer（用于本地回显等场景）。
@@ -1393,41 +1532,6 @@ impl ServerConnection {
                     uid,
                 });
             }
-            ServerMessage::SdpOffer { from, sdp } => {
-                self.emit(ClientEvent::SdpOffer {
-                    server_id: self.server_id.clone(),
-                    from,
-                    sdp,
-                });
-            }
-            ServerMessage::SdpAnswer { from, sdp } => {
-                self.emit(ClientEvent::SdpAnswer {
-                    server_id: self.server_id.clone(),
-                    from,
-                    sdp,
-                });
-            }
-            ServerMessage::IceCandidate { from, candidate } => {
-                self.emit(ClientEvent::IceCandidate {
-                    server_id: self.server_id.clone(),
-                    from,
-                    candidate,
-                });
-            }
-            ServerMessage::SfuToken {
-                token,
-                ws_url,
-                room,
-                identity,
-            } => {
-                self.emit(ClientEvent::SfuToken {
-                    server_id: self.server_id.clone(),
-                    token,
-                    ws_url,
-                    room,
-                    identity,
-                });
-            }
             ServerMessage::Error { code, message } => {
                 self.emit(ClientEvent::ServerError {
                     server_id: self.server_id.clone(),
@@ -1553,7 +1657,7 @@ impl ServerConnection {
                         );
                     }
                 } else {
-                    match self.dm_open(&conv_id, &ciphertext) {
+                    match self.dm_open(&conv_id, from.as_str(), &ciphertext) {
                         Ok(plaintext) => {
                             self.emit_local_event(ClientEvent::DmReceived {
                                 server_id: self.server_id.clone(),
@@ -1847,6 +1951,14 @@ impl ServerConnection {
                 }
             }
 
+            ServerMessage::ChannelRemoved { channel_id } => {
+                self.channel_drop_group(&channel_id).await;
+                self.emit(ClientEvent::ChannelDeleted {
+                    server_id: self.server_id.clone(),
+                    channel_id,
+                });
+            }
+
             ServerMessage::ChannelMessage {
                 channel_id,
                 from,
@@ -1862,35 +1974,19 @@ impl ServerConnection {
                             channel_id
                         );
                     } else {
-                        match self.channel_export_key(&channel_id) {
-                            Ok(key) => {
-                                match kaede_crypto::dm_cipher::open(
-                                    &key,
-                                    &channel_id,
-                                    &ciphertext[1..],
-                                ) {
-                                    Ok(plaintext) => {
-                                        self.emit(ClientEvent::ChannelMessage {
-                                            server_id: self.server_id.clone(),
-                                            channel_id,
-                                            from,
-                                            ts,
-                                            plaintext,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "[client:{}] channel message decrypt failed for {}: {}",
-                                            self.server_id,
-                                            channel_id,
-                                            e
-                                        );
-                                    }
-                                }
+                        match self.channel_open(&channel_id, from.as_str(), &ciphertext[1..]) {
+                            Ok(plaintext) => {
+                                self.emit(ClientEvent::ChannelMessage {
+                                    server_id: self.server_id.clone(),
+                                    channel_id,
+                                    from,
+                                    ts,
+                                    plaintext,
+                                });
                             }
                             Err(e) => {
                                 tracing::warn!(
-                                    "[client:{}] channel key unavailable for {}: {}",
+                                    "[client:{}] channel message decrypt failed for {}: {}",
                                     self.server_id,
                                     channel_id,
                                     e
@@ -1941,6 +2037,11 @@ impl ServerConnection {
                 self.emit(ClientEvent::MemberRemoved {
                     server_id: self.server_id.clone(),
                     login_id,
+                });
+            }
+            ServerMessage::FriendsChanged => {
+                self.emit(ClientEvent::FriendsChanged {
+                    server_id: self.server_id.clone(),
                 });
             }
 
@@ -2121,6 +2222,24 @@ fn unpack_welcome_payload(payload: &[u8]) -> (Option<&[u8]>, &[u8]) {
 /// → 消息永远解不开。规范化是幂等的。
 ///
 /// 非 `dm:` 前缀原样返回（兼容 channel_id 等其他用途）。
+fn dm_parties(conv_id: &str, uid: &str) -> Result<(String, String), ClientError> {
+    let rest = conv_id
+        .strip_prefix("dm:")
+        .ok_or_else(|| ClientError::Protocol(format!("not a DM conv: {conv_id}")))?;
+    let (a, b) = rest
+        .split_once(':')
+        .ok_or_else(|| ClientError::Protocol(format!("bad DM conv: {conv_id}")))?;
+    if a == uid {
+        Ok((a.to_string(), b.to_string()))
+    } else if b == uid {
+        Ok((b.to_string(), a.to_string()))
+    } else {
+        Err(ClientError::Protocol(format!(
+            "uid {uid} is not a party of {conv_id}"
+        )))
+    }
+}
+
 fn canonical_conv_id(conv_id: &str) -> String {
     if let Some(rest) = conv_id.strip_prefix("dm:")
         && let Some((a, b)) = rest.split_once(':')
@@ -2599,7 +2718,7 @@ mod tests {
         assert_eq!(bob_conn.dm_generation(conv), 1);
 
         let ct = alice.dm_seal(conv, b"hello").unwrap();
-        assert_eq!(bob_conn.dm_open(conv, &ct).unwrap(), b"hello");
+        assert_eq!(bob_conn.dm_open(conv, "alice", &ct).unwrap(), b"hello");
 
         // alice 丢失本地 DM 状态后重建：gen=2。
         alice.dm_remove_group(conv);
@@ -2612,8 +2731,8 @@ mod tests {
         assert_eq!(bob_conn.dm_generation(conv), 2);
 
         let ct2 = alice.dm_seal(conv, b"new-group").unwrap();
-        assert_eq!(bob_conn.dm_open(conv, &ct2).unwrap(), b"new-group");
+        assert_eq!(bob_conn.dm_open(conv, "alice", &ct2).unwrap(), b"new-group");
         let ct3 = bob_conn.dm_seal(conv, b"reply").unwrap();
-        assert_eq!(alice.dm_open(conv, &ct3).unwrap(), b"reply");
+        assert_eq!(alice.dm_open(conv, "bob", &ct3).unwrap(), b"reply");
     }
 }

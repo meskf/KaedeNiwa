@@ -9,10 +9,11 @@
 //! 因此原生/Web 客户端可以互相看到对方的屏幕共享。
 //!
 //! ## 宿主页面要求
-//! index.html 需加载 LiveKit UMD，版本与 LIVEKIT_UMD_VERSION 一致：
+//!
+//! index.html 需加载同源 vendored 的 LiveKit UMD，版本与 LIVEKIT_UMD_VERSION 一致：
 //!
 //! ```html
-//! <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.14.0/dist/livekit-client.umd.min.js"></script>
+//! <script src="./livekit-client.umd.min.js"></script>
 //! ```
 //!
 //! UMD 暴露 window.LivekitClient。本 crate 通过 js_sys::Reflect 动态访问。
@@ -21,6 +22,11 @@ pub mod error;
 pub use error::LiveKitWebError;
 
 pub const LIVEKIT_UMD_VERSION: &str = "2.14.0";
+
+/// 与 UMD 版本严格一致的 E2EE worker 脚本（同源 assets）。
+///
+/// 宿主页面通过 `window.__kaedeMakeE2EEWorker` 创建同源 Worker。
+pub const LIVEKIT_E2EE_WORKER_URL: &str = "./livekit-client.e2ee.worker.js";
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_impl;

@@ -33,11 +33,21 @@ use rand_core::{OsRng, RngCore};
 
 use crate::aead::{AeadError, aes256gcm_decrypt, aes256gcm_encrypt};
 
-/// 当前密文格式版本。
-pub const DM_CIPHER_VERSION: u8 = 0x01;
+/// 当前密文格式版本（v2：绑定发送者/接收者/消息 id）。
+///
+/// 不能复用 0x02：DM Welcome 信封也用 `[0x02][generation][welcome]` 开头，
+/// 复用会让客户端把普通密文误判成 Welcome。0x03/0x04 已分别被频道消息
+/// 与附件占用。
+pub const DM_CIPHER_VERSION: u8 = 0x05;
+
+/// 旧格式（仅 conv_id 作为 AAD，无发送者/重放保护）。
+pub const DM_CIPHER_VERSION_V1: u8 = 0x01;
 
 /// nonce 长度。
 pub const DM_NONCE_LEN: usize = 12;
+
+/// v2 消息 id 长度。
+pub const DM_MSG_ID_LEN: usize = 16;
 
 /// DM 加解密错误。
 #[derive(Debug, thiserror::Error)]
@@ -53,35 +63,90 @@ pub enum DmCipherError {
     Aead(#[from] AeadError),
 }
 
-/// 加密一条 DM 消息。
+fn aad(conv_id: &str, from: &str, to: &str, msg_id: &[u8; DM_MSG_ID_LEN]) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(4 + conv_id.len() + 4 + from.len() + 4 + to.len() + DM_MSG_ID_LEN);
+    for part in [conv_id, from, to] {
+        out.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        out.extend_from_slice(part.as_bytes());
+    }
+    out.extend_from_slice(msg_id);
+    out
+}
+
+/// 加密一条消息（v2）。
 ///
-/// `key` 必须是 `dm_derive_key(conv_id)` 派生出的 32 字节对称密钥。
-/// `conv_id` 用作 AAD，同时被序列化进 exporter context（见模块文档）。
-pub fn seal(key: &[u8; 32], conv_id: &str, plaintext: &[u8]) -> Result<Vec<u8>, DmCipherError> {
+/// AAD 绑定 `conv_id + from + to + msg_id`：
+/// - 服务器把 A→B 的密文反射给 A 并标 `from=B` 时解密失败；
+/// - 同一密文重复投递由调用方按 `msg_id` 拒重放。
+pub fn seal(
+    key: &[u8; 32],
+    conv_id: &str,
+    from: &str,
+    to: &str,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, DmCipherError> {
+    let mut msg_id = [0u8; DM_MSG_ID_LEN];
+    OsRng.fill_bytes(&mut msg_id);
     let mut nonce = [0u8; DM_NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
 
-    let ct = aes256gcm_encrypt(key, &nonce, conv_id.as_bytes(), plaintext)?;
+    let aad = aad(conv_id, from, to, &msg_id);
+    let ct = aes256gcm_encrypt(key, &nonce, &aad, plaintext)?;
 
-    let mut out = Vec::with_capacity(1 + DM_NONCE_LEN + ct.len());
+    let mut out = Vec::with_capacity(1 + DM_MSG_ID_LEN + DM_NONCE_LEN + ct.len());
     out.push(DM_CIPHER_VERSION);
+    out.extend_from_slice(&msg_id);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ct);
     Ok(out)
 }
 
-/// 解密一条 DM 消息。
-pub fn open(key: &[u8; 32], conv_id: &str, sealed: &[u8]) -> Result<Vec<u8>, DmCipherError> {
-    const HDR: usize = 1 + DM_NONCE_LEN;
+/// 读出 v2 密文里的消息 id（用于重放检测）。
+pub fn message_id(sealed: &[u8]) -> Option<[u8; DM_MSG_ID_LEN]> {
+    const HDR: usize = 1 + DM_MSG_ID_LEN + DM_NONCE_LEN;
+    if sealed.len() < HDR + 16 || sealed[0] != DM_CIPHER_VERSION {
+        return None;
+    }
+    sealed[1..1 + DM_MSG_ID_LEN].try_into().ok()
+}
+
+/// 解密一条 v2 消息。返回 `(plaintext, msg_id)`。
+pub fn open(
+    key: &[u8; 32],
+    conv_id: &str,
+    from: &str,
+    to: &str,
+    sealed: &[u8],
+) -> Result<(Vec<u8>, [u8; DM_MSG_ID_LEN]), DmCipherError> {
+    const HDR: usize = 1 + DM_MSG_ID_LEN + DM_NONCE_LEN;
     if sealed.len() < HDR + 16 {
         return Err(DmCipherError::TooShort(sealed.len()));
     }
-
     let ver = sealed[0];
     if ver != DM_CIPHER_VERSION {
         return Err(DmCipherError::UnknownVersion(ver));
     }
+    let msg_id: [u8; DM_MSG_ID_LEN] = sealed[1..1 + DM_MSG_ID_LEN]
+        .try_into()
+        .map_err(|_| DmCipherError::TooShort(sealed.len()))?;
+    let nonce = &sealed[1 + DM_MSG_ID_LEN..HDR];
+    let ct = &sealed[HDR..];
+    let aad = aad(conv_id, from, to, &msg_id);
+    let pt = aes256gcm_decrypt(key, nonce, &aad, ct)?;
+    Ok((pt, msg_id))
+}
 
+/// 解密旧版（v1）消息；仅用于读取升级前的历史。
+pub fn open_legacy(key: &[u8; 32], conv_id: &str, sealed: &[u8]) -> Result<Vec<u8>, DmCipherError> {
+    const HDR: usize = 1 + DM_NONCE_LEN;
+    if sealed.len() < HDR + 16 {
+        return Err(DmCipherError::TooShort(sealed.len()));
+    }
+    let ver = sealed[0];
+    if ver != DM_CIPHER_VERSION_V1 {
+        return Err(DmCipherError::UnknownVersion(ver));
+    }
     let nonce = &sealed[1..HDR];
     let ct = &sealed[HDR..];
     Ok(aes256gcm_decrypt(key, nonce, conv_id.as_bytes(), ct)?)
@@ -97,53 +162,65 @@ mod tests {
         let conv = "dm:alice:bob";
         let pt = b"hello bob";
 
-        let sealed = seal(&key, conv, pt).unwrap();
-        assert_eq!(sealed.len(), 1 + 12 + pt.len() + 16);
+        let sealed = seal(&key, conv, "alice", "bob", pt).unwrap();
+        assert_eq!(sealed.len(), 1 + DM_MSG_ID_LEN + 12 + pt.len() + 16);
         assert_eq!(sealed[0], DM_CIPHER_VERSION);
 
-        let back = open(&key, conv, &sealed).unwrap();
+        let (back, id) = open(&key, conv, "alice", "bob", &sealed).unwrap();
         assert_eq!(back, pt);
+        assert_eq!(Some(id), message_id(&sealed));
     }
 
     #[test]
     fn nonce_is_random() {
         let key = [0x42u8; 32];
         let conv = "dm:alice:bob";
-        let a = seal(&key, conv, b"x").unwrap();
-        let b = seal(&key, conv, b"x").unwrap();
+        let a = seal(&key, conv, "alice", "bob", b"x").unwrap();
+        let b = seal(&key, conv, "alice", "bob", b"x").unwrap();
         assert_ne!(a, b);
     }
 
     #[test]
     fn wrong_conv_id_fails() {
         let key = [0x42u8; 32];
-        let sealed = seal(&key, "dm:alice:bob", b"hi").unwrap();
-        assert!(open(&key, "dm:alice:carol", &sealed).is_err());
+        let sealed = seal(&key, "dm:alice:bob", "alice", "bob", b"hi").unwrap();
+        assert!(open(&key, "dm:alice:carol", "alice", "bob", &sealed).is_err());
+    }
+
+    #[test]
+    fn wrong_sender_or_recipient_fails() {
+        let key = [0x42u8; 32];
+        let conv = "dm:alice:bob";
+        let sealed = seal(&key, conv, "alice", "bob", b"hi").unwrap();
+        // 服务器反射：同一密文标成 bob 发给 alice
+        assert!(open(&key, conv, "bob", "alice", &sealed).is_err());
+        // 方向反转
+        assert!(open(&key, conv, "alice", "alice", &sealed).is_err());
     }
 
     #[test]
     fn wrong_key_fails() {
-        let sealed = seal(&[1u8; 32], "dm:alice:bob", b"hi").unwrap();
-        assert!(open(&[2u8; 32], "dm:alice:bob", &sealed).is_err());
+        let sealed = seal(&[1u8; 32], "dm:alice:bob", "alice", "bob", b"hi").unwrap();
+        assert!(open(&[2u8; 32], "dm:alice:bob", "alice", "bob", &sealed).is_err());
     }
 
     #[test]
     fn tamper_fails() {
         let key = [0x42u8; 32];
         let conv = "dm:alice:bob";
-        let mut sealed = seal(&key, conv, b"hi").unwrap();
+        let mut sealed = seal(&key, conv, "alice", "bob", b"hi").unwrap();
         let last = sealed.len() - 1;
         sealed[last] ^= 0xFF;
-        assert!(open(&key, conv, &sealed).is_err());
+        assert!(open(&key, conv, "alice", "bob", &sealed).is_err());
     }
 
     #[test]
     fn bad_version_fails() {
         let key = [0x42u8; 32];
         let conv = "dm:alice:bob";
-        let mut sealed = seal(&key, conv, b"hi").unwrap();
+        let mut sealed = seal(&key, conv, "alice", "bob", b"hi").unwrap();
         sealed[0] = 0xFF;
-        match open(&key, conv, &sealed) {
+        match open(&key, conv, "alice", "bob", &sealed) {
             Err(DmCipherError::UnknownVersion(0xFF)) => {}
             other => panic!("expected UnknownVersion, got {:?}", other),
         }
@@ -153,8 +230,25 @@ mod tests {
     fn too_short_fails() {
         let key = [0x42u8; 32];
         assert!(matches!(
-            open(&key, "x", &[0u8; 10]),
+            open(&key, "x", "a", "b", &[0u8; 10]),
             Err(DmCipherError::TooShort(10))
         ));
+        assert!(matches!(
+            open_legacy(&key, "x", &[0u8; 10]),
+            Err(DmCipherError::TooShort(10))
+        ));
+    }
+
+    #[test]
+    fn legacy_v1_still_decrypts() {
+        let key = [0x42u8; 32];
+        let conv = "dm:alice:bob";
+        let mut nonce = [0u8; DM_NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce);
+        let ct = aes256gcm_encrypt(&key, &nonce, conv.as_bytes(), b"old").unwrap();
+        let mut sealed = vec![DM_CIPHER_VERSION_V1];
+        sealed.extend_from_slice(&nonce);
+        sealed.extend_from_slice(&ct);
+        assert_eq!(open_legacy(&key, conv, &sealed).unwrap(), b"old");
     }
 }

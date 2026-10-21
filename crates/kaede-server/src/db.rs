@@ -54,6 +54,13 @@ pub fn base64_url(bytes: &[u8]) -> String {
 /// 每个用户最多暂存多少条信封（防内存/DB 膨胀）。
 const MAX_PENDING_PER_USER: i64 = 100;
 
+/// 单条信封上限。Welcome/Commit 正常只有几十 KB；上限防止
+/// 任意已 Join 用户用 16 MiB 帧把离线队列撑爆。
+const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
+
+/// 每个用户的信封总字节上限。
+const MAX_PENDING_BYTES: i64 = 4 * 1024 * 1024;
+
 /// 暂存一条离线信封。`kind` = `"mls_welcome"` | `"channel_sync"`。
 pub async fn enqueue_envelope(
     pool: &SqlitePool,
@@ -63,6 +70,13 @@ pub async fn enqueue_envelope(
     channel_id: Option<&str>,
     payload: &[u8],
 ) -> Result<(), sqlx::Error> {
+    if payload.len() > MAX_ENVELOPE_BYTES {
+        return Err(sqlx::Error::Protocol(format!(
+            "envelope too large: {} > {}",
+            payload.len(),
+            MAX_ENVELOPE_BYTES
+        )));
+    }
     sqlx::query(
         "INSERT INTO pending_envelopes (to_uid, from_uid, kind, channel_id, payload, created_at) \
          VALUES (?, ?, ?, ?, ?, ?)",
@@ -76,17 +90,50 @@ pub async fn enqueue_envelope(
     .execute(pool)
     .await?;
 
-    // 只保留最新 N 条（按 id 倒序）。
-    sqlx::query(
-        "DELETE FROM pending_envelopes WHERE to_uid = ? AND id NOT IN \
-         (SELECT id FROM pending_envelopes WHERE to_uid = ? ORDER BY id DESC LIMIT ?)",
+    // 按条数 + 总字节双重配额删最旧的信封。
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT id, length(payload) FROM pending_envelopes WHERE to_uid = ? ORDER BY id DESC",
     )
     .bind(to_uid)
+    .fetch_all(pool)
+    .await?;
+    let mut total: i64 = 0;
+    for (idx, (id, len)) in rows.into_iter().enumerate() {
+        total += len;
+        if idx as i64 >= MAX_PENDING_PER_USER || total > MAX_PENDING_BYTES {
+            sqlx::query("DELETE FROM pending_envelopes WHERE id = ?")
+                .bind(id)
+                .execute(pool)
+                .await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// 读取信封但**不删除**（投递成功后再删）。
+pub async fn list_envelopes(
+    pool: &SqlitePool,
+    to_uid: &str,
+) -> Result<Vec<(i64, String, String, Option<String>, Vec<u8>)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, from_uid, kind, channel_id, payload FROM pending_envelopes \
+         WHERE to_uid = ? ORDER BY id ASC LIMIT ?",
+    )
     .bind(to_uid)
     .bind(MAX_PENDING_PER_USER)
-    .execute(pool)
-    .await?;
+    .fetch_all(pool)
+    .await
+}
 
+/// 删除已成功投递的信封。
+pub async fn delete_envelopes(pool: &SqlitePool, ids: &[i64]) -> Result<(), sqlx::Error> {
+    for id in ids {
+        sqlx::query("DELETE FROM pending_envelopes WHERE id = ?")
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 

@@ -6,7 +6,7 @@ use argon2::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
@@ -43,6 +43,9 @@ struct RegisterReq {
     password: String,
     #[serde(default)]
     nickname: String,
+    /// 设备名（可选，用于“登录设备”列表）。
+    #[serde(default)]
+    device_name: String,
 }
 
 #[derive(Serialize)]
@@ -125,7 +128,7 @@ async fn register(
 
     tx.commit().await?;
 
-    let token = issue_session(&state, &req.login_id).await?;
+    let token = issue_session(&state, &req.login_id, &req.device_name).await?;
 
     Ok(Json(RegisterResp {
         login_id: req.login_id,
@@ -142,6 +145,9 @@ async fn register(
 struct LoginReq {
     login_id: String,
     password: String,
+    /// 设备名（可选，用于“登录设备”列表）。
+    #[serde(default)]
+    device_name: String,
 }
 
 #[derive(Serialize)]
@@ -151,8 +157,21 @@ struct LoginResp {
     session_token: String,
 }
 
+/// 不存在的账号也要跑一次 Argon2，避免通过响应时间枚举 login_id。
+fn dummy_password_hash() -> &'static str {
+    static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DUMMY.get_or_init(|| {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(b"kaede-dummy-password", &salt)
+            .map(|h| h.to_string())
+            .unwrap_or_default()
+    })
+}
+
 async fn login(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     Json(req): Json<LoginReq>,
 ) -> Result<Json<LoginResp>, ApiError> {
     // P0-2：并发 Argon2 限制（每请求 19MiB，8 并发 = 152MiB 上限）。
@@ -164,14 +183,17 @@ async fn login(
 
     // P0-A 修复：失败计数检查必须在 semaphore 之后——否则并发 100 个请求
     // 全部通过检查才排队，semaphore 出来后不再复查 → 5 次锁完全失效。
+    // 失败计数按 (login_id, 来源 IP) 隔离：否则任意人连发 5 次错误密码
+    // 就能把已知账号锁死 15 分钟。
+    let failure_key = (req.login_id.clone(), peer.ip());
     {
         let mut failures = state.login_failures.lock().unwrap();
-        if let Some((count, first)) = failures.get(&req.login_id) {
+        if let Some((count, first)) = failures.get(&failure_key) {
             if *count >= 5 && first.elapsed() < std::time::Duration::from_secs(900) {
                 return Err(ApiError::Unauthorized);
             }
             if first.elapsed() >= std::time::Duration::from_secs(900) {
-                failures.remove(&req.login_id);
+                failures.remove(&failure_key);
             }
         }
     }
@@ -181,7 +203,13 @@ async fn login(
             .bind(&req.login_id)
             .fetch_optional(&state.pool)
             .await?;
-    let (hash, nickname) = row.ok_or(ApiError::Unauthorized)?;
+    let Some((hash, nickname)) = row else {
+        // 账号不存在：跑一次等价的 Argon2 验证，抹平与“密码错误”的时序差异。
+        if let Ok(parsed) = PasswordHash::new(dummy_password_hash()) {
+            let _ = Argon2::default().verify_password(req.password.as_bytes(), &parsed);
+        }
+        return Err(ApiError::Unauthorized);
+    };
 
     let parsed =
         PasswordHash::new(&hash).map_err(|_| ApiError::Internal("bad stored hash".into()))?;
@@ -191,15 +219,19 @@ async fn login(
     {
         let mut failures = state.login_failures.lock().unwrap();
         let entry = failures
-            .entry(req.login_id.clone())
+            .entry(failure_key)
             .or_insert((0, std::time::Instant::now()));
         entry.0 += 1;
         return Err(ApiError::Unauthorized);
     }
 
-    state.login_failures.lock().unwrap().remove(&req.login_id);
+    state
+        .login_failures
+        .lock()
+        .unwrap()
+        .remove(&(req.login_id.clone(), peer.ip()));
 
-    let token = issue_session(&state, &req.login_id).await?;
+    let token = issue_session(&state, &req.login_id, &req.device_name).await?;
 
     Ok(Json(LoginResp {
         login_id: req.login_id,
@@ -306,7 +338,7 @@ async fn fetch_keypackage(
     let uid = authenticate(&state, &headers).await?;
 
     // C-7: per-uid 限流，防恶意用户消耗他人 KeyPackage 队列
-    if !state.check_rate(&uid, 1.0, 10.0) {
+    if !state.check_rate_scoped(&uid, "kp_fetch", 1.0, 10.0) {
         return Err(ApiError::BadRequest("keypackage fetch rate limited".into()));
     }
     // per-target 限流：即使攻击者换账号，也不能无限抽干同一个人的 KP 队列。
@@ -341,42 +373,68 @@ async fn fetch_keypackage(
 // 辅助
 // ---------------------------------------------------------------------------
 
-async fn issue_session(state: &AppState, login_id: &str) -> Result<String, ApiError> {
+async fn issue_session(
+    state: &AppState,
+    login_id: &str,
+    device_name: &str,
+) -> Result<String, ApiError> {
     let token = db::random_token();
-    let expires_at = db::now_ms() + state.cfg.session_ttl_hours * 3600 * 1000;
+    let session_id = db::random_token();
+    let now = db::now_ms();
+    let expires_at = now + state.cfg.session_ttl_hours * 3600 * 1000;
+    let device_name = truncate_chars(device_name.trim(), 64);
     // 只存 token 的 SHA-256。DB 泄漏时无法直接拿去登录。
-    sqlx::query("INSERT INTO sessions (token, login_id, expires_at) VALUES (?, ?, ?)")
-        .bind(db::hash_token(&token))
-        .bind(login_id)
-        .bind(expires_at)
-        .execute(&state.pool)
-        .await?;
+    sqlx::query(
+        "INSERT INTO sessions \
+         (token, login_id, expires_at, device_name, created_at, last_seen_at, session_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(db::hash_token(&token))
+    .bind(login_id)
+    .bind(expires_at)
+    .bind(&device_name)
+    .bind(now)
+    .bind(now)
+    .bind(&session_id)
+    .execute(&state.pool)
+    .await?;
     Ok(token)
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
 }
 
 pub(crate) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<UserId, ApiError> {
+    Ok(authenticate_session(state, headers).await?.0)
+}
+
+/// 认证并返回当前请求的 `(uid, session_id)`。
+pub(crate) async fn authenticate_session(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(UserId, String), ApiError> {
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .ok_or(ApiError::Unauthorized)?;
 
-    // 兼容升级前落库的明文 token（只保留到其 expires_at 为止）；
-    // 新 token 只存 hash。
-    let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT login_id, expires_at FROM sessions WHERE token = ? OR token = ?")
+    // 只接受 hash(token) 匹配。不能再兼容明文 token：否则 DB 泄漏时
+    // 库里保存的 hash 本身就能直接当 Bearer 使用。
+    let row: Option<(String, i64, String)> =
+        sqlx::query_as("SELECT login_id, expires_at, session_id FROM sessions WHERE token = ?")
             .bind(db::hash_token(token))
-            .bind(token)
             .fetch_optional(&state.pool)
             .await?;
-    let (login_id, expires_at) = row.ok_or(ApiError::Unauthorized)?;
+    let (login_id, expires_at, session_id) = row.ok_or(ApiError::Unauthorized)?;
     if expires_at < db::now_ms() {
         return Err(ApiError::Unauthorized);
     }
-    Ok(UserId::new(login_id))
+    Ok((UserId::new(login_id), session_id))
 }
 
 fn validate_login_id(s: &str) -> Result<(), ApiError> {
@@ -456,7 +514,7 @@ async fn post_message(
     let uid = authenticate(&state, &headers).await?;
 
     // C11: per-uid 限流，防 DB flood
-    if !state.check_rate(&uid, 10.0, 30.0) {
+    if !state.check_rate_scoped(&uid, "messages", 10.0, 30.0) {
         return Err(ApiError::BadRequest("message rate limited".into()));
     }
 

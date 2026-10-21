@@ -1,13 +1,96 @@
-//! 视频画质档位选择器（Phase 3a：UI 骨架，未接入 media 层）。
+//! 视频画质档位选择器。
 
 use dioxus::prelude::*;
+use kaede_protocol::VideoBitrate;
 
-use crate::state::{UiState, VoiceState};
+use crate::state::{UiState, VoiceControls, VoiceState};
+
+/// 应用当前档位/码率。
+///
+/// 正在屏幕共享时执行 unpublish → publish（Web 为 stop → start），
+/// 让新分辨率立即生效；未共享时只更新信号，下次共享生效。
+fn apply_profile(voice: VoiceState, controls: VoiceControls, mut ui: UiState) {
+    if !*controls.screen_on.read() {
+        ui.toast
+            .set(Some(("已更新画质，下次共享生效".into(), false)));
+        return;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let profile = *voice.current_profile.read();
+        let bitrate = *voice.current_bitrate.read();
+        let handle_opt = voice.handle.read().clone();
+        let mut controls = controls;
+        spawn(async move {
+            let Some(handle) = handle_opt else {
+                ui.toast.set(Some(("未连接媒体会话".into(), true)));
+                controls.screen_on.set(false);
+                return;
+            };
+            if let Err(e) = handle
+                .inner()
+                .unpublish(kaede_media_session::TrackKind::ScreenVideo)
+                .await
+            {
+                tracing::warn!("screen republish unpublish: {}", e);
+            }
+            let bps = profile.bitrate_bps(bitrate);
+            let config = kaede_capture::VideoConfig {
+                encoder: kaede_capture::EncoderKind::Auto,
+                fps: profile.fps,
+                bitrate_kbps: (bps / 1000) as u32,
+                show_cursor: true,
+                display_index: 0,
+                width: Some(profile.width),
+                height: Some(profile.height),
+            };
+            match handle
+                .inner()
+                .publish(kaede_media_session::PublishSource::Screen { config })
+                .await
+            {
+                Ok(()) => {
+                    ui.toast
+                        .set(Some((format!("已按 {} 重新共享", profile.label()), false)));
+                }
+                Err(e) => {
+                    tracing::warn!("screen republish publish: {}", e);
+                    controls.screen_on.set(false);
+                    ui.toast.set(Some((format!("重新共享失败: {}", e), true)));
+                }
+            }
+        });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let profile = *voice.current_profile.read();
+        let mut controls = controls;
+        spawn(async move {
+            if let Err(e) = crate::voice_web::set_screen_share(false, profile).await {
+                tracing::warn!("[voice-web] stop for republish: {}", e);
+            }
+            match crate::voice_web::set_screen_share(true, profile).await {
+                Ok(()) => {
+                    ui.toast
+                        .set(Some((format!("已按 {} 重新共享", profile.label()), false)));
+                }
+                Err(e) => {
+                    tracing::warn!("[voice-web] republish: {}", e);
+                    controls.screen_on.set(false);
+                    ui.toast.set(Some((format!("重新共享失败: {}", e), true)));
+                }
+            }
+        });
+    }
+}
 
 #[component]
 pub fn VideoProfilePicker() -> Element {
     let mut ui = use_context::<UiState>();
     let mut voice = use_context::<VoiceState>();
+    let controls = use_context::<VoiceControls>();
 
     if !*ui.video_profile_picker_open.read() {
         return rsx! {};
@@ -27,7 +110,7 @@ pub fn VideoProfilePicker() -> Element {
                 div { class: "server-modal-title", "选择视频画质档位" }
                 div {
                     style: "font-size: 12px; color: var(--fg-faint); margin-bottom: 12px;",
-                    "Phase 3a：当前为 UI 预览，暂未接入编码器。实际生效见 Phase 3b。"
+                    "档位会传入编码器；共享中切换会自动重建屏幕共享。"
                 }
                 div {
                     style: "display: flex; gap: 6px; margin-bottom: 12px; align-items: center;",
@@ -35,7 +118,7 @@ pub fn VideoProfilePicker() -> Element {
                         style: "font-size: 13px; color: var(--fg-muted); margin-right: 4px;",
                         "码率："
                     }
-                    for q in kaede_protocol::VideoBitrate::all().iter() {
+                    for q in VideoBitrate::all().iter() {
                         {
                             let q = *q;
                             let is_cur = q == current_bitrate;
@@ -47,7 +130,7 @@ pub fn VideoProfilePicker() -> Element {
                                     style: "padding: 6px 14px; font-size: 13px;",
                                     onclick: move |_| {
                                         voice.current_bitrate.set(q);
-                                        ui.toast.set(Some((format!("码率：{}（Phase 3b 生效）", q.label()), false)));
+                                        apply_profile(voice, controls, ui);
                                     },
                                     "{label}"
                                 }
@@ -63,9 +146,9 @@ pub fn VideoProfilePicker() -> Element {
                             let is_current = p == current;
                             let bitrate_hint = format!(
                                 "低 {} / 标准 {} / 无损 {}",
-                                p.bitrate_label(kaede_protocol::VideoBitrate::Low),
-                                p.bitrate_label(kaede_protocol::VideoBitrate::Standard),
-                                p.bitrate_label(kaede_protocol::VideoBitrate::Lossless),
+                                p.bitrate_label(VideoBitrate::Low),
+                                p.bitrate_label(VideoBitrate::Standard),
+                                p.bitrate_label(VideoBitrate::Lossless),
                             );
                             rsx! {
                                 button {
@@ -75,7 +158,7 @@ pub fn VideoProfilePicker() -> Element {
                                     onclick: move |_| {
                                         voice.current_profile.set(p);
                                         ui.video_profile_picker_open.set(false);
-                                        ui.toast.set(Some((format!("画质：{}（Phase 3b 生效）", p.label()), false)));
+                                        apply_profile(voice, controls, ui);
                                     },
                                     div {
                                         style: "display: flex; align-items: center; width: 100%; gap: 8px;",

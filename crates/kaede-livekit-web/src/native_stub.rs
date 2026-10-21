@@ -11,7 +11,11 @@ impl LiveKitWebSession {
     pub async fn connect(&self, _url: &str, _token: &str) -> Result<(), LiveKitWebError> {
         Err(LiveKitWebError::NotSupported)
     }
-    pub async fn set_screen_share(&self, _enabled: bool) -> Result<(), LiveKitWebError> {
+    pub async fn set_screen_share(
+        &self,
+        _enabled: bool,
+        _profile: kaede_protocol::VideoProfile,
+    ) -> Result<(), LiveKitWebError> {
         Err(LiveKitWebError::NotSupported)
     }
     pub async fn set_microphone(&self, _enabled: bool) -> Result<(), LiveKitWebError> {

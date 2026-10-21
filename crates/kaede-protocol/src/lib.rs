@@ -34,7 +34,56 @@ pub use video::{
     ALL_VIDEO_PROFILES, DEFAULT_VIDEO_BITRATE, DEFAULT_VIDEO_PROFILE, VideoBitrate, VideoProfile,
 };
 
+use serde::de::{Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::marker::PhantomData;
+
+/// 限制序列元素数，防止 16 MiB 的“空数组”在解码时膨胀成数亿字节。
+fn bounded_seq<'de, D, T>(deserializer: D, max: usize) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Bounded<T> {
+        max: usize,
+        _marker: PhantomData<T>,
+    }
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for Bounded<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a sequence with at most {} elements", self.max)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(self.max));
+            while let Some(item) = seq.next_element()? {
+                if out.len() >= self.max {
+                    return Err(serde::de::Error::custom("sequence too long"));
+                }
+                out.push(item);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_seq(Bounded {
+        max,
+        _marker: PhantomData,
+    })
+}
+
+fn bounded_packages<'de, D>(d: D) -> Result<Vec<Vec<u8>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    bounded_seq(d, 256)
+}
+
+fn bounded_peers<'de, D>(d: D) -> Result<Vec<UserId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    bounded_seq(d, 8192)
+}
 
 // ============================================================================
 // 常量
@@ -43,10 +92,14 @@ use serde::{Deserialize, Serialize};
 /// 协议版本。
 ///
 /// v3：新增 `ServerMessage::ChannelMessage`（私密频道实时消息）。
-pub const PROTOCOL_VERSION: u16 = 3;
+/// v4：DM/私密频道密文升级为 v2（AAD 绑定发送者/接收者/消息 id，0x05 前缀）。
+/// v5：新增 `ServerMessage::FriendsChanged`；移除 SDP/ICE/SfuToken 遗留变体。
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// 服务器接受的最低协议版本。
-pub const MIN_SUPPORTED_VERSION: u16 = 3;
+///
+/// DM 密文格式不兼容旧客户端，必须整体升级，避免旧客户端静默解密失败。
+pub const MIN_SUPPORTED_VERSION: u16 = 5;
 
 /// 单条线消息的硬上限。
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
@@ -154,26 +207,11 @@ pub enum ClientMessage {
         payload: Vec<u8>,
     },
 
-    // ---- 媒体协商（WebRTC 信令，点对点）----
-    SdpOffer {
-        to: UserId,
-        sdp: String,
-    },
-
-    SdpAnswer {
-        to: UserId,
-        sdp: String,
-    },
-
-    IceCandidate {
-        to: UserId,
-        candidate: String,
-    },
-
     // ---- MLS 目录 ----
     /// 上传自己的 KeyPackage 队列。服务器排队，Add 时按需取出。
     /// 一个 KeyPackage 只能用一次，用完服务器删除。
     PublishKeyPackages {
+        #[serde(deserialize_with = "bounded_packages")]
         packages: Vec<Vec<u8>>,
     },
 
@@ -218,10 +256,6 @@ pub enum ClientMessage {
         #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
     },
-
-    // ---- 媒体 token ----
-    /// 请求 LiveKit 接入 token。
-    SfuTokenRequest,
 
     // ---- 在线状态 ----
     /// 设置自己的在线状态。
@@ -383,6 +417,13 @@ pub enum ServerMessage {
         member: UserId,
     },
 
+    /// 当前用户被移出私密频道（或频道已不可见）。
+    ///
+    /// 客户端应删除本地 channel group，并把频道从列表移除。
+    ChannelRemoved {
+        channel_id: String,
+    },
+
     /// 私密频道实时消息（v3）。
     ///
     /// 客户端把 `0x03 || AES-GCM 密文` 写入 `POST /api/messages` 后，
@@ -407,9 +448,16 @@ pub enum ServerMessage {
         login_id: String,
     },
 
+    /// 好友关系发生变化（请求 / 接受 / 删除）。
+    ///
+    /// 无业务负载：客户端收到后重新拉取 `GET /api/friends`。
+    /// 离线不补投，登录后由 HTTP 列表兜底。
+    FriendsChanged,
+
     // ---- 房间 ----
     /// 对 [`ClientMessage::Join`] 的回应。携带当前所有其他成员。
     Joined {
+        #[serde(deserialize_with = "bounded_peers")]
         peers: Vec<UserId>,
     },
 
@@ -421,22 +469,6 @@ pub enum ServerMessage {
     /// 有成员离开。
     PeerLeft {
         uid: UserId,
-    },
-
-    // ---- 媒体协商转发 ----
-    SdpOffer {
-        from: UserId,
-        sdp: String,
-    },
-
-    SdpAnswer {
-        from: UserId,
-        sdp: String,
-    },
-
-    IceCandidate {
-        from: UserId,
-        candidate: String,
     },
 
     // ---- MLS 目录回应 ----
@@ -472,14 +504,6 @@ pub enum ServerMessage {
         from: UserId,
         #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
-    },
-
-    // ---- 媒体 token ----
-    SfuToken {
-        token: String,
-        ws_url: String,
-        room: String,
-        identity: String,
     },
 
     // ---- 保活 ----
@@ -568,16 +592,14 @@ pub enum ForwardTarget<'a> {
 impl ClientMessage {
     /// 服务器判断该消息是否需要转发。
     ///
-    /// 返回 `None` 表示服务器自己处理（握手、房间、目录、token、ping）。
+    /// 返回 `None` 表示服务器自己处理（握手、房间、目录、ping）。
     /// 服务器不需要 match 每个变体，用此方法即可实现转发。
     pub fn forward_target(&self) -> Option<ForwardTarget<'_>> {
         match self {
             // 点对点
-            Self::SdpOffer { to, .. }
-            | Self::SdpAnswer { to, .. }
-            | Self::IceCandidate { to, .. }
-            | Self::MlsWelcome { to, .. }
-            | Self::ChannelSync { to, .. } => Some(ForwardTarget::Direct(to)),
+            Self::MlsWelcome { to, .. } | Self::ChannelSync { to, .. } => {
+                Some(ForwardTarget::Direct(to))
+            }
 
             // 广播
             Self::MlsCommit { .. } | Self::MlsProposal { .. } | Self::MlsAppMessage { .. } => {
@@ -594,7 +616,6 @@ impl ClientMessage {
             | Self::PublishKeyPackages { .. }
             | Self::FetchKeyPackage { .. }
             | Self::ChannelCommit { .. }
-            | Self::SfuTokenRequest
             | Self::SetPresence { .. }
             | Self::Ping { .. } => None,
         }
@@ -658,6 +679,16 @@ mod tests {
         assert_eq!(msg, back);
     }
 
+    #[test]
+    fn bounded_packages_rejects_oversized_sequence() {
+        // 16 MiB 的“空数组”会在解码时膨胀；限制必须在 serde visitor 层生效。
+        let msg = ClientMessage::PublishKeyPackages {
+            packages: vec![Vec::new(); 300],
+        };
+        let bytes = msg.encode().expect("encode");
+        assert!(ClientMessage::decode(&bytes).is_err());
+    }
+
     fn round_trip_server(msg: ServerMessage) {
         let bytes = msg.encode().expect("encode");
         let back = ServerMessage::decode(&bytes).expect("decode");
@@ -702,14 +733,6 @@ mod tests {
     }
 
     #[test]
-    fn sdp_offer_round_trip() {
-        round_trip_client(ClientMessage::SdpOffer {
-            to: UserId::new("alice"),
-            sdp: "v=0\r\no=- 123 456 IN IP4 127.0.0.1\r\n".into(),
-        });
-    }
-
-    #[test]
     fn server_error_round_trip() {
         round_trip_server(ServerMessage::Error {
             code: ErrorCode::UnsupportedVersion,
@@ -733,6 +756,11 @@ mod tests {
             ts: 123456789,
             ciphertext: vec![0x03, 9, 8, 7],
         });
+    }
+
+    #[test]
+    fn friends_changed_round_trip() {
+        round_trip_server(ServerMessage::FriendsChanged);
     }
 
     #[test]
@@ -780,12 +808,12 @@ mod tests {
 
     #[test]
     fn forward_target_classification() {
-        let sdp = ClientMessage::SdpOffer {
+        let direct = ClientMessage::MlsWelcome {
             to: UserId::new("alice"),
-            sdp: String::new(),
+            payload: vec![],
         };
         assert!(matches!(
-            sdp.forward_target(),
+            direct.forward_target(),
             Some(ForwardTarget::Direct(_))
         ));
 

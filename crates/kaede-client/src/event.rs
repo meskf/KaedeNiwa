@@ -58,6 +58,19 @@ pub enum ClientEvent {
     /// 成员被踢。
     MemberRemoved { server_id: String, login_id: String },
 
+    /// 好友关系发生变化（请求 / 接受 / 删除）。
+    ///
+    /// 无业务负载：UI 收到后重新拉取好友列表。
+    FriendsChanged { server_id: String },
+
+    /// 附件上传进度（已发送字节 / 总字节）。
+    AttachmentProgress {
+        server_id: String,
+        name: String,
+        sent: u64,
+        total: u64,
+    },
+
     /// 有 peer 加入。
     PeerJoined { server_id: String, uid: UserId },
 
@@ -98,32 +111,6 @@ pub enum ClientEvent {
         server_id: String,
         from: UserId,
         meta: crate::payload::MediaMetaPayload,
-    },
-
-    /// 收到 WebRTC 信令。
-    SdpOffer {
-        server_id: String,
-        from: UserId,
-        sdp: String,
-    },
-    SdpAnswer {
-        server_id: String,
-        from: UserId,
-        sdp: String,
-    },
-    IceCandidate {
-        server_id: String,
-        from: UserId,
-        candidate: String,
-    },
-
-    /// 收到 SFU token。
-    SfuToken {
-        server_id: String,
-        token: String,
-        ws_url: String,
-        room: String,
-        identity: String,
     },
 
     /// 收到 DM 消息（B3 方案：per-conv AEAD 已解密）。

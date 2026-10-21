@@ -28,10 +28,19 @@ use crate::event::{MediaEvent, RemoteKind, ScreenStats, TrackId};
 
 const EVENT_CAPACITY: usize = 128;
 
+fn hex_key(key: &[u8]) -> String {
+    let mut s = String::with_capacity(key.len() * 2);
+    for b in key {
+        use std::fmt::Write as _;
+        let _ = write!(&mut s, "{b:02x}");
+    }
+    s
+}
+
 struct PublishedEntry {
-    /// 保留供未来 unpublish_track 用。
+    /// 真实 LiveKit publication sid，用于 unpublish_track。
     #[allow(dead_code)]
-    sid: String,
+    sid: TrackSid,
     stop_tx: Option<oneshot::Sender<()>>,
     handle: tokio::task::JoinHandle<()>,
 }
@@ -101,14 +110,21 @@ impl MediaSession {
                 ratchet_salt: b"LKFrameEncryptionKey".to_vec(),
                 ..Default::default()
             };
-            let kp = KeyProvider::with_shared_key(kp_opts, key.as_slice().to_vec());
+            // 与 Web 端保持一致：PBKDF2 的 password 是 32 字节 key 的
+            // 小写 hex 文本（ASCII），而不是原始二进制。JS 侧
+            // setKey(string) 会对 UTF-8 文本做 PBKDF2(100000, SHA-256)。
+            let password = hex_key(key.as_slice());
+            let kp = KeyProvider::with_shared_key(kp_opts, password.into_bytes());
             opts.encryption = Some(E2eeOptions {
                 encryption_type: EncryptionType::Gcm,
                 key_provider: kp,
             });
             tracing::info!("[media-session] E2EE enabled");
         } else {
-            tracing::warn!("[media-session] E2EE DISABLED (fallback to DTLS-SRTP)");
+            // 不再允许静默明文媒体：调用方必须先派生 MLS exporter key。
+            return Err(MediaError::Sink(
+                "E2EE key missing; refusing to connect without media encryption".into(),
+            ));
         }
 
         let (room, room_events) = livekit::Room::connect(&cfg.ws_url, &cfg.token, opts)
@@ -212,9 +228,10 @@ impl MediaSession {
             )));
         }
 
-        // C-5: 使用 config 里的分辨率（None 时回退 1080p 保持向后兼容）
-        let width = config.width.unwrap_or(1920);
-        let height = config.height.unwrap_or(1080);
+        // C-5: 未显式指定时使用主显示器实际分辨率，而不是硬编码 1080p。
+        let (dw, dh) = kaede_capture::primary_display_size();
+        let width = config.width.unwrap_or(dw);
+        let height = config.height.unwrap_or(dh);
         let resolution = VideoResolution { width, height };
 
         let target_bitrate_bps = (config.bitrate_kbps as u64) * 1000;
@@ -263,18 +280,23 @@ impl MediaSession {
             ..Default::default()
         };
 
-        self.room
+        let publication = self
+            .room
             .local_participant()
             .publish_track(LocalTrack::Video(track), opts)
             .await
             .map_err(|e| MediaError::Sink(format!("publish_track(screen): {:?}", e)))?;
-
-        let sid = "screen".to_string();
+        // 必须保存真实 publication sid，否则 unpublish 无法撤销 track。
+        let sid = publication.sid();
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         let events = self.events_tx.clone();
         let events_for_outer = events.clone();
-        let sid_for_ev = sid.clone();
+        let sid_for_ev = sid.to_string();
         let res_for_ev = resolution.clone();
+        let published_map = self.published.clone();
+        let room_handle = self.room.clone();
+        let sid_for_cleanup = sid.clone();
+        let events_for_cleanup = events.clone();
 
         let handle = tokio::spawn(async move {
             let (frame_tx, frame_rx) = async_channel::bounded::<kaede_capture::EncodedFrame>(8);
@@ -366,6 +388,14 @@ impl MediaSession {
                 let _ = collector.join();
             })
             .await;
+
+            // 任务无论因 stop 还是异常（3s 无帧）退出，都要撤销 track 并清理表项。
+            published_map.lock().unwrap().remove(&kind);
+            let _ = room_handle
+                .local_participant()
+                .unpublish_track(&sid_for_cleanup)
+                .await;
+            let _ = events_for_cleanup.send(MediaEvent::LocalUnpublished { kind });
         });
 
         self.published.lock().unwrap().insert(
@@ -431,17 +461,23 @@ impl MediaSession {
             ..Default::default()
         };
 
-        self.room
+        let publication = self
+            .room
             .local_participant()
             .publish_track(LocalTrack::Audio(track), opts)
             .await
             .map_err(|e| MediaError::Sink(format!("publish_track(audio): {:?}", e)))?;
 
-        let sid = format!("audio-{}", track_kind.as_str());
+        let sid = publication.sid();
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         let events = self.events_tx.clone();
-        let sid_for_ev = sid.clone();
+        let sid_for_ev = sid.to_string();
         let bytes_per_frame = 2 * channels as u32;
+
+        let published_map = self.published.clone();
+        let room_handle = self.room.clone();
+        let sid_for_cleanup = sid.clone();
+        let events_for_cleanup = events.clone();
 
         let events_for_collector = events.clone();
         let handle = tokio::spawn(async move {
@@ -512,6 +548,13 @@ impl MediaSession {
                 let _ = collector.join();
             })
             .await;
+
+            published_map.lock().unwrap().remove(&track_kind);
+            let _ = room_handle
+                .local_participant()
+                .unpublish_track(&sid_for_cleanup)
+                .await;
+            let _ = events_for_cleanup.send(MediaEvent::LocalUnpublished { kind: track_kind });
         });
 
         self.published.lock().unwrap().insert(
@@ -541,8 +584,9 @@ impl MediaSession {
         if let Some(tx) = e.stop_tx.take() {
             let _ = tx.send(());
         }
+        // 由发布任务在退出时统一 unpublish_track + 发送 LocalUnpublished，
+        // 这里只负责停止喂帧并等待其完成。
         let _ = e.handle.await;
-        let _ = self.events_tx.send(MediaEvent::LocalUnpublished { kind });
         Ok(())
     }
 

@@ -26,6 +26,25 @@ use crate::state::AppState;
 
 pub const MAX_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
 
+/// 附件目录总容量上限，防止任意登录用户持续上传把磁盘写满。
+const MAX_TOTAL_ATTACHMENT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+
+/// 统计附件目录当前占用（只统计普通文件）。
+async fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return 0;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if let Ok(meta) = entry.metadata().await
+            && meta.is_file()
+        {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/attachments", post(upload))
@@ -75,7 +94,7 @@ async fn upload(
     }
 
     // S-4: per-uid 限流，防附件上传 DoS（每秒 1 次，burst 10）
-    if !state.check_rate(&uid, 1.0, 10.0) {
+    if !state.check_rate_scoped(&uid, "upload", 1.0, 10.0) {
         return Err(ApiError::BadRequest("upload rate limited".into()));
     }
     if body.len() > MAX_ATTACHMENT_BYTES {
@@ -100,6 +119,14 @@ async fn upload(
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| ApiError::Internal(format!("mkdir: {}", e)))?;
+
+    // 全局磁盘配额：避免单个账号反复上传 32 MiB 文件耗尽磁盘。
+    let used = dir_size(&dir).await;
+    if used.saturating_add(body.len() as u64) > MAX_TOTAL_ATTACHMENT_BYTES {
+        return Err(ApiError::BadRequest(
+            "attachment storage quota exceeded".into(),
+        ));
+    }
 
     // P2-7: 先写 .tmp 再 rename——磁盘满/进程崩溃时不会留下半写文件
     let final_path = dir.join(&id);
@@ -135,11 +162,16 @@ async fn download(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let _uid = authenticate(&state, &headers).await?;
+    let uid = authenticate(&state, &headers).await?;
+    // 下载同样消耗带宽：限制单账号的并发/频率，防反复拉取大文件。
+    if !state.check_rate_scoped(&uid, "download", 5.0, 20.0) {
+        return Err(ApiError::BadRequest(
+            "attachment download rate limited".into(),
+        ));
+    }
 
     // H17: 严格 id 校验——白名单字符集，防路径穿越 / Windows ADS / 保留名
-    if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if !is_valid_attachment_id(&id) {
         return Err(ApiError::BadRequest("invalid id".into()));
     }
 
@@ -152,6 +184,18 @@ async fn download(
     let mime = "application/octet-stream";
 
     Ok((StatusCode::OK, [(header::CONTENT_TYPE, mime)], bytes))
+}
+
+/// 附件 id 白名单。
+///
+/// 上传 id 来自 `URL_SAFE_NO_PAD`，字母表包含 `-` 和 `_`；两者都必须允许，
+/// 否则约 29% 的附件生成后永远无法下载。仍然排除 `/`、`\`、`.` 等路径字符。
+fn is_valid_attachment_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn sanitize_name(s: &str) -> String {
@@ -203,4 +247,25 @@ fn is_allowed_mime(m: &str) -> bool {
             | "text/plain"
             | "application/octet-stream"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_id_accepts_urlsafe_alphabet() {
+        assert!(is_valid_attachment_id("att_AbC012_-xyz"));
+        assert!(is_valid_attachment_id("att_--------------------------"));
+        assert!(is_valid_attachment_id("att__________________________"));
+    }
+
+    #[test]
+    fn attachment_id_rejects_path_chars() {
+        assert!(!is_valid_attachment_id(""));
+        assert!(!is_valid_attachment_id("../etc/passwd"));
+        assert!(!is_valid_attachment_id("att..\\x"));
+        assert!(!is_valid_attachment_id("att/abc"));
+        assert!(!is_valid_attachment_id(&"a".repeat(65)));
+    }
 }

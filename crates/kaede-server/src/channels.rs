@@ -26,10 +26,17 @@ pub fn router(state: AppState) -> Router {
             axum::routing::patch(update_channel).delete(delete_channel),
         )
         .route("/api/channels/{id}/join", axum::routing::post(join_channel))
+        .route("/api/channels/{id}/members", get(list_channel_members))
+        .route(
+            "/api/channels/{id}/members/{login_id}",
+            axum::routing::delete(remove_channel_member),
+        )
         .route(
             "/api/channels/{id}/leave",
             axum::routing::delete(leave_channel),
         )
+        // 频道请求只有名称/密码等小字段；限制 body 防止未认证大包缓冲。
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }
 
@@ -117,7 +124,7 @@ async fn create_channel(
     let password_hash = if req.is_private {
         // 创建私密频道会跑 Argon2（最高 256 MiB）。必须和 login 一样限流 + 限并发，
         // 否则 op3+ 用户可用并发建频道打爆内存。
-        if !state.check_rate(&uid, 0.2, 3.0) {
+        if !state.check_rate_scoped(&uid, "create_channel", 0.2, 3.0) {
             return Err(ApiError::BadRequest("create_channel rate limited".into()));
         }
         let _permit = state
@@ -224,6 +231,26 @@ async fn update_channel(
     let (mut name, kind, mut position, created_at, is_private_raw, hash_tier) =
         row.ok_or_else(|| ApiError::NotFound("channel".into()))?;
     let is_private = is_private_raw != 0;
+
+    // 私密频道改名/排序必须仍是成员（或 op5）。否则退出过频道的人
+    // 仍可用已知 id 改名并向成员广播伪造信息。
+    if is_private {
+        let member: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM channel_members WHERE channel_id = ? AND login_id = ?")
+                .bind(&id)
+                .bind(uid.as_str())
+                .fetch_optional(&state.pool)
+                .await?;
+        if member.is_none() {
+            let op: Option<(String,)> = sqlx::query_as("SELECT op FROM members WHERE login_id = ?")
+                .bind(uid.as_str())
+                .fetch_optional(&state.pool)
+                .await?;
+            if op.map(|(o,)| o).as_deref() != Some("op5") {
+                return Err(ApiError::Unauthorized);
+            }
+        }
+    }
 
     if let Some(n) = req.name {
         let n = n.trim().to_string();
@@ -341,6 +368,12 @@ async fn delete_channel(
         .execute(&mut *tx)
         .await?;
 
+    // 已读游标同样是按频道 id 存的，频道删除后必须一起清理。
+    sqlx::query("DELETE FROM channel_reads WHERE channel_id = ?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+
     tx.commit().await?;
 
     // 删除时成员关系已清理：私密频道用事先保存的成员列表通知，
@@ -404,7 +437,7 @@ async fn join_channel(
     let uid = authenticate(&state, &headers).await?;
 
     // C10: per-uid 限流，防频道密码暴破
-    if !state.check_rate(&uid, 0.5, 3.0) {
+    if !state.check_rate_scoped(&uid, "join_channel", 0.5, 3.0) {
         return Err(ApiError::BadRequest("join_channel rate limited".into()));
     }
     // C10: 并发 Argon2 上限（同 login），防 OOM DoS
@@ -453,7 +486,8 @@ async fn join_channel(
         // P1: 已加入成员再次带 KP 请求 → 可能是 group 丢失后重连
         if req.key_package.is_some() {
             let others: Vec<(String,)> = sqlx::query_as(
-                "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ?",
+                "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ? \
+                 ORDER BY joined_at ASC, login_id ASC",
             )
             .bind(&id)
             .bind(uid.as_str())
@@ -601,6 +635,184 @@ async fn notify_authority(
     }
 }
 
+#[derive(Serialize)]
+struct ChannelMembersResp {
+    members: Vec<ChannelMember>,
+}
+
+#[derive(Serialize)]
+struct ChannelMember {
+    login_id: String,
+    nickname: String,
+    joined_at: i64,
+}
+
+/// 频道成员列表。
+///
+/// 公开频道所有登录用户可看；私密频道仅 `channel_members` 成员可看。
+async fn list_channel_members(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<ChannelMembersResp>, ApiError> {
+    let uid = authenticate(&state, &headers).await?;
+
+    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let Some((is_private,)) = meta else {
+        return Err(ApiError::NotFound("channel".into()));
+    };
+
+    if is_private != 0 {
+        let member: Option<(String,)> = sqlx::query_as(
+            "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id = ?",
+        )
+        .bind(&id)
+        .bind(uid.as_str())
+        .fetch_optional(&state.pool)
+        .await?;
+        if member.is_none() {
+            return Err(ApiError::Forbidden("not a channel member".into()));
+        }
+    }
+
+    let rows: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT cm.login_id, m.nickname, cm.joined_at \
+         FROM channel_members cm \
+         LEFT JOIN members m ON m.login_id = cm.login_id \
+         WHERE cm.channel_id = ? \
+         ORDER BY cm.joined_at ASC",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let members = rows
+        .into_iter()
+        .map(|(login_id, nickname, joined_at)| ChannelMember {
+            nickname: nickname.unwrap_or_else(|| login_id.clone()),
+            login_id,
+            joined_at,
+        })
+        .collect();
+
+    Ok(Json(ChannelMembersResp { members }))
+}
+
+/// 把成员移出私密频道（仅 op5）。移除后由频道权威成员执行 MLS remove + Commit。
+async fn remove_channel_member(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, target)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let uid = authenticate(&state, &headers).await?;
+
+    let op: Option<(String,)> = sqlx::query_as("SELECT op FROM members WHERE login_id = ?")
+        .bind(uid.as_str())
+        .fetch_optional(&state.pool)
+        .await?;
+    if !matches!(op, Some((ref o,)) if o == "op5") {
+        return Err(ApiError::Forbidden("only op5 can remove members".into()));
+    }
+
+    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let Some((is_private,)) = meta else {
+        return Err(ApiError::NotFound("channel".into()));
+    };
+    if is_private == 0 {
+        return Err(ApiError::BadRequest(
+            "only private channels have members".into(),
+        ));
+    }
+    if target == uid.as_str() {
+        return Err(ApiError::BadRequest("use leave to remove yourself".into()));
+    }
+
+    let exists: Option<(String,)> = sqlx::query_as(
+        "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id = ?",
+    )
+    .bind(&id)
+    .bind(&target)
+    .fetch_optional(&state.pool)
+    .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound("channel member".into()));
+    }
+
+    // 删除前先取其余成员（权威成员是最早加入者）。
+    let others: Vec<(String,)> = sqlx::query_as(
+        "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ? \
+         ORDER BY joined_at ASC",
+    )
+    .bind(&id)
+    .bind(&target)
+    .fetch_all(&state.pool)
+    .await?;
+
+    sqlx::query("DELETE FROM channel_members WHERE channel_id = ? AND login_id = ?")
+        .bind(&id)
+        .bind(&target)
+        .execute(&state.pool)
+        .await?;
+
+    // 通知被移除者：删除本地频道 group / 列表。
+    state.send_to(
+        &UserId::new(&target),
+        ServerMessage::ChannelRemoved {
+            channel_id: id.clone(),
+        },
+    );
+
+    // 通知权威成员轮换频道密钥并广播 Commit。
+    notify_member_left(&state, &id, &UserId::new(&target), &others).await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 通知频道权威成员（最早加入者）执行 MLS remove；离线则暂存事件。
+async fn notify_member_left(
+    state: &AppState,
+    channel_id: &str,
+    member: &UserId,
+    others: &[(String,)],
+) {
+    let fallback = others.first().map(|(m,)| m.clone());
+    let mut delivered = false;
+    for (target,) in others {
+        let sent = state.send_to(
+            &UserId::new(target),
+            ServerMessage::ChannelMemberLeft {
+                channel_id: channel_id.to_string(),
+                member: member.clone(),
+            },
+        );
+        if sent {
+            delivered = true;
+            break;
+        }
+    }
+    // 权威成员不在线：暂存事件，等它下次 Join 时补投并轮换频道密钥。
+    if !delivered
+        && let Some(authority) = fallback
+        && let Err(e) = crate::db::enqueue_envelope(
+            &state.pool,
+            &authority,
+            member.as_str(),
+            "channel_member_left",
+            Some(channel_id),
+            member.as_str().as_bytes(),
+        )
+        .await
+    {
+        tracing::warn!("enqueue channel_member_left failed: {}", e);
+    }
+}
+
 async fn leave_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -635,36 +847,7 @@ async fn leave_channel(
         .await?;
 
     if is_private {
-        let fallback = others.first().map(|(m,)| m.clone());
-        let mut delivered = false;
-        for (member,) in others {
-            let sent = state.send_to(
-                &UserId::new(member),
-                ServerMessage::ChannelMemberLeft {
-                    channel_id: id.clone(),
-                    member: uid.clone(),
-                },
-            );
-            if sent {
-                delivered = true;
-                break;
-            }
-        }
-        // 权威成员不在线：暂存事件，等它下次 Join 时补投并轮换频道密钥。
-        if !delivered
-            && let Some(authority) = fallback
-            && let Err(e) = crate::db::enqueue_envelope(
-                &state.pool,
-                &authority,
-                uid.as_str(),
-                "channel_member_left",
-                Some(&id),
-                uid.as_str().as_bytes(),
-            )
-            .await
-        {
-            tracing::warn!("enqueue channel_member_left failed: {}", e);
-        }
+        notify_member_left(&state, &id, &uid, &others).await;
     }
 
     Ok(StatusCode::NO_CONTENT)

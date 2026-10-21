@@ -18,7 +18,7 @@ impl MemoryStore {
     pub async fn put(&self, ns: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.data
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert((ns.into(), key.into()), value.to_vec());
         Ok(())
     }
@@ -27,13 +27,16 @@ impl MemoryStore {
         Ok(self
             .data
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&(ns.into(), key.into()))
             .cloned())
     }
 
     pub async fn delete(&self, ns: &str, key: &str) -> Result<(), StorageError> {
-        self.data.write().unwrap().remove(&(ns.into(), key.into()));
+        self.data
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(ns.into(), key.into()));
         Ok(())
     }
 
@@ -41,7 +44,7 @@ impl MemoryStore {
         Ok(self
             .data
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .keys()
             .filter(|(n, _)| n == ns)
             .map(|(_, k)| k.clone())
@@ -49,7 +52,10 @@ impl MemoryStore {
     }
 
     pub async fn clear(&self, ns: &str) -> Result<(), StorageError> {
-        self.data.write().unwrap().retain(|k, _| k.0.as_str() != ns);
+        self.data
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k, _| k.0.as_str() != ns);
         Ok(())
     }
 }

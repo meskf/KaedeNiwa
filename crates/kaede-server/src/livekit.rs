@@ -22,6 +22,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/livekit/token", post(issue_token))
         .route("/api/livekit/leave", post(leave_room))
         .route("/api/livekit/e2ee-key", post(issue_e2ee_key))
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }
 
@@ -52,6 +53,10 @@ async fn issue_token(
 
     if req.channel_id.is_empty() {
         return Err(ApiError::BadRequest("channel_id required".into()));
+    }
+    // 该端点会创建 room seed / participant 状态；必须限流，防无限虚构房间。
+    if !state.check_rate_scoped(&uid, "livekit_token", 2.0, 10.0) {
+        return Err(ApiError::BadRequest("livekit token rate limited".into()));
     }
 
     check_channel_access(&state, uid.as_str(), &req.channel_id).await?;
@@ -261,9 +266,34 @@ async fn check_channel_access(
     uid: &str,
     channel_id: &str,
 ) -> Result<(), ApiError> {
-    if crate::dm::parse_conv_id(channel_id).is_some() {
+    if let Some((a, b)) = crate::dm::parse_conv_id(channel_id) {
         if !crate::dm::is_member(channel_id, uid) {
             return Err(ApiError::Unauthorized);
+        }
+        // 不能只做字符串校验：否则 `dm:自己:随机` 也能创建 seed/participant。
+        let exists: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM dm_conversations WHERE \
+             (a = ? AND b = ?) OR (a = ? AND b = ?)",
+        )
+        .bind(a)
+        .bind(b)
+        .bind(b)
+        .bind(a)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| ApiError::Internal(format!("db: {e}")))?;
+        if exists.is_none() {
+            // 新会话在发送第一条消息前还没有索引行；要求双方账号都真实存在。
+            let accounts: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM accounts WHERE login_id IN (?, ?)")
+                    .bind(a)
+                    .bind(b)
+                    .fetch_one(&state.pool)
+                    .await
+                    .map_err(|e| ApiError::Internal(format!("db: {e}")))?;
+            if accounts.0 < 2 {
+                return Err(ApiError::NotFound("dm conversation".into()));
+            }
         }
         return Ok(());
     }

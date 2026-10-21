@@ -1,6 +1,8 @@
 //! 房间会话：把 HTTP 登录 + WS 连接 + MLS 建组 + 持久化 串成一条路径。
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use kaede_protocol::UserId;
@@ -12,6 +14,16 @@ use crate::connection::{AuxStorageHook, ServerConnection};
 use crate::error::ClientError;
 use crate::http::{HttpApi, LoginReq, RegisterReq};
 use crate::transport::WebSocketTransport;
+
+fn is_retryable_kp_error(e: &ClientError) -> bool {
+    match e {
+        ClientError::Http { status, .. } => {
+            matches!(status, 404 | 408 | 429) || (500..=599).contains(status)
+        }
+        ClientError::Transport(_) | ClientError::Connection(_) | ClientError::Timeout => true,
+        _ => false,
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn sleep_ms(ms: u64) {
@@ -57,6 +69,17 @@ pub struct HistoryMessage {
     pub plaintext: String,
     pub attachments: Vec<kaede_protocol::Attachment>,
     pub reply_to: Option<kaede_protocol::ReplyRef>,
+    /// @ 提及的 login_id（E2EE 内部字段）。
+    pub mentions: Vec<String>,
+}
+
+/// 本地历史搜索命中。
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub channel_id: String,
+    pub sender: String,
+    pub ts: i64,
+    pub text: String,
 }
 
 /// 一个房间会话。
@@ -70,6 +93,14 @@ pub struct RoomSession {
     storage_key: String,
     /// `<http_url>::<ws_url>`，用于派生 snapshot cipher key。
     server_url: String,
+    /// 串行化所有会推进 MLS epoch 的操作（add/remove/self_update）。
+    ///
+    /// 并发 Add 会让 Commit 的 epoch 标签与实际状态错位，接收方永久分叉。
+    mls_op_lock: futures_util::lock::Mutex<()>,
+    /// 快照持久化失败后置位：在恢复前拒绝新的发送，避免 ratchet 回退。
+    snapshot_broken: AtomicBool,
+    /// 频道 id → 是否私密。发送路径用它阻止“私密频道无 group 时回退主群”。
+    channel_privacy: Mutex<HashMap<String, bool>>,
 }
 
 impl RoomSession {
@@ -111,6 +142,7 @@ impl RoomSession {
             .login(LoginReq {
                 login_id: login_id.into(),
                 password: password.into(),
+                device_name: device_name(),
             })
             .await
         {
@@ -125,6 +157,7 @@ impl RoomSession {
                         login_id: login_id.into(),
                         password: password.into(),
                         nickname: String::new(),
+                        device_name: device_name(),
                     })
                     .await?
                 } else {
@@ -153,8 +186,12 @@ impl RoomSession {
         // 尝试从快照恢复
         let mut restored = false;
         if let Some(store) = &storage {
-            match store.get("mls", &storage_key).await {
-                Ok(Some(snap)) => {
+            // 旧版本的 event loop 曾把主群快照写到 `{server_url}/{uid}`
+            // （缺少 `mls/` 前缀）。读取时兼容并自动迁移到正确 Key。
+            let legacy_key = format!("{}/{}", server_url, auth.login_id);
+            #[allow(clippy::single_match)]
+            match load_main_snapshot(store, &storage_key, &legacy_key).await {
+                Some(snap) => {
                     // 按 snapshot 外层头的 alg_id 选 cipher：
                     // - 老明文格式（无 0x03 头）→ NoOpCipher
                     // - AES-GCM（0x03, 0x01）    → fallback SHA256 派生
@@ -188,10 +225,7 @@ impl RoomSession {
                         }
                     }
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!("[room] storage read failed: {}", e);
-                }
+                None => {}
             }
         }
 
@@ -220,6 +254,9 @@ impl RoomSession {
             storage,
             storage_key,
             server_url,
+            mls_op_lock: futures_util::lock::Mutex::new(()),
+            snapshot_broken: AtomicBool::new(false),
+            channel_privacy: Mutex::new(HashMap::new()),
         })
     }
 
@@ -287,8 +324,10 @@ impl RoomSession {
         // 尝试从快照恢复
         let mut restored = false;
         if let Some(store) = &storage {
-            match store.get("mls", &storage_key).await {
-                Ok(Some(snap)) => {
+            let legacy_key = format!("{}/{}", server_url, login_id);
+            #[allow(clippy::single_match)]
+            match load_main_snapshot(store, &storage_key, &legacy_key).await {
+                Some(snap) => {
                     let cipher =
                         crate::keystore::device_cipher_for_snapshot(login_id, &server_url, &snap);
                     match conn.mls_restore_from_snapshot_with_cipher(&snap, Some(cipher.as_ref())) {
@@ -315,10 +354,7 @@ impl RoomSession {
                         }
                     }
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!("[room] storage read failed: {}", e);
-                }
+                None => {}
             }
         }
 
@@ -347,6 +383,9 @@ impl RoomSession {
             storage,
             storage_key,
             server_url,
+            mls_op_lock: futures_util::lock::Mutex::new(()),
+            snapshot_broken: AtomicBool::new(false),
+            channel_privacy: Mutex::new(HashMap::new()),
         })
     }
 
@@ -420,6 +459,8 @@ impl RoomSession {
     /// **P1-5**：碰撞错误信息改为可操作的用户指引（不再建议用户"改 login_id"）。
     /// **P1-15**：本地 epoch 已前进但广播失败 → 返回 Err。
     pub async fn host_add_peer(&self, peer: &UserId) -> Result<(), ClientError> {
+        // 所有 epoch 变更串行化：否则并发 Add 的 Commit 会带错 epoch 标签。
+        let _op_guard = self.mls_op_lock.lock().await;
         // 0. 幂等：peer 已在 group → 直接 Ok（重复 PeerJoined / 网络重试安全）
         let existing = self.conn.mls_member_uids();
         if existing.iter().any(|u| u == peer.as_str()) {
@@ -451,12 +492,27 @@ impl RoomSession {
 
         // 3. 本地加成员（本地 epoch 前进）
         let (commit, welcome) = self.conn.mls_add_member(&kp)?;
+        // 必须在同一临界区内捕获该 Commit 的 epoch，不能 await 之后再读。
+        let commit_epoch = self.conn.mls_epoch();
+
+        // 3.5 广播前先落盘：welcome 可能已送达、commit 却重试失败；
+        // 若此时不保存，重启会回滚到旧 epoch，新成员与房主永久分裂。
+        if let Err(e) = self.save_snapshot().await {
+            tracing::error!(
+                "[host_add_peer] aborting add for {}: snapshot save failed before broadcast: {}",
+                peer,
+                e
+            );
+            return Err(e);
+        }
 
         // 4. 先发 welcome（新成员必须先收到才能进群）——带重试
-        self.send_with_retry("welcome", peer, &welcome).await?;
+        self.send_with_retry("welcome", peer, &welcome, None)
+            .await?;
 
         // 5. 再发 commit（其他成员 epoch 前进）——带重试
-        self.send_with_retry("commit", peer, &commit).await?;
+        self.send_with_retry("commit", peer, &commit, Some(commit_epoch))
+            .await?;
 
         // 6. 快照保存（best effort）
         if let Err(e) = self.save_snapshot().await {
@@ -492,6 +548,11 @@ impl RoomSession {
                         DELAYS_MS.len(),
                         e
                     );
+                    // 校验类错误（credential/target 不匹配）重试只会继续消费
+                    // 服务端的一次性 KeyPackage，必须立即失败。
+                    if !is_retryable_kp_error(&e) {
+                        return Err(e);
+                    }
                     last_err = Some(e);
                     sleep_ms(*delay_ms).await;
                 }
@@ -509,6 +570,7 @@ impl RoomSession {
         what: &'static str,
         peer: &UserId,
         payload: &[u8],
+        commit_epoch: Option<u64>,
     ) -> Result<(), ClientError> {
         const DELAYS_MS: &[u64] = &[200, 400, 800, 1500];
         let mut last_err: Option<ClientError> = None;
@@ -516,9 +578,8 @@ impl RoomSession {
             let result = match what {
                 "welcome" => self.conn.send_welcome(peer.clone(), payload.to_vec()).await,
                 "commit" => {
-                    self.conn
-                        .send_commit(self.conn.mls_epoch(), payload.to_vec())
-                        .await
+                    let epoch = commit_epoch.unwrap_or_else(|| self.conn.mls_epoch());
+                    self.conn.send_commit(epoch, payload.to_vec()).await
                 }
                 _ => unreachable!("send_with_retry: unknown broadcast type {}", what),
             };
@@ -599,7 +660,9 @@ impl RoomSession {
             return Ok(());
         };
         // 没有变更就不写：避免每条无关消息都重写整包快照。
-        if !self.conn.take_main_dirty() {
+        // 但 broken 状态下要强制重试一次，存储恢复后能自动解除发送阻断。
+        let dirty = self.conn.take_main_dirty();
+        if !dirty && !self.snapshot_broken.load(Ordering::Acquire) {
             return Ok(());
         }
         let cipher = crate::keystore::device_cipher(self.uid.as_str(), &self.server_url);
@@ -607,16 +670,74 @@ impl RoomSession {
             Ok(s) => s,
             Err(e) => {
                 self.conn.restore_main_dirty();
+                self.report_snapshot_failure(&e);
                 return Err(e);
             }
         };
         match store.put("mls", &self.storage_key, &snap).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.snapshot_broken.store(false, Ordering::Release);
+                Ok(())
+            }
             Err(e) => {
                 self.conn.restore_main_dirty();
-                Err(ClientError::Storage(e.to_string()))
+                let err = ClientError::Storage(e.to_string());
+                self.report_snapshot_failure(&err);
+                Err(err)
             }
         }
+    }
+
+    /// 快照持续失败时向 UI 报错，并阻止后续发送。
+    fn report_snapshot_failure(&self, err: &ClientError) {
+        self.snapshot_broken.store(true, Ordering::Release);
+        self.conn.emit_local_event(ClientEvent::MlsSyncError {
+            server_id: self.conn.server_id().to_string(),
+            user_message: "本地密钥状态保存失败；为避免 nonce 复用，已暂停发送。\
+                           请检查磁盘/存储空间后重新登录"
+                .into(),
+            recoverable: false,
+            detail: err.to_string(),
+        });
+    }
+
+    fn ensure_snapshot_ok(&self) -> Result<(), ClientError> {
+        if self.snapshot_broken.load(Ordering::Acquire) {
+            return Err(ClientError::Storage(
+                "MLS snapshot persistence is broken; refusing to send".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn note_channel_privacy(&self, channel_id: &str, is_private: bool) {
+        self.channel_privacy
+            .lock()
+            .unwrap()
+            .insert(channel_id.to_string(), is_private);
+    }
+
+    /// 已知私密频道？（未知频道按公开处理，兼容旧调用方）
+    fn is_private_channel(&self, channel_id: &str) -> bool {
+        self.channel_privacy
+            .lock()
+            .unwrap()
+            .get(channel_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// 私密频道没有本地 group 时必须拒绝，绝不能退回主群加密。
+    fn ensure_channel_sendable(&self, channel_id: &str) -> Result<(), ClientError> {
+        if self.is_private_channel(channel_id) && !self.conn.channel_has_group(channel_id) {
+            return Err(ClientError::Protocol(
+                "private channel key missing; re-join the channel before sending".into(),
+            ));
+        }
+        if !self.conn.channel_has_group(channel_id) {
+            self.ensure_snapshot_ok()?;
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------------
@@ -628,7 +749,8 @@ impl RoomSession {
     // ---------------------------------------------------------------------
 
     fn local_msg_prefix(&self, channel_id: &str) -> String {
-        format!("{}|{}|", self.server_url, channel_id)
+        // 必须带 uid：同一浏览器/机器换账号后不能读到上一个账号的消息。
+        format!("{}|{}|{}|", self.uid, self.server_url, channel_id)
     }
 
     fn local_msg_key(&self, channel_id: &str, ts: i64) -> String {
@@ -649,7 +771,12 @@ impl RoomSession {
             return;
         };
         let key = self.local_msg_key(channel_id, ts);
-        if let Err(e) = store.put("messages", &key, bytes).await {
+        // 本地消息也含明文；与 snapshot 使用同一设备 cipher 落盘。
+        let Some(sealed) = self.encrypt_cache(bytes) else {
+            tracing::warn!("[local-history] encrypt failed; skip persist");
+            return;
+        };
+        if let Err(e) = store.put("messages", &key, &sealed).await {
             tracing::warn!("[local-history] put failed: {}", e);
             return;
         }
@@ -689,7 +816,10 @@ impl RoomSession {
             let Ok(ts) = ts_part.parse::<i64>() else {
                 continue;
             };
-            let Ok(Some(bytes)) = store.get("messages", &key).await else {
+            let Ok(Some(raw)) = store.get("messages", &key).await else {
+                continue;
+            };
+            let Some(bytes) = self.decrypt_cache(&raw) else {
                 continue;
             };
             if let crate::payload::DecodedPayload::Message(p) = crate::payload::decode(&bytes) {
@@ -699,6 +829,7 @@ impl RoomSession {
                     plaintext: p.t,
                     attachments: p.a,
                     reply_to: p.r,
+                    mentions: p.m,
                 });
             }
         }
@@ -717,8 +848,30 @@ impl RoomSession {
 
     const HISTORY_CACHE_NS: &'static str = "history_cache";
 
+    /// 本地缓存加密头：`[0xCA,0xDE,0x01]`。不带头的旧数据按明文读取。
+    const CACHE_MAGIC: [u8; 3] = [0xCA, 0xDE, 0x01];
+
+    fn encrypt_cache(&self, plaintext: &[u8]) -> Option<Vec<u8>> {
+        let cipher = crate::keystore::device_cipher(self.uid.as_str(), &self.server_url);
+        let ct = cipher.encrypt(plaintext).ok()?;
+        let mut out = Vec::with_capacity(Self::CACHE_MAGIC.len() + ct.len());
+        out.extend_from_slice(&Self::CACHE_MAGIC);
+        out.extend_from_slice(&ct);
+        Some(out)
+    }
+
+    fn decrypt_cache(&self, raw: &[u8]) -> Option<Vec<u8>> {
+        if raw.starts_with(&Self::CACHE_MAGIC) {
+            let cipher = crate::keystore::device_cipher(self.uid.as_str(), &self.server_url);
+            cipher.decrypt(&raw[Self::CACHE_MAGIC.len()..]).ok()
+        } else {
+            // 兼容旧版明文缓存
+            Some(raw.to_vec())
+        }
+    }
+
     fn history_cache_prefix(&self, channel_id: &str) -> String {
-        format!("{}|{}|", self.server_url, channel_id)
+        format!("{}|{}|{}|", self.uid, self.server_url, channel_id)
     }
 
     async fn load_cached_history(&self, channel_id: &str) -> Vec<(i64, String, Vec<u8>)> {
@@ -742,7 +895,9 @@ impl RoomSession {
             let Ok(ts) = ts_str.parse::<i64>() else {
                 continue;
             };
-            if let Ok(Some(bytes)) = store.get(Self::HISTORY_CACHE_NS, &key).await {
+            if let Ok(Some(raw)) = store.get(Self::HISTORY_CACHE_NS, &key).await
+                && let Some(bytes) = self.decrypt_cache(&raw)
+            {
                 out.push((ts, sender.to_string(), bytes));
             }
         }
@@ -759,7 +914,11 @@ impl RoomSession {
             ts,
             sender
         );
-        if let Err(e) = store.put(Self::HISTORY_CACHE_NS, &key, bytes).await {
+        let Some(sealed) = self.encrypt_cache(bytes) else {
+            tracing::warn!("[history-cache] encrypt failed; skip persist");
+            return;
+        };
+        if let Err(e) = store.put(Self::HISTORY_CACHE_NS, &key, &sealed).await {
             tracing::warn!("[history-cache] put failed: {}", e);
         }
     }
@@ -783,10 +942,15 @@ impl RoomSession {
     }
 
     /// 解密一条历史记录：私密频道走 channel group（0x03），否则走主群 MLS。
-    fn decrypt_history_record(&self, channel_id: &str, ct: &[u8]) -> Option<Vec<u8>> {
+    fn decrypt_history_record(&self, channel_id: &str, sender: &str, ct: &[u8]) -> Option<Vec<u8>> {
         if ct.first() == Some(&0x03) {
-            match self.conn.channel_export_key(channel_id) {
-                Ok(key) => kaede_crypto::dm_cipher::open(&key, channel_id, &ct[1..]).ok(),
+            let key = self.conn.channel_export_key(channel_id).ok()?;
+            let body = &ct[1..];
+            match kaede_crypto::dm_cipher::open(&key, channel_id, sender, "", body) {
+                Ok((pt, _)) => Some(pt),
+                Err(kaede_crypto::dm_cipher::DmCipherError::UnknownVersion(_)) => {
+                    kaede_crypto::dm_cipher::open_legacy(&key, channel_id, body).ok()
+                }
                 Err(_) => None,
             }
         } else {
@@ -802,6 +966,7 @@ impl RoomSession {
                 plaintext: p.t,
                 attachments: p.a,
                 reply_to: p.r,
+                mentions: p.m,
             }),
             crate::payload::DecodedPayload::Raw(b) => Some(HistoryMessage {
                 sender,
@@ -809,6 +974,7 @@ impl RoomSession {
                 plaintext: String::from_utf8_lossy(&b).to_string(),
                 attachments: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
             }),
             // 反应 / 媒体信令不入历史
             _ => None,
@@ -822,6 +988,9 @@ impl RoomSession {
                 .delete("mls", &self.storage_key)
                 .await
                 .map_err(|e| ClientError::Storage(e.to_string()))?;
+            // 旧版本可能把同一快照写在无前缀 Key 下。
+            let legacy_key = format!("{}/{}", self.server_url, self.uid);
+            let _ = store.delete("mls", &legacy_key).await;
         }
         Ok(())
     }
@@ -838,6 +1007,29 @@ impl RoomSession {
     /// 指定 channel。
     pub async fn send_text_to(&self, channel_id: &str, text: &str) -> Result<(), ClientError> {
         self.send_text_with_attachments(channel_id, text, &[]).await
+    }
+
+    /// 使用调用方指定的 ts 发送；UI 用它保证乐观消息与广播 payload 的 ts 一致。
+    pub async fn send_text_to_at(
+        &self,
+        channel_id: &str,
+        text: &str,
+        ts: i64,
+    ) -> Result<(), ClientError> {
+        self.send_text_with_attachments_at(channel_id, text, &[], ts)
+            .await
+    }
+
+    /// 指定 channel、ts 与 @ 提及的纯文本消息。
+    pub async fn send_text_with_mentions_at(
+        &self,
+        channel_id: &str,
+        text: &str,
+        mentions: &[String],
+        ts: i64,
+    ) -> Result<(), ClientError> {
+        self.send_text_with_attachments_mentions_at(channel_id, text, &[], mentions, ts)
+            .await
     }
 
     /// 从某个 ts 之前拉历史（用于分页加载）。
@@ -870,7 +1062,7 @@ impl RoomSession {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            if let Some(pt) = self.decrypt_history_record(channel_id, &ct) {
+            if let Some(pt) = self.decrypt_history_record(channel_id, &r.sender, &ct) {
                 self.persist_cached_history(channel_id, r.ts, &r.sender, &pt)
                     .await;
                 if let Some(m) = Self::decode_cached(r.ts, r.sender.clone(), &pt) {
@@ -921,7 +1113,7 @@ impl RoomSession {
                     continue;
                 }
             };
-            match self.decrypt_history_record(channel_id, &ct) {
+            match self.decrypt_history_record(channel_id, &r.sender, &ct) {
                 Some(pt) => {
                     self.persist_cached_history(channel_id, r.ts, &r.sender, &pt)
                         .await;
@@ -948,7 +1140,14 @@ impl RoomSession {
 
     /// 列出频道。
     pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, ClientError> {
-        self.http.list_channels().await
+        let list = self.http.list_channels().await?;
+        {
+            let mut map = self.channel_privacy.lock().unwrap();
+            for ch in &list {
+                map.insert(ch.id.clone(), ch.is_private);
+            }
+        }
+        Ok(list)
     }
 
     /// 创建频道（需 op3+）。
@@ -957,7 +1156,9 @@ impl RoomSession {
         name: &str,
         kind: &str,
     ) -> Result<kaede_protocol::Channel, ClientError> {
-        self.http.create_channel(name, kind).await
+        let ch = self.http.create_channel(name, kind).await?;
+        self.note_channel_privacy(&ch.id, false);
+        Ok(ch)
     }
 
     /// 创建私密频道（B 方案：服务端准入 + 客户端 MLS 隔离）。
@@ -973,6 +1174,7 @@ impl RoomSession {
             .http
             .create_channel_with(name, kind, is_private, password, hash_tier)
             .await?;
+        self.note_channel_privacy(&ch.id, is_private);
         if is_private && let Err(e) = self.conn.channel_ensure_group(&ch.id) {
             tracing::warn!("channel_ensure_group failed for {}: {}", ch.id, e);
         }
@@ -985,6 +1187,8 @@ impl RoomSession {
     /// - **已有本地 group**（之前加入过）：只验证密码，不重新走 Welcome
     /// - **没有本地 group**（首次加入）：验证密码 + KP + Welcome 交换
     pub async fn join_channel(&self, channel_id: &str, password: &str) -> Result<(), ClientError> {
+        // 该 API 只用于私密频道；标记后即使 Welcome 失败也不会回退主群加密。
+        self.note_channel_privacy(channel_id, true);
         // 已有 group：只验证密码（server 会先验密码，通过后 204 幂等返回）
         if self.conn.channel_has_group(channel_id) {
             self.http.join_channel(channel_id, password, None).await?;
@@ -1049,12 +1253,107 @@ impl RoomSession {
         }
     }
 
+    /// 频道成员列表。
+    pub async fn list_channel_members(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<crate::http::ChannelMember>, ClientError> {
+        self.http.list_channel_members(channel_id).await
+    }
+
+    /// 把成员移出私密频道（仅 op5）。
+    pub async fn remove_channel_member(
+        &self,
+        channel_id: &str,
+        login_id: &str,
+    ) -> Result<(), ClientError> {
+        self.http.remove_channel_member(channel_id, login_id).await
+    }
+
+    /// 上报频道最后已读位置。
+    pub async fn mark_channel_read(&self, channel_id: &str, ts: i64) -> Result<(), ClientError> {
+        self.http.mark_read(Some(channel_id), None, ts).await
+    }
+
+    /// 上报 DM 最后已读位置。
+    pub async fn mark_dm_read(&self, conv_id: &str, ts: i64) -> Result<(), ClientError> {
+        self.http.mark_read(None, Some(conv_id), ts).await
+    }
+
+    /// 拉取未读计数。
+    pub async fn unread_counts(&self) -> Result<crate::http::UnreadCounts, ClientError> {
+        self.http.get_unread().await
+    }
+
+    /// 列出当前账号的登录会话（设备）。
+    pub async fn list_sessions(&self) -> Result<Vec<crate::http::SessionInfo>, ClientError> {
+        self.http.list_sessions().await
+    }
+
+    /// 撤销指定会话。
+    pub async fn revoke_session(&self, session_id: &str) -> Result<(), ClientError> {
+        self.http.revoke_session(session_id).await
+    }
+
+    /// 撤销其他所有会话。
+    pub async fn revoke_other_sessions(&self) -> Result<(), ClientError> {
+        self.http.revoke_other_sessions().await
+    }
+
+    /// 在本地已解密历史中搜索（大小写不敏感子串）。
+    ///
+    /// 搜索范围：`history_cache` + 本地已发送消息缓存；不请求服务器。
+    /// 返回按 ts 倒序，最多 `limit` 条。
+    pub async fn search_local(
+        &self,
+        query: &str,
+        channel_ids: &[String],
+        limit: usize,
+    ) -> Vec<SearchHit> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+
+        let mut hits = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for ch in channel_ids {
+            let mut push = |ts: i64, sender: &str, text: &str| {
+                if !text.to_lowercase().contains(&q) {
+                    return;
+                }
+                if !seen.insert((ch.clone(), ts, sender.to_string())) {
+                    return;
+                }
+                hits.push(SearchHit {
+                    channel_id: ch.clone(),
+                    sender: sender.to_string(),
+                    ts,
+                    text: text.to_string(),
+                });
+            };
+
+            for (ts, sender, bytes) in self.load_cached_history(ch).await {
+                if let Some(m) = Self::decode_cached(ts, sender, &bytes) {
+                    push(m.ts, &m.sender, &m.plaintext);
+                }
+            }
+            for m in self.load_local_messages(ch).await {
+                push(m.ts, &m.sender, &m.plaintext);
+            }
+        }
+
+        hits.sort_by_key(|a| std::cmp::Reverse(a.ts));
+        hits.truncate(limit);
+        hits
+    }
+
     /// 离开频道。
     ///
     /// 私密频道离开后立刻删除本地 channel group，避免继续持有频道密钥。
     pub async fn leave_channel(&self, channel_id: &str) -> Result<(), ClientError> {
         self.http.leave_channel(channel_id).await?;
-        self.conn.channel_drop_group(channel_id);
+        self.conn.channel_drop_group(channel_id).await;
         Ok(())
     }
 
@@ -1104,6 +1403,7 @@ impl RoomSession {
     /// 2. HTTP 删号（失败可重试，MLS 已踢人）
     /// 3. 快照保存（best effort）
     pub async fn remove_member(&self, login_id: &str) -> Result<(), ClientError> {
+        let _op_guard = self.mls_op_lock.lock().await;
         // C-10: 禁止踢自己（否则本地从 MLS 移出自己 + 删除自己账号，但客户端仍在运行）
         if login_id == self.uid.as_str() {
             return Err(ClientError::Protocol(
@@ -1120,7 +1420,8 @@ impl RoomSession {
 
         // 2. MLS 移除 + 广播（尽力而为，失败不阻塞踢人）
         if let Ok(commit) = self.conn.mls_remove_member_by_uid(login_id) {
-            if let Err(e) = self.conn.send_commit(self.conn.mls_epoch(), commit).await {
+            let commit_epoch = self.conn.mls_epoch();
+            if let Err(e) = self.conn.send_commit(commit_epoch, commit).await {
                 tracing::error!("[kick] MLS commit broadcast failed after HTTP kick: {}", e);
                 self.conn.emit_local_event(ClientEvent::MlsSyncError {
                     server_id: self.conn.server_id().to_string(),
@@ -1155,6 +1456,11 @@ impl RoomSession {
     /// 上传附件。
     /// 按 target_id 派生附件加密 key。
     fn resolve_file_key(&self, target_id: &str) -> Result<[u8; 32], ClientError> {
+        if self.is_private_channel(target_id) && !self.conn.channel_has_group(target_id) {
+            return Err(ClientError::Protocol(
+                "private channel key missing; cannot encrypt attachment on main group".into(),
+            ));
+        }
         if target_id.starts_with("dm:") {
             self.conn
                 .dm_export_key_for(target_id, kaede_mls::SframePurpose::File)
@@ -1186,7 +1492,21 @@ impl RoomSession {
         wrapped.push(0x04);
         wrapped.extend_from_slice(&nonce);
         wrapped.extend_from_slice(&ct);
-        self.http.upload_attachment(name, mime, wrapped).await
+
+        // 上传进度事件：UI 据此显示进度条。
+        let conn = self.conn.clone();
+        let progress_name = name.to_string();
+        let progress: crate::http::UploadProgress = std::sync::Arc::new(move |sent, total| {
+            conn.emit_local_event(ClientEvent::AttachmentProgress {
+                server_id: conn.server_id().to_string(),
+                name: progress_name.clone(),
+                sent,
+                total,
+            });
+        });
+        self.http
+            .upload_attachment_with_progress(name, mime, wrapped, Some(progress))
+            .await
     }
 
     /// 下载附件（P0：客户端解密；兼容旧明文附件）。
@@ -1219,13 +1539,41 @@ impl RoomSession {
         text: &str,
         reply_to: kaede_protocol::ReplyRef,
     ) -> Result<(), ClientError> {
-        let payload = crate::payload::MessagePayload::new(
+        self.send_text_with_reply_at(channel_id, text, reply_to, now_ms())
+            .await
+    }
+
+    /// 指定 ts 的回复消息。
+    pub async fn send_text_with_reply_at(
+        &self,
+        channel_id: &str,
+        text: &str,
+        reply_to: kaede_protocol::ReplyRef,
+        ts: i64,
+    ) -> Result<(), ClientError> {
+        self.send_text_with_reply_mentions_at(channel_id, text, reply_to, &[], ts)
+            .await
+    }
+
+    /// 指定 ts、带 @ 提及的回复消息。
+    pub async fn send_text_with_reply_mentions_at(
+        &self,
+        channel_id: &str,
+        text: &str,
+        reply_to: kaede_protocol::ReplyRef,
+        mentions: &[String],
+        ts: i64,
+    ) -> Result<(), ClientError> {
+        self.ensure_channel_sendable(channel_id)?;
+        let mut payload = crate::payload::MessagePayload::new(
             channel_id,
             self.uid.as_str(),
             text,
             Vec::new(),
             Some(reply_to),
         );
+        payload.ts = ts;
+        payload.m = mentions.to_vec();
         let bytes = payload
             .to_bytes()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
@@ -1234,8 +1582,9 @@ impl RoomSession {
         // 服务端会拒绝主群密文，避免私密内容被全服解密。
         let ciphertext = if self.conn.channel_has_group(channel_id) {
             let key = self.conn.channel_export_key(channel_id)?;
-            let sealed = kaede_crypto::dm_cipher::seal(&key, channel_id, &bytes)
-                .map_err(|e| ClientError::Protocol(format!("channel seal: {e}")))?;
+            let sealed =
+                kaede_crypto::dm_cipher::seal(&key, channel_id, self.uid.as_str(), "", &bytes)
+                    .map_err(|e| ClientError::Protocol(format!("channel seal: {e}")))?;
             let mut out = Vec::with_capacity(1 + sealed.len());
             out.push(0x03u8);
             out.extend_from_slice(&sealed);
@@ -1281,13 +1630,41 @@ impl RoomSession {
         text: &str,
         attachments: &[kaede_protocol::Attachment],
     ) -> Result<(), ClientError> {
-        let payload = crate::payload::MessagePayload::new(
+        self.send_text_with_attachments_at(channel_id, text, attachments, now_ms())
+            .await
+    }
+
+    /// 指定 ts 的附件消息。
+    pub async fn send_text_with_attachments_at(
+        &self,
+        channel_id: &str,
+        text: &str,
+        attachments: &[kaede_protocol::Attachment],
+        ts: i64,
+    ) -> Result<(), ClientError> {
+        self.send_text_with_attachments_mentions_at(channel_id, text, attachments, &[], ts)
+            .await
+    }
+
+    /// 指定 ts、带 @ 提及的附件消息。
+    pub async fn send_text_with_attachments_mentions_at(
+        &self,
+        channel_id: &str,
+        text: &str,
+        attachments: &[kaede_protocol::Attachment],
+        mentions: &[String],
+        ts: i64,
+    ) -> Result<(), ClientError> {
+        self.ensure_channel_sendable(channel_id)?;
+        let mut payload = crate::payload::MessagePayload::new(
             channel_id,
             self.uid.as_str(),
             text,
             attachments.to_vec(),
             None,
         );
+        payload.ts = ts;
+        payload.m = mentions.to_vec();
         let bytes = payload
             .to_bytes()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
@@ -1296,8 +1673,9 @@ impl RoomSession {
         // 私密频道：走 channel group 的 AES-GCM key（首字节 0x03 标记）
         let ciphertext = if self.conn.channel_has_group(channel_id) {
             let key = self.conn.channel_export_key(channel_id)?;
-            let sealed = kaede_crypto::dm_cipher::seal(&key, channel_id, &bytes)
-                .map_err(|e| ClientError::Protocol(format!("channel seal: {e}")))?;
+            let sealed =
+                kaede_crypto::dm_cipher::seal(&key, channel_id, self.uid.as_str(), "", &bytes)
+                    .map_err(|e| ClientError::Protocol(format!("channel seal: {e}")))?;
             let mut out = Vec::with_capacity(1 + sealed.len());
             out.push(0x03u8);
             out.extend_from_slice(&sealed);
@@ -1339,7 +1717,7 @@ impl RoomSession {
         emoji: &str,
         action: &str, // "add" | "remove"
     ) -> Result<(), ClientError> {
-        if self.conn.channel_has_group(channel_id) {
+        if self.conn.channel_has_group(channel_id) || self.is_private_channel(channel_id) {
             return Err(ClientError::Protocol(
                 "private channel reactions are not supported yet".into(),
             ));
@@ -1395,7 +1773,7 @@ impl RoomSession {
                 continue;
             }
             #[allow(clippy::collapsible_if)]
-            if let Ok(pt) = self.conn.dm_open(conv_id, &ct) {
+            if let Ok(pt) = self.conn.dm_open_history(conv_id, &r.sender, &ct) {
                 if let crate::payload::DecodedPayload::Message(p) = crate::payload::decode(&pt) {
                     out.push(HistoryMessage {
                         sender: r.sender,
@@ -1403,6 +1781,7 @@ impl RoomSession {
                         plaintext: p.t,
                         attachments: p.a,
                         reply_to: p.r,
+                        mentions: p.m,
                     });
                 }
             }
@@ -1439,34 +1818,50 @@ impl RoomSession {
         text: &str,
         attachments: &[kaede_protocol::Attachment],
     ) -> Result<(), ClientError> {
+        self.send_dm_with_attachments_mentions(conv_id, text, attachments, &[])
+            .await
+    }
+
+    /// 带 @ 提及的 DM。
+    pub async fn send_dm_with_attachments_mentions(
+        &self,
+        conv_id: &str,
+        text: &str,
+        attachments: &[kaede_protocol::Attachment],
+        mentions: &[String],
+    ) -> Result<(), ClientError> {
         if !self.conn.dm_has_group(conv_id) {
             self.dm_ensure_group(conv_id).await?;
         }
 
-        let payload = crate::payload::MessagePayload::new(
+        let mut payload = crate::payload::MessagePayload::new(
             conv_id,
             self.uid.as_str(),
             text,
             attachments.to_vec(),
             None,
         );
+        payload.m = mentions.to_vec();
         let bytes = payload
             .to_bytes()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
 
         // B3：per-conv AEAD 加密
         let ciphertext = self.conn.dm_seal(conv_id, &bytes)?;
-        let ts = now_ms();
 
-        // 落库（HTTP）
-        if let Err(e) = self
+        // 落库（HTTP）。用服务器返回的权威 ts 做本地回显，
+        // 这样重新打开会话读取历史时能按 ts 与服务器记录去重。
+        let ts = match self
             .http
-            .dm_post_message(conv_id, ts, self.uid.as_str(), &ciphertext)
+            .dm_post_message(conv_id, now_ms(), self.uid.as_str(), &ciphertext)
             .await
         {
-            tracing::warn!("dm_post_message: {}", e);
-            return Err(e);
-        }
+            Ok(ts) => ts,
+            Err(e) => {
+                tracing::warn!("dm_post_message: {}", e);
+                return Err(e);
+            }
+        };
 
         // 本地回显（服务器只推给对方，不推回自己）
         self.conn.emit_local_event(ClientEvent::DmReceived {
@@ -1627,7 +2022,7 @@ impl RoomSession {
     ///     计划 alpha.3 补上）。通话中若发生成员变更，需手动离开重进。
     /// - DM / 私密频道 **已开启 E2EE**（v0.0.1-alpha.2）：三条路径分别从
     ///   `dm_groups` / `channel_groups` / 主群派生 key，统一注入 room-level seed。
-    /// - group 缺失时（如刚加入尚未同步）降级到 E2EE-disabled 并 warn。
+    /// - group 存在但 exporter 失败时**拒绝连接**，绝不静默降级到明文媒体。
     pub async fn begin_media_session(
         &self,
         channel_id: &str,
@@ -1677,12 +2072,15 @@ impl RoomSession {
                     return Ok((token, Some(zeroize::Zeroizing::new(k))));
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "[begin_media_session] DM {} group present but export failed: {};                          falling back to E2EE-disabled",
+                    tracing::error!(
+                        "[begin_media_session] DM {} group present but export failed: {}; refusing plaintext media",
                         channel_id,
                         e
                     );
-                    return Ok((token, None));
+                    return Err(ClientError::Protocol(format!(
+                        "媒体 E2EE 密钥派生失败（DM {}）：{e}",
+                        channel_id
+                    )));
                 }
             }
         }
@@ -1697,12 +2095,15 @@ impl RoomSession {
                     return Ok((token, Some(zeroize::Zeroizing::new(k))));
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "[begin_media_session] channel {} group present but export failed: {};                          falling back to E2EE-disabled",
+                    tracing::error!(
+                        "[begin_media_session] channel {} group present but export failed: {}; refusing plaintext media",
                         channel_id,
                         e
                     );
-                    return Ok((token, None));
+                    return Err(ClientError::Protocol(format!(
+                        "媒体 E2EE 密钥派生失败（频道 {}）：{e}",
+                        channel_id
+                    )));
                 }
             }
         }
@@ -1840,9 +2241,52 @@ pub(crate) fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// 当前平台的设备名，用于“登录设备”列表。
+pub fn device_name() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let host = std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "unknown".to_string());
+        format!("{} ({})", host, std::env::consts::OS)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.navigator().user_agent().ok())
+            .map(|ua| ua.chars().take(64).collect())
+            .unwrap_or_else(|| "web".to_string())
+    }
+}
+
 // ============================================================================
 // 平台默认 store
 // ============================================================================
+
+/// 读取主群快照；兼容旧版本写错的 `{server_url}/{uid}` Key，并迁移到新 Key。
+async fn load_main_snapshot(store: &Store, storage_key: &str, legacy_key: &str) -> Option<Vec<u8>> {
+    match store.get("mls", storage_key).await {
+        Ok(Some(snap)) => Some(snap),
+        Ok(None) => match store.get("mls", legacy_key).await {
+            Ok(Some(snap)) => {
+                tracing::info!("[room] migrating main MLS snapshot to namespaced key");
+                if let Err(e) = store.put("mls", storage_key, &snap).await {
+                    tracing::warn!("[room] snapshot migration failed: {}", e);
+                }
+                Some(snap)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("[room] storage read failed: {}", e);
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!("[room] storage read failed: {}", e);
+            None
+        }
+    }
+}
 
 /// 打开当前平台的默认 store。
 ///

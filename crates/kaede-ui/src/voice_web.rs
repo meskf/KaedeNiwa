@@ -44,8 +44,10 @@ pub async fn connect_voice(
         .await
         .map_err(|e| format!("begin_media_session: {}", e))?;
 
-    let key_bytes: Option<[u8; 32]> = key.map(|z| *z);
-    let session = LiveKitWebSession::new(key_bytes)
+    let key_bytes: [u8; 32] = *(key.ok_or_else(|| {
+        "E2EE key unavailable; refusing to join without media encryption".to_string()
+    })?);
+    let session = LiveKitWebSession::new(Some(key_bytes))
         .await
         .map_err(|e| format!("LiveKitWebSession::new: {}", e))?;
 
@@ -63,7 +65,7 @@ pub async fn connect_voice(
         "[voice-web] connected channel={} room={} (e2ee={})",
         channel_id,
         token.room,
-        key_bytes.is_some()
+        true
     );
     Ok(())
 }
@@ -72,6 +74,33 @@ fn current_session() -> Result<Rc<LiveKitWebSession>, String> {
     SESSION
         .with(|s| s.borrow().as_ref().cloned())
         .ok_or_else(|| "no active media session".to_string())
+}
+
+/// 当前浏览器是否支持屏幕共享（iOS Safari 通常不支持 getDisplayMedia）。
+pub fn screen_share_supported() -> bool {
+    has_media_method("getDisplayMedia")
+}
+
+/// 当前浏览器是否支持麦克风采集。
+pub fn microphone_supported() -> bool {
+    has_media_method("getUserMedia")
+}
+
+fn has_media_method(name: &str) -> bool {
+    use wasm_bindgen::JsValue;
+    let Some(win) = web_sys::window() else {
+        return false;
+    };
+    let nav = win.navigator();
+    let Ok(md) = js_sys::Reflect::get(&nav, &JsValue::from_str("mediaDevices")) else {
+        return false;
+    };
+    if md.is_undefined() || md.is_null() {
+        return false;
+    }
+    js_sys::Reflect::get(&md, &JsValue::from_str(name))
+        .map(|f| f.is_function())
+        .unwrap_or(false)
 }
 
 /// 开关麦克风。
@@ -83,11 +112,15 @@ pub async fn set_microphone(enabled: bool) -> Result<(), String> {
         .map_err(|e| format!("setMicrophoneEnabled: {}", e))
 }
 
-/// 开关屏幕共享。`true` 时浏览器弹出 getDisplayMedia 选择器。
-pub async fn set_screen_share(enabled: bool) -> Result<(), String> {
+/// 开关屏幕共享。`true` 时浏览器弹出 getDisplayMedia 选择器，
+/// 并按 `profile` 设置分辨率/帧率约束。
+pub async fn set_screen_share(
+    enabled: bool,
+    profile: kaede_protocol::VideoProfile,
+) -> Result<(), String> {
     let session = current_session()?;
     session
-        .set_screen_share(enabled)
+        .set_screen_share(enabled, profile)
         .await
         .map_err(|e| format!("setScreenShareEnabled: {}", e))
 }

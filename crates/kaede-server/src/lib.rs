@@ -15,6 +15,8 @@ pub mod friends;
 pub mod http;
 pub mod livekit;
 pub mod members;
+pub mod reads;
+pub mod sessions_api;
 pub mod state;
 pub mod ws;
 
@@ -63,7 +65,31 @@ pub fn with_middleware(app: Router) -> Router {
     };
 
     app.layer(DefaultBodyLimit::max(34 * 1024 * 1024))
+        .layer(axum::middleware::from_fn(require_auth_header))
         .layer(cors)
+}
+
+/// 在 body 被缓冲**之前**拒绝没有 Authorization 头的请求。
+///
+/// 真正的 token 校验仍在 handler/extractor 内完成；这里只做廉价的
+/// 前置门槛，避免未认证请求把 32–34 MiB body 读进内存。
+async fn require_auth_header(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let path = req.uri().path();
+    let public = matches!(path, "/health" | "/api/login" | "/api/register")
+        || path == "/ws"
+        || req.method() == Method::OPTIONS;
+    if public || req.headers().get(AUTHORIZATION).is_some() {
+        return next.run(req).await;
+    }
+    (
+        axum::http::StatusCode::UNAUTHORIZED,
+        "missing Authorization",
+    )
+        .into_response()
 }
 
 /// 起一个 in-process 测试服务器。返回监听的地址。
@@ -95,13 +121,19 @@ pub async fn spawn_test_server() -> std::io::Result<SocketAddr> {
             .merge(livekit::router(state.clone()))
             .merge(channels::router(state.clone()))
             .merge(members::router(state.clone()))
+            .merge(reads::router(state.clone()))
+            .merge(sessions_api::router(state.clone()))
             .merge(ws::router(state)),
     );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
     });
     Ok(addr)
 }

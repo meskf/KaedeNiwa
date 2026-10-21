@@ -231,6 +231,7 @@ pub fn MemberContextMenu() -> Element {
                                                             attachments: h.attachments,
                                                             reply_to: h.reply_to,
                                                             reactions: vec![],
+                                                            mentions: h.mentions,
                                                         })
                                                         .collect();
                                                     app.dm_messages.write().insert(cid, ui_msgs);

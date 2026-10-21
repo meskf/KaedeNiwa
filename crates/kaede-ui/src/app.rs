@@ -9,13 +9,16 @@ use crate::i18n::I18n;
 use crate::login::LoginView;
 use crate::member_picker::MemberPickerModal;
 use crate::members::MemberContextMenu;
+use crate::mobile_shell::MobileShell;
 use crate::observer::{UiObserver, apply_event};
+use crate::search::SearchModal;
 use crate::server_modal::ServerModal;
 use crate::settings_modal::SettingsModal;
-use crate::mobile_shell::MobileShell;
 use crate::shell::{MainBody, TitleBar};
-use crate::sidebar::{ChannelContextMenu, CreateChannelModal, JoinChannelModal};
-use crate::state::{AppState, UiState, View, VoiceControls, VoiceState, LayoutMode};
+use crate::sidebar::{
+    ChannelContextMenu, ChannelMembersModal, CreateChannelModal, JoinChannelModal,
+};
+use crate::state::{AppState, LayoutMode, UiState, View, VoiceControls, VoiceState};
 use crate::video_picker::VideoProfilePicker;
 
 #[derive(Clone)]
@@ -103,7 +106,10 @@ pub fn App() -> Element {
             CreateChannelModal {}
             JoinChannelModal {}
             ChannelContextMenu {}
+            ChannelMembersModal {}
+            SearchModal {}
             EmojiPicker {}
+            UploadProgressBar {}
             ToastContainer {}
             SettingsModal {}
             VideoProfilePicker {}
@@ -114,11 +120,43 @@ pub fn App() -> Element {
 }
 
 #[component]
+fn UploadProgressBar() -> Element {
+    let ui = use_context::<UiState>();
+    let Some((name, pct)) = ui.upload_progress.read().clone() else {
+        return rsx! {};
+    };
+
+    rsx! {
+        div {
+            style: "position: fixed; left: 16px; bottom: 16px; z-index: 120; min-width: 260px; max-width: 360px; padding: 10px 12px; border-radius: 8px; background: var(--inner-bg); box-shadow: 0 8px 24px rgba(0,0,0,0.25);",
+            div {
+                style: "display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--fg);",
+                span {
+                    style: "flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                    "上传附件：{name}"
+                }
+                span { style: "color: var(--fg-muted); font-variant-numeric: tabular-nums;", "{pct}%" }
+            }
+            div {
+                style: "margin-top: 6px; height: 4px; border-radius: 2px; background: rgba(128,128,128,0.2); overflow: hidden;",
+                div {
+                    style: "height: 100%; width: {pct}%; background: var(--active-bg); transition: width 0.15s linear;",
+                }
+            }
+        }
+    }
+}
+
+#[component]
 fn ToastContainer() -> Element {
     let mut ui = use_context::<UiState>();
+    // 每条 toast 一个自增 token；旧定时器不能清掉新提示。
+    let mut toast_seq = use_signal(|| 0u64);
 
     use_effect(move || {
         if ui.toast.read().is_some() {
+            let my_seq = *toast_seq.read() + 1;
+            toast_seq.set(my_seq);
             spawn(async move {
                 // M52: wasm 上 document::eval 是同步返回，必须 await 返回的 Promise
                 // 才能真等 3s。之前注入 setTimeout 但立即返回，toast 一闪而过。
@@ -131,7 +169,9 @@ fn ToastContainer() -> Element {
                 {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 }
-                ui.toast.set(None);
+                if *toast_seq.read() == my_seq {
+                    ui.toast.set(None);
+                }
             });
         }
     });

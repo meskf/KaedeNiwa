@@ -38,6 +38,16 @@ pub(crate) fn should_revalidate(
     last_check.elapsed() >= interval
 }
 
+/// 单个 MLS 信封上限。离线队列按同样大小限额，在线投递也必须一致，
+/// 否则成员之间可以直接推送 16 MiB 的 ChannelSync/Welcome。
+const MAX_MLS_ENVELOPE_BYTES: usize = 256 * 1024;
+
+/// Commit / Proposal 上限（含 group info，正常远小于此值）。
+const MAX_MLS_HANDSHAKE_BYTES: usize = 2 * 1024 * 1024;
+
+/// 主群应用消息上限（与 HTTP post_message 的 4 MiB 对齐）。
+const MAX_MLS_APP_BYTES: usize = 4 * 1024 * 1024;
+
 /// `recv_with_idle_timeout` 的返回值。
 #[derive(Debug)]
 pub(crate) enum RecvOutcome {
@@ -243,7 +253,8 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
 
     // P1-L: 定期重验 session token 的时间戳
     let mut last_auth_check = std::time::Instant::now();
-    loop {
+    let mut last_activity = std::time::Instant::now();
+    'outer: loop {
         // P1-L: 每 5 分钟重验一次 session token（防 token 泄漏后长时间滥用）
         if let Some(tok) = &session_token
             && should_revalidate(last_auth_check, SESSION_REVALIDATE_INTERVAL)
@@ -255,18 +266,45 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
             last_auth_check = std::time::Instant::now();
         }
 
+        // 每条消息处理前都确认当前连接仍是 peers 表里的那一个。
+        // 被踢/被顶替/账号删除后即使持续发消息也会立刻断开。
+        if let Some(uid) = &my_uid {
+            let sid = my_session_id.load(std::sync::atomic::Ordering::Relaxed);
+            if sid != 0 && state.peer_session_id(uid) != Some(sid) {
+                tracing::info!("ws peer superseded/removed, closing");
+                break 'outer;
+            }
+        }
+
         // P1-M：5 分钟无任何消息（含 ping）则断开，防 5000 空闲连接耗尽 semaphore。
-        let msg = match recv_with_idle_timeout(&mut stream, WS_IDLE_TIMEOUT).await {
-            RecvOutcome::Timeout => {
-                tracing::debug!("ws idle timeout ({}s)", WS_IDLE_TIMEOUT.as_secs());
-                break;
+        // 用 1s 切片轮询，同时检查“当前连接是否仍是 peers 表里的那一个”：
+        // 被踢/被顶替/账号删除后 1s 内关闭 socket，而不是等 5 分钟重验。
+        let msg = loop {
+            match recv_with_idle_timeout(&mut stream, std::time::Duration::from_secs(1)).await {
+                RecvOutcome::Timeout => {
+                    if last_activity.elapsed() >= WS_IDLE_TIMEOUT {
+                        tracing::debug!("ws idle timeout ({}s)", WS_IDLE_TIMEOUT.as_secs());
+                        break 'outer;
+                    }
+                    if let Some(uid) = &my_uid {
+                        let sid = my_session_id.load(std::sync::atomic::Ordering::Relaxed);
+                        if sid != 0 && state.peer_session_id(uid) != Some(sid) {
+                            tracing::info!("ws peer superseded/removed, closing");
+                            break 'outer;
+                        }
+                    }
+                    continue;
+                }
+                RecvOutcome::Closed => break 'outer,
+                RecvOutcome::Error(e) => {
+                    tracing::debug!("ws read error: {}", e);
+                    break 'outer;
+                }
+                RecvOutcome::Message(m) => {
+                    last_activity = std::time::Instant::now();
+                    break m;
+                }
             }
-            RecvOutcome::Closed => break,
-            RecvOutcome::Error(e) => {
-                tracing::debug!("ws read error: {}", e);
-                break;
-            }
-            RecvOutcome::Message(m) => m,
         };
 
         let bytes = match msg {
@@ -298,7 +336,7 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
         // 限流：已认证走 per-uid（断线重连不重置速率），未认证走 per-connection。
         // 超限时给客户端一条 RateLimited，不断连接。
         let allowed = match &my_uid {
-            Some(uid) => state.check_rate(uid, 30.0, 60.0),
+            Some(uid) => state.check_rate_scoped(uid, "ws", 30.0, 60.0),
             None => limiter.try_consume(1.0),
         };
         if !allowed {
@@ -307,6 +345,19 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
                 message: "too many messages, slow down".into(),
             });
             continue;
+        }
+
+        // 被踢/账号删除后，旧连接手里的 token 已失效；Join 必须重新校验，
+        // 不能只信任 Hello 时缓存的 my_uid。
+        if matches!(&msg, ClientMessage::Join)
+            && let Some(tok) = &session_token
+            && validate_session(&state, tok).await.is_err()
+        {
+            let _ = tx.try_send(ServerMessage::Error {
+                code: ErrorCode::Kicked,
+                message: "session revoked; please log in again".into(),
+            });
+            break 'outer;
         }
 
         if let Err(e) = handle_message(msg, &state, &mut my_uid, &my_session_id, &tx).await {
@@ -341,10 +392,10 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
 /// 顺序严格按入队顺序（Welcome 先于 Commit）。取出的同时从 DB 删除，
 /// 避免下次 Join 重复投递。
 async fn deliver_pending(state: &AppState, uid: &UserId, tx: &mpsc::Sender<ServerMessage>) {
-    let envelopes = match crate::db::take_envelopes(&state.pool, uid.as_str()).await {
+    let envelopes = match crate::db::list_envelopes(&state.pool, uid.as_str()).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("take_envelopes for {} failed: {}", uid, e);
+            tracing::warn!("list_envelopes for {} failed: {}", uid, e);
             return;
         }
     };
@@ -356,7 +407,8 @@ async fn deliver_pending(state: &AppState, uid: &UserId, tx: &mpsc::Sender<Serve
         envelopes.len(),
         uid
     );
-    for (from, kind, channel_id, payload) in envelopes {
+    let mut delivered: Vec<i64> = Vec::new();
+    for (id, from, kind, channel_id, payload) in envelopes {
         let msg = match kind.as_str() {
             "mls_welcome" => ServerMessage::MlsWelcome {
                 from: UserId::new(from),
@@ -381,6 +433,8 @@ async fn deliver_pending(state: &AppState, uid: &UserId, tx: &mpsc::Sender<Serve
                     },
                     Err(e) => {
                         tracing::warn!("bad pending channel_member_joined: {}", e);
+                        // 毒数据直接删除，避免每次 Join 都卡住队列
+                        delivered.push(id);
                         continue;
                     }
                 }
@@ -390,11 +444,23 @@ async fn deliver_pending(state: &AppState, uid: &UserId, tx: &mpsc::Sender<Serve
                 payload,
             },
         };
-        if tx.try_send(msg).is_err() {
-            // 出站队列满：把这条重新放回队首是做不到的；记录并继续。
-            // 正常情况下 1024 容量的队列在 Join 阶段不会满。
-            tracing::warn!("pending envelope dropped for {} (outbound queue full)", uid);
+        match tokio::time::timeout(std::time::Duration::from_secs(5), tx.send(msg)).await {
+            Ok(Ok(())) => delivered.push(id),
+            Ok(Err(_)) | Err(_) => {
+                // 连接关闭/队列满：保留未投递的信封，下次 Join 再试。
+                tracing::warn!(
+                    "pending envelope {} not delivered to {}; keep for retry",
+                    id,
+                    uid
+                );
+                break;
+            }
         }
+    }
+    if !delivered.is_empty()
+        && let Err(e) = crate::db::delete_envelopes(&state.pool, &delivered).await
+    {
+        tracing::warn!("delete delivered envelopes failed: {}", e);
     }
 }
 
@@ -404,6 +470,38 @@ fn extract_bytes(m: Message) -> anyhow::Result<Vec<u8>> {
         Message::Text(_) => anyhow::bail!("text frames not supported; use binary CBOR"),
         _ => anyhow::bail!("expected binary/text"),
     }
+}
+
+/// 查询某个成员的权限等级。
+async fn sender_op(state: &AppState, uid: &UserId) -> anyhow::Result<Option<String>> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT op FROM members WHERE login_id = ?")
+        .bind(uid.as_str())
+        .fetch_optional(&state.pool)
+        .await?;
+    Ok(row.map(|(op,)| op))
+}
+
+/// 当前频道权威成员：`joined_at` 最早且**在线**的成员。
+///
+/// 与 `channels::notify_authority` / `notify_member_left` 的投递规则一致。
+/// 私密频道只允许权威成员发送 Welcome / Commit，防止任意成员污染 epoch。
+async fn channel_authority(state: &AppState, channel_id: &str) -> anyhow::Result<Option<String>> {
+    let members: Vec<(String,)> = sqlx::query_as(
+        "SELECT login_id FROM channel_members WHERE channel_id = ? \
+         ORDER BY joined_at ASC, login_id ASC",
+    )
+    .bind(channel_id)
+    .fetch_all(&state.pool)
+    .await?;
+    for (login_id,) in members {
+        if state
+            .peer_session_id(&UserId::new(login_id.clone()))
+            .is_some()
+        {
+            return Ok(Some(login_id));
+        }
+    }
+    Ok(None)
 }
 
 fn ensure_joined(
@@ -517,42 +615,19 @@ async fn handle_message(
             });
         }
 
-        ClientMessage::SdpOffer { to, sdp } => {
-            let from = ensure_joined(state, my_uid, my_session_id)?;
-            if !state.send_to(&to, ServerMessage::SdpOffer { from, sdp }) {
-                let _ = tx.try_send(ServerMessage::Error {
-                    code: ErrorCode::TargetNotFound,
-                    message: to.0,
-                });
-            }
-        }
-
-        ClientMessage::SdpAnswer { to, sdp } => {
-            let from = ensure_joined(state, my_uid, my_session_id)?;
-            if !state.send_to(&to, ServerMessage::SdpAnswer { from, sdp }) {
-                let _ = tx.try_send(ServerMessage::Error {
-                    code: ErrorCode::TargetNotFound,
-                    message: to.0,
-                });
-            }
-        }
-
-        ClientMessage::IceCandidate { to, candidate } => {
-            let from = ensure_joined(state, my_uid, my_session_id)?;
-            if !state.send_to(&to, ServerMessage::IceCandidate { from, candidate }) {
-                let _ = tx.try_send(ServerMessage::Error {
-                    code: ErrorCode::TargetNotFound,
-                    message: to.0,
-                });
-            }
-        }
-
         ClientMessage::ChannelSync {
             to,
             channel_id,
             payload,
         } => {
             let from = ensure_joined(state, my_uid, my_session_id)?;
+            if payload.len() > MAX_MLS_ENVELOPE_BYTES {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "channel sync payload too large".into(),
+                });
+                return Ok(());
+            }
             // 安全校验：发送者必须是频道成员
             let is_member: Option<(i64,)> = sqlx::query_as(
                 "SELECT 1 FROM channel_members WHERE channel_id = ? AND login_id = ?",
@@ -565,6 +640,31 @@ async fn handle_message(
                 let _ = tx.try_send(ServerMessage::Error {
                     code: ErrorCode::TargetNotFound,
                     message: format!("not a member of {}", channel_id),
+                });
+                return Ok(());
+            }
+            // 收件人必须是同频道成员，否则任意成员都能向陌生人投递任意密文。
+            let target_member: Option<(i64,)> = sqlx::query_as(
+                "SELECT 1 FROM channel_members WHERE channel_id = ? AND login_id = ?",
+            )
+            .bind(&channel_id)
+            .bind(to.as_str())
+            .fetch_optional(&state.pool)
+            .await?;
+            if target_member.is_none() {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::TargetNotFound,
+                    message: format!("recipient is not a member of {}", channel_id),
+                });
+                return Ok(());
+            }
+            // 只有当前权威成员（最早加入且在线）能下发 Welcome / Commit，
+            // 任意成员都能发送会让所有人被拉入攻击者构造的 channel group。
+            let authority = channel_authority(state, &channel_id).await?;
+            if authority.as_deref() != Some(from.as_str()) {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::TargetNotFound,
+                    message: format!("sender is not the channel authority of {}", channel_id),
                 });
                 return Ok(());
             }
@@ -611,6 +711,22 @@ async fn handle_message(
                 });
                 return Ok(());
             }
+            if payload.len() > MAX_MLS_HANDSHAKE_BYTES {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "channel commit payload too large".into(),
+                });
+                return Ok(());
+            }
+            // 与 ChannelSync 一致：只有当前权威成员能推进频道 epoch。
+            let authority = channel_authority(state, &channel_id).await?;
+            if authority.as_deref() != Some(from.as_str()) {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::TargetNotFound,
+                    message: format!("sender is not the channel authority of {}", channel_id),
+                });
+                return Ok(());
+            }
 
             // 频道内广播 Commit（0x05 前缀由服务端统一加，和 ChannelSync 一致）。
             let mut framed = Vec::with_capacity(1 + payload.len());
@@ -652,6 +768,38 @@ async fn handle_message(
 
         ClientMessage::MlsWelcome { to, payload } => {
             let from = ensure_joined(state, my_uid, my_session_id)?;
+            if payload.len() > MAX_MLS_ENVELOPE_BYTES {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "welcome payload too large".into(),
+                });
+                return Ok(());
+            }
+            // 主群 Welcome 只能由 host（op5）发送。
+            //
+            // 客户端在本地已有主群时会用 Welcome 里的 group_id 判断是否重建；
+            // 若任意成员都能发 Welcome，攻击者只需拉取目标 KP + 自建 group，
+            // 就能把目标拉进攻击者控制的群（读走其后续所有公开频道消息）。
+            if sender_op(state, &from).await?.as_deref() != Some("op5") {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::TargetNotFound,
+                    message: "only the room host (op5) may send MLS welcomes".into(),
+                });
+                return Ok(());
+            }
+            // 目标必须是真实存在的成员；避免向不存在/任意 uid 塞离线信封。
+            let target_exists: Option<(i64,)> =
+                sqlx::query_as("SELECT 1 FROM members WHERE login_id = ?")
+                    .bind(to.as_str())
+                    .fetch_optional(&state.pool)
+                    .await?;
+            if target_exists.is_none() {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::TargetNotFound,
+                    message: to.0,
+                });
+                return Ok(());
+            }
             if !state.send_to(
                 &to,
                 ServerMessage::MlsWelcome {
@@ -677,6 +825,34 @@ async fn handle_message(
 
         ClientMessage::MlsCommit { epoch, payload } => {
             let from = ensure_joined(state, my_uid, my_session_id)?;
+            // 只有管理员（op4+）能推进主群 epoch：普通成员构造的 Commit
+            // 可以把别人踢出群或把群切到攻击者控制的分支。
+            if !matches!(
+                sender_op(state, &from).await?.as_deref(),
+                Some("op4" | "op5")
+            ) {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::TargetNotFound,
+                    message: "only moderators (op4+) may send MLS commits".into(),
+                });
+                return Ok(());
+            }
+            if payload.len() > MAX_MLS_HANDSHAKE_BYTES {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "commit payload too large".into(),
+                });
+                return Ok(());
+            }
+            // epoch 是客户端可控值。限制在 u32 范围内，避免 i64::MAX
+            // 污染 mls_commits 的 MAX(epoch) 使所有合法 Commit 被清理。
+            if epoch > u32::MAX as u64 {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "mls commit epoch out of range".into(),
+                });
+                return Ok(());
+            }
             // P1-7：关键消息用有背压的广播，避免 try_send 静默丢弃。
             state
                 .broadcast_except_important(
@@ -706,10 +882,12 @@ async fn handle_message(
                 {
                     tracing::warn!("store mls commit failed: {}", e);
                 }
-                // 只保留最近 256 个 epoch。
+                // 只保留最近 256 条 Commit。
+                // 注意：不能按 MAX(epoch) 保留——epoch 受客户端控制，
+                // 一个超大值会永久清空所有合法 commit。按插入顺序(rowid)保留。
                 let _ = sqlx::query(
-                    "DELETE FROM mls_commits WHERE epoch <= \
-                     (SELECT COALESCE(MAX(epoch), 0) - 256 FROM mls_commits)",
+                    "DELETE FROM mls_commits WHERE rowid NOT IN \
+                     (SELECT rowid FROM mls_commits ORDER BY rowid DESC LIMIT 256)",
                 )
                 .execute(&state.pool)
                 .await;
@@ -718,6 +896,9 @@ async fn handle_message(
 
         ClientMessage::ReportEpoch { epoch } => {
             let _uid = ensure_joined(state, my_uid, my_session_id)?;
+            if epoch > u32::MAX as u64 {
+                return Ok(());
+            }
             let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
                 "SELECT epoch, from_uid, payload FROM mls_commits \
                  WHERE epoch > ? ORDER BY epoch ASC LIMIT 256",
@@ -737,6 +918,23 @@ async fn handle_message(
 
         ClientMessage::MlsProposal { payload } => {
             let from = ensure_joined(state, my_uid, my_session_id)?;
+            if !matches!(
+                sender_op(state, &from).await?.as_deref(),
+                Some("op4" | "op5")
+            ) {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::TargetNotFound,
+                    message: "only moderators (op4+) may send MLS proposals".into(),
+                });
+                return Ok(());
+            }
+            if payload.len() > MAX_MLS_HANDSHAKE_BYTES {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "proposal payload too large".into(),
+                });
+                return Ok(());
+            }
             state
                 .broadcast_except_important(
                     &from,
@@ -750,6 +948,13 @@ async fn handle_message(
 
         ClientMessage::MlsAppMessage { payload } => {
             let from = ensure_joined(state, my_uid, my_session_id)?;
+            if payload.len() > MAX_MLS_APP_BYTES {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "application message too large".into(),
+                });
+                return Ok(());
+            }
             // H14: 关键消息（聊天/媒体信令）不能静默丢，走 important broadcast
             state
                 .broadcast_except_important(
@@ -760,13 +965,6 @@ async fn handle_message(
                     },
                 )
                 .await;
-        }
-
-        ClientMessage::SfuTokenRequest => {
-            let _ = tx.try_send(ServerMessage::Error {
-                code: ErrorCode::InternalError,
-                message: "sfu token not implemented".into(),
-            });
         }
 
         ClientMessage::SetPresence { status } => {
@@ -787,18 +985,23 @@ async fn handle_message(
     Ok(())
 }
 
-/// 用 HTTP session token 换 uid。
+/// 用 HTTP session token 换 uid，并刷新 last_seen_at。
 async fn validate_session(state: &AppState, token: &str) -> anyhow::Result<UserId> {
+    let token_hash = crate::db::hash_token(token);
     let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT login_id, expires_at FROM sessions WHERE token = ? OR token = ?")
-            .bind(crate::db::hash_token(token))
-            .bind(token)
+        sqlx::query_as("SELECT login_id, expires_at FROM sessions WHERE token = ?")
+            .bind(&token_hash)
             .fetch_optional(&state.pool)
             .await?;
     let (login_id, expires_at) = row.ok_or_else(|| anyhow::anyhow!("no session"))?;
     if expires_at < crate::db::now_ms() {
         anyhow::bail!("session expired");
     }
+    let _ = sqlx::query("UPDATE sessions SET last_seen_at = ? WHERE token = ?")
+        .bind(crate::db::now_ms())
+        .bind(&token_hash)
+        .execute(&state.pool)
+        .await;
     Ok(UserId::new(login_id))
 }
 
