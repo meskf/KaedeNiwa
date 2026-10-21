@@ -37,4 +37,6 @@ rustflags = [
 [env]
 # 未来可加：WASM_BINDGEN_DEBUG=1
 
+# NOTE: LK_CUSTOM_WEBRTC 是绝对路径。换机器 / 换用户名需修改此路径，
+# 或删除此行并确保 _webrtc/ 位于 workspace 根目录（build.rs 会回退到相对路径）。
 LK_CUSTOM_WEBRTC = "D:\\dev2\\kaedeniwa\\_webrtc"

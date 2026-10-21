@@ -60,3 +60,10 @@ tools/livekit/*.exe
 # ---- 备份文件 ----
 *.bak2
 *.bak2b
+
+# ---- 审计中间产物 / 临时文件（2026-10-23 清理）----
+_audit_bak_*/
+_audit_out/
+_dump/
+_regression_core.log
+_dev-all.ps1
