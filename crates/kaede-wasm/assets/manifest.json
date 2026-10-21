@@ -2,9 +2,14 @@
   "name": "KaedeNiwa",
   "short_name": "Kaede",
   "description": "Rust 原生 E2EE 实时协作平台",
+  "id": "./",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
   "orientation": "any",
   "background_color": "#1a1a2e",
   "theme_color": "#1a1a2e",

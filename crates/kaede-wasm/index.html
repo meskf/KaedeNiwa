@@ -2,19 +2,28 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>KaedeNiwa</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
   <link rel="manifest" href="./manifest.json" />
   <meta name="theme-color" content="#1a1a2e" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="KaedeNiwa" />
+  <meta name="format-detection" content="telephone=no" />
   <link rel="icon" type="image/svg+xml" href="./icon.svg" />
   <link rel="apple-touch-icon" href="./icon.svg" />
 </head>
 <body>
     <div id="main"></div>
-  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.14.0/dist/livekit-client.umd.min.js"></script>
+    <noscript>KaedeNiwa 需要 JavaScript 才能运行。</noscript>
+  <!-- LiveKit SDK 与 E2EE worker 已 vendored 到同源 assets，避免 CDN 供应链风险。 -->
+  <script src="./livekit-client.umd.min.js"></script>
+<script>
+  // worker 与页面同源，可以直接创建；保持 async 接口让 Rust 侧继续 await。
+  window.__kaedeMakeE2EEWorker = async function (url) {
+    return new Worker(url);
+  };
+</script>
 <script>
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
     window.addEventListener('load', () => {

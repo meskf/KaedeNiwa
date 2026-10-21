@@ -1,15 +1,31 @@
-// KaedeNiwa Service Worker（首版）
+// KaedeNiwa Service Worker
 // 策略：
 // - 壳（index.html / manifest / icon）：precache + cache-first
+// - navigation 请求：network-first，离线回退缓存的 index
+// - LiveKit SDK / E2EE worker（CDN）：precache + cache-first，保证离线语音可用
+// - 同源静态资源（JS / WASM / CSS / 字体）：cache-first，后台更新
 // - API / WS：完全 bypass（保证消息新鲜）
-// - 其他静态资源（JS / WASM）：network-first（浏览器 HTTP 缓存兜底）
 
-const CACHE = 'kaede-v1';
-const SHELL = ['./', './index.html', './manifest.json', './icon.svg'];
+const CACHE = 'kaede-v3';
+const SHELL = [
+  './',
+  './index.html',
+  './manifest.json',
+  './icon.svg',
+  './livekit-client.umd.min.js',
+  './livekit-client.e2ee.worker.js',
+];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(
-    caches.open(CACHE).then((c) => c.addAll(SHELL).catch(() => {}))
+    caches.open(CACHE).then(async (c) => {
+      // 逐项缓存，任一失败不影响其余资源。
+      await Promise.all(
+        SHELL.map((url) =>
+          c.add(url).catch(() => console.warn('[sw] precache failed:', url))
+        )
+      );
+    })
   );
   self.skipWaiting();
 });
@@ -27,39 +43,55 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   const url = new URL(req.url);
 
-  // 非 GET：直连
   if (req.method !== 'GET') return;
 
-  // 跨域（包括 LiveKit / 用户配置的 signaling server）：直连，不缓存
+  // API / WS：直连
+  if (url.origin === self.location.origin &&
+      (url.pathname.startsWith('/api/') || url.pathname === '/ws')) {
+    return;
+  }
+
+  // 跨域其他资源：直连（LiveKit SDK/worker 已改为同源，走下面的静态资源策略）
   if (url.origin !== self.location.origin) return;
 
-  // API / WS：直连
-  if (url.pathname.startsWith('/api/') || url.pathname === '/ws') return;
+  // 页面导航：network-first，离线回退 index
+  if (req.mode === 'navigate') {
+    e.respondWith(
+      fetch(req)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put('./index.html', copy)).catch(() => {});
+          return res;
+        })
+        .catch(() => caches.match('./index.html').then((r) => r || caches.match('./')))
+    );
+    return;
+  }
 
   // 壳：cache-first
   const isShell =
-    url.pathname === '/' ||
     url.pathname.endsWith('/index.html') ||
     url.pathname.endsWith('/manifest.json') ||
     url.pathname.endsWith('/icon.svg');
 
   if (isShell) {
-    e.respondWith(
-      caches.match(req).then((cached) => cached || fetch(req))
-    );
+    e.respondWith(caches.match(req).then((cached) => cached || fetch(req)));
     return;
   }
 
-  // 其他静态资源（JS / WASM / 字体）：network-first，失败回退缓存
+  // 静态资源：cache-first + 后台刷新
   e.respondWith(
-    fetch(req)
-      .then((res) => {
-        if (res.ok && res.type === 'basic') {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
-        }
-        return res;
-      })
-      .catch(() => caches.match(req))
+    caches.match(req).then((cached) => {
+      const network = fetch(req)
+        .then((res) => {
+          if (res.ok && res.type === 'basic') {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+          }
+          return res;
+        })
+        .catch(() => cached);
+      return cached || network;
+    })
   );
 });
