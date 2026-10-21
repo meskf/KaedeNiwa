@@ -5,6 +5,7 @@
 //! ## 与原生路径的关系
 //! - 原生（kaede-media-session + kaede-media）走 LiveKit Rust SDK + GStreamer + NVENC。
 //! - wasm（本 crate）走浏览器原生 WebRTC，最高 4K60，覆盖 AMD/Intel/无独显。
+//!
 //! 两条路径共享 begin_media_session() 的 token 和 e2ee seed，派生出的密钥一致，
 //! 因此原生/Web 客户端可以互相看到对方的屏幕共享。
 //!
