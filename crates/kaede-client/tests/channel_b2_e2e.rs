@@ -26,7 +26,7 @@ struct Collector {
 
 impl ClientObserver for Collector {
     fn on_event(&self, event: ClientEvent) {
-        self.events.lock().unwrap().push(event);
+        self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
     }
 }
 

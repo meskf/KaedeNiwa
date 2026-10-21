@@ -300,7 +300,7 @@ impl MediaSession {
         // OS 线程；用 tokio::task::spawn_blocking 会占用 tokio blocking pool，
         // 且 timeout 不取消 blocking task → collector 卡死时永久占一个 blocking slot。
         // 改成 std::thread::spawn（OS 管理，不占 tokio pool），stop() 立即返回。
-        let collector_task = self.collector.lock().unwrap().take();
+        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();
@@ -308,7 +308,7 @@ impl MediaSession {
         }
         // H22: abort 而非 timeout —— timeout 返回后 sink_task 仍在后台跑，
         // 若它卡在 channel recv 上会永久占用一个 tokio worker。abort 立即取消。
-        let sink_task = self.sink_task.lock().unwrap().take();
+        let sink_task = self.sink_task.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = sink_task {
             h.abort();
             let _ = h.await;
@@ -329,7 +329,7 @@ impl Drop for MediaSession {
         self.stop_flag.store(true, Ordering::Relaxed);
         // C-4: detached join 采集线程，避免 OS 线程泄漏
         // （同步 join 会阻塞 Drop；这里用 std::thread 后台 join）
-        let collector_task = self.collector.lock().unwrap().take();
+        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();
@@ -691,14 +691,14 @@ impl AudioSession {
         self.state
             .store(MediaState::Stopping.as_u8(), Ordering::Relaxed);
         // H21: detached std::thread join（同 MediaSession::stop）
-        let collector_task = self.collector.lock().unwrap().take();
+        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();
             });
         }
         // H22: abort 而非 timeout
-        let sink_task = self.sink_task.lock().unwrap().take();
+        let sink_task = self.sink_task.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = sink_task {
             h.abort();
             let _ = h.await;
@@ -716,7 +716,7 @@ impl Drop for AudioSession {
         self.stop_flag.store(true, Ordering::Relaxed);
         // C-4: detached join 采集线程，避免 OS 线程泄漏
         // （同步 join 会阻塞 Drop；这里用 std::thread 后台 join）
-        let collector_task = self.collector.lock().unwrap().take();
+        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();

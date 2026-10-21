@@ -186,7 +186,7 @@ impl ServerConnection {
     }
 
     fn self_uid(&self) -> Result<String, ClientError> {
-        let guard = self.mls.lock().unwrap();
+        let guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .as_ref()
             .map(|s| s.uid().to_string())
@@ -198,15 +198,15 @@ impl ServerConnection {
     }
 
     pub fn state(&self) -> ClientState {
-        self.state.lock().unwrap().state()
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).state()
     }
 
     pub fn peers(&self) -> Vec<UserId> {
-        self.peers.lock().unwrap().clone()
+        self.peers.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn transition(&self, next: ClientState) -> Result<(), ClientError> {
-        let mut m = self.state.lock().unwrap();
+        let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let from = m.state();
         m.try_transition(next)?;
         drop(m);
@@ -332,7 +332,7 @@ impl ServerConnection {
 
     /// 初始化 MLS 会话（生成签名身份）。每个连接一次。
     pub fn mls_init(&self, uid: impl Into<UserId>) -> Result<(), ClientError> {
-        let mut guard = self.mls.lock().unwrap();
+        let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_some() {
             return Err(ClientError::Mls("mls already initialized".into()));
         }
@@ -347,7 +347,7 @@ impl ServerConnection {
     /// 调用方无需关心 join_room 的先后顺序。
     pub fn mls_create_group(&self) -> Result<(), ClientError> {
         {
-            let mut guard = self.mls.lock().unwrap();
+            let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard
                 .as_mut()
                 .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -366,7 +366,7 @@ impl ServerConnection {
     /// 若当前处于 `Authenticated`，自动补一次 `MlsJoining` 转场。
     pub fn mls_join_with_welcome(&self, welcome: &[u8]) -> Result<(), ClientError> {
         {
-            let mut guard = self.mls.lock().unwrap();
+            let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard
                 .as_mut()
                 .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -393,7 +393,7 @@ impl ServerConnection {
         welcome: &[u8],
         expected_group_id: Option<&[u8]>,
     ) -> Result<bool, ClientError> {
-        let mut guard = self.mls.lock().unwrap();
+        let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let s = guard
             .as_mut()
             .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -423,7 +423,7 @@ impl ServerConnection {
     /// 生成自己的 KeyPackage（供别人 Add）。
     pub fn mls_generate_key_package(&self) -> Result<Vec<u8>, ClientError> {
         let kp = {
-            let guard = self.mls.lock().unwrap();
+            let guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard
                 .as_ref()
                 .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -443,7 +443,7 @@ impl ServerConnection {
     pub fn mls_add_member(&self, kp: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ClientError> {
         let before = self.mls_epoch();
         let out = {
-            let mut guard = self.mls.lock().unwrap();
+            let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard
                 .as_mut()
                 .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -457,7 +457,7 @@ impl ServerConnection {
     /// 加密并广播一条应用消息。返回密文（供上层持久化）。
     pub async fn mls_send_app(&self, plaintext: &[u8]) -> Result<Vec<u8>, ClientError> {
         let ciphertext = {
-            let mut guard = self.mls.lock().unwrap();
+            let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard
                 .as_mut()
                 .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -476,7 +476,7 @@ impl ServerConnection {
 
     /// MLS 解密应用消息。供上层拉历史时使用。
     pub fn mls_decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, ClientError> {
-        let mut guard = self.mls.lock().unwrap();
+        let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let s = guard
             .as_mut()
             .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -494,7 +494,7 @@ impl ServerConnection {
     /// 必须在 MLS ready 后调用。
     pub fn dm_derive_key(&self, conv_id: &str) -> Result<[u8; 32], ClientError> {
         let conv_id = &canonical_conv_id(conv_id);
-        let map = self.dm_groups.lock().unwrap();
+        let map = self.dm_groups.lock().unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(conv_id)
             .ok_or_else(|| ClientError::Mls(format!("DM group not found for {}", conv_id)))?;
@@ -515,7 +515,7 @@ impl ServerConnection {
     /// 非 DM 成员即使拿到 seed，没有 dm group state 也算不出 key。
     pub fn dm_export_media_key(&self, conv_id: &str, seed: &[u8]) -> Result<[u8; 32], ClientError> {
         let conv_id = &canonical_conv_id(conv_id);
-        let map = self.dm_groups.lock().unwrap();
+        let map = self.dm_groups.lock().unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(conv_id)
             .ok_or_else(|| ClientError::Mls(format!("dm group not found: {}", conv_id)))?;
@@ -534,13 +534,13 @@ impl ServerConnection {
     ///
     /// 用途：`ChannelSync 0x05` 处理完 commit 后 emit `ChannelEpochChanged` 用。
     pub fn channel_epoch(&self, channel_id: &str) -> Option<u64> {
-        let map = self.channel_groups.lock().unwrap();
+        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
         map.get(channel_id).map(|s| s.epoch())
     }
 
     /// 频道是否有独立 MLS group（私密频道）。
     pub fn channel_has_group(&self, channel_id: &str) -> bool {
-        self.channel_groups.lock().unwrap().contains_key(channel_id)
+        self.channel_groups.lock().unwrap_or_else(|e| e.into_inner()).contains_key(channel_id)
     }
 
     /// 从 channel group 按 purpose 派生密钥（P0：附件加密用 File）。
@@ -549,7 +549,7 @@ impl ServerConnection {
         channel_id: &str,
         purpose: kaede_mls::SframePurpose,
     ) -> Result<[u8; 32], ClientError> {
-        let map = self.channel_groups.lock().unwrap();
+        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -563,7 +563,7 @@ impl ServerConnection {
         purpose: kaede_mls::SframePurpose,
     ) -> Result<[u8; 32], ClientError> {
         let conv_id = &canonical_conv_id(conv_id);
-        let map = self.dm_groups.lock().unwrap();
+        let map = self.dm_groups.lock().unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(conv_id)
             .ok_or_else(|| ClientError::Mls(format!("dm group not found: {}", conv_id)))?;
@@ -577,7 +577,7 @@ impl ServerConnection {
             return Ok(());
         }
         // 先拿 mls，再拿 channel_groups（统一加锁顺序）
-        let main_guard = self.mls.lock().unwrap();
+        let main_guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let main_session = main_guard
             .as_ref()
             .ok_or_else(|| ClientError::Mls("no main mls session".into()))?;
@@ -619,7 +619,7 @@ impl ServerConnection {
         channel_id: &str,
         kp: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), ClientError> {
-        let mut map = self.channel_groups.lock().unwrap();
+        let mut map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
         let s = map
             .get_mut(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -639,7 +639,7 @@ impl ServerConnection {
         // 已有旧 group 且 group_id 不同 → 用新群替换（权威重建频道群）；
         // 相同 → 重复投递，直接忽略。
         let probe = {
-            let main_guard = self.mls.lock().unwrap();
+            let main_guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
             let main_session = main_guard
                 .as_ref()
                 .ok_or_else(|| ClientError::Mls("no main mls session".into()))?;
@@ -673,7 +673,7 @@ impl ServerConnection {
         channel_id: &str,
         commit: &[u8],
     ) -> Result<bool, ClientError> {
-        let mut map = self.channel_groups.lock().unwrap();
+        let mut map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
         let s = map
             .get_mut(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -689,7 +689,7 @@ impl ServerConnection {
         channel_id: &str,
         uid: &str,
     ) -> Result<Vec<u8>, ClientError> {
-        let mut map = self.channel_groups.lock().unwrap();
+        let mut map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
         let s = map
             .get_mut(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -705,9 +705,9 @@ impl ServerConnection {
     /// 恢复回内存，重新加入时会误判“已有 group”而不走 Welcome，
     /// 导致本地 epoch 永久停留在旧值。
     pub async fn channel_drop_group(&self, channel_id: &str) {
-        self.channel_groups.lock().unwrap().remove(channel_id);
-        self.dirty_channel_groups.lock().unwrap().remove(channel_id);
-        let hook = self.aux_storage.lock().unwrap().clone();
+        self.channel_groups.lock().unwrap_or_else(|e| e.into_inner()).remove(channel_id);
+        self.dirty_channel_groups.lock().unwrap_or_else(|e| e.into_inner()).remove(channel_id);
+        let hook = self.aux_storage.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(hook) = hook {
             let key = format!("{}/{}", hook.server_url, channel_id);
             if let Err(e) = hook.store.delete("channel", &key).await {
@@ -722,7 +722,7 @@ impl ServerConnection {
 
     /// 从频道独立 group 导出 SFrame key。
     pub fn channel_export_key(&self, channel_id: &str) -> Result<[u8; 32], ClientError> {
-        let map = self.channel_groups.lock().unwrap();
+        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -738,7 +738,7 @@ impl ServerConnection {
         channel_id: &str,
         seed: &[u8],
     ) -> Result<[u8; 32], ClientError> {
-        let map = self.channel_groups.lock().unwrap();
+        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -753,14 +753,14 @@ impl ServerConnection {
         peer_kp: &[u8],
     ) -> Result<(Vec<u8>, u64), ClientError> {
         let conv_id = &canonical_conv_id(conv_id);
-        let main_guard = self.mls.lock().unwrap();
+        let main_guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let main_session = main_guard
             .as_ref()
             .ok_or_else(|| ClientError::Mls("no main mls session".into()))?;
         let mut dm_session = main_session.fork_for_new_group();
         dm_session.create_group()?;
         let (_commit, welcome) = dm_session.add_member(peer_kp)?;
-        let mut map = self.dm_groups.lock().unwrap();
+        let mut map = self.dm_groups.lock().unwrap_or_else(|e| e.into_inner());
         if map.contains_key(conv_id) {
             // 双方同时发起时，另一个 Welcome 可能已经先到并落库。
             // 不要覆盖已有 group，交给 dm_join_group 的确定性仲裁。
@@ -794,8 +794,8 @@ impl ServerConnection {
             .lock()
             .unwrap()
             .insert(conv_id.clone(), generation);
-        if self.aux_storage.lock().unwrap().is_some() {
-            self.dirty_dm_meta.lock().unwrap().insert(conv_id);
+        if self.aux_storage.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            self.dirty_dm_meta.lock().unwrap_or_else(|e| e.into_inner()).insert(conv_id);
         }
     }
 
@@ -826,7 +826,7 @@ impl ServerConnection {
             return Ok(());
         }
 
-        let main_guard = self.mls.lock().unwrap();
+        let main_guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let main_session = main_guard
             .as_ref()
             .ok_or_else(|| ClientError::Mls("no main mls session".into()))?;
@@ -835,7 +835,7 @@ impl ServerConnection {
         let new_gid = dm_session.group_id().map(|g| g.to_vec());
         drop(main_guard);
 
-        let mut map = self.dm_groups.lock().unwrap();
+        let mut map = self.dm_groups.lock().unwrap_or_else(|e| e.into_inner());
         if generation == local_gen
             && let Some(existing) = map.get(conv_id)
             && let (Some(old), Some(new)) =
@@ -866,11 +866,11 @@ impl ServerConnection {
     }
     /// B3+: 注入 aux storage hook。由 RoomSession 在构造后调用。
     pub fn set_aux_storage(&self, hook: AuxStorageHook) {
-        *self.aux_storage.lock().unwrap() = Some(hook);
+        *self.aux_storage.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
     fn mark_dm_dirty(&self, conv_id: &str) {
-        if self.aux_storage.lock().unwrap().is_some() {
+        if self.aux_storage.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             self.dirty_dm_groups
                 .lock()
                 .unwrap()
@@ -879,7 +879,7 @@ impl ServerConnection {
     }
 
     fn mark_channel_dirty(&self, channel_id: &str) {
-        if self.aux_storage.lock().unwrap().is_some() {
+        if self.aux_storage.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             self.dirty_channel_groups
                 .lock()
                 .unwrap()
@@ -894,7 +894,7 @@ impl ServerConnection {
         cipher: &dyn kaede_mls::SnapshotCipher,
     ) -> Result<Vec<u8>, ClientError> {
         let conv_id = &canonical_conv_id(conv_id);
-        let map = self.dm_groups.lock().unwrap();
+        let map = self.dm_groups.lock().unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(conv_id)
             .ok_or_else(|| ClientError::Mls(format!("DM group not found for {}", conv_id)))?;
@@ -923,7 +923,7 @@ impl ServerConnection {
         channel_id: &str,
         cipher: &dyn kaede_mls::SnapshotCipher,
     ) -> Result<Vec<u8>, ClientError> {
-        let map = self.channel_groups.lock().unwrap();
+        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -947,7 +947,7 @@ impl ServerConnection {
 
     /// B3+: 把所有 dirty snapshot flush 到 storage。没有 hook 时 no-op。
     pub async fn flush_dirty_snapshots(&self) {
-        let hook = match self.aux_storage.lock().unwrap().clone() {
+        let hook = match self.aux_storage.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             Some(h) => h,
             None => return,
         };
@@ -989,7 +989,7 @@ impl ServerConnection {
                     let key = format!("{}/{}", hook.server_url, conv_id);
                     match hook.store.put("dm", &key, &snap).await {
                         Ok(()) => {
-                            self.dirty_dm_groups.lock().unwrap().remove(&conv_id);
+                            self.dirty_dm_groups.lock().unwrap_or_else(|e| e.into_inner()).remove(&conv_id);
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -1006,7 +1006,7 @@ impl ServerConnection {
                         conv_id,
                         e
                     );
-                    self.dirty_dm_groups.lock().unwrap().remove(&conv_id);
+                    self.dirty_dm_groups.lock().unwrap_or_else(|e| e.into_inner()).remove(&conv_id);
                 }
             }
         }
@@ -1053,7 +1053,7 @@ impl ServerConnection {
         }
 
         // DM 代际元数据：用于单侧重建后的仲裁与崩溃恢复。
-        let meta_ids: Vec<String> = self.dirty_dm_meta.lock().unwrap().iter().cloned().collect();
+        let meta_ids: Vec<String> = self.dirty_dm_meta.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
         for conv_id in meta_ids {
             let generation = self.dm_generation(&conv_id);
             let key = format!("{}/{}", hook.server_url, conv_id);
@@ -1063,7 +1063,7 @@ impl ServerConnection {
                 .await
             {
                 Ok(()) => {
-                    self.dirty_dm_meta.lock().unwrap().remove(&conv_id);
+                    self.dirty_dm_meta.lock().unwrap_or_else(|e| e.into_inner()).remove(&conv_id);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1244,7 +1244,7 @@ impl ServerConnection {
         let key = self.dm_derive_key(conv_id)?;
         match kaede_crypto::dm_cipher::open(&key, conv_id, from, &me, ciphertext) {
             Ok((pt, msg_id)) => {
-                if !self.dm_replay.lock().unwrap().accept(conv_id, msg_id) {
+                if !self.dm_replay.lock().unwrap_or_else(|e| e.into_inner()).accept(conv_id, msg_id) {
                     return Err(ClientError::Protocol("replayed DM message".into()));
                 }
                 Ok(pt)
@@ -1319,7 +1319,7 @@ impl ServerConnection {
     ) -> Result<Vec<u8>, ClientError> {
         let before = self.mls_epoch();
         let out = {
-            let mut guard = self.mls.lock().unwrap();
+            let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard
                 .as_mut()
                 .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -1336,7 +1336,7 @@ impl ServerConnection {
     pub fn mls_remove_member_by_uid(&self, uid: &str) -> Result<Vec<u8>, ClientError> {
         let before = self.mls_epoch();
         let out = {
-            let mut guard = self.mls.lock().unwrap();
+            let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard
                 .as_mut()
                 .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -1350,7 +1350,7 @@ impl ServerConnection {
     pub fn mls_self_update(&self) -> Result<Vec<u8>, ClientError> {
         let before = self.mls_epoch();
         let out = {
-            let mut guard = self.mls.lock().unwrap();
+            let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard
                 .as_mut()
                 .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -1377,7 +1377,7 @@ impl ServerConnection {
         channel_id: &str,
         purpose: kaede_mls::SframePurpose,
     ) -> Result<[u8; 32], ClientError> {
-        let guard = self.mls.lock().unwrap();
+        let guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let s = guard
             .as_ref()
             .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -1391,7 +1391,7 @@ impl ServerConnection {
         purpose: kaede_mls::SframePurpose,
         extra: &[u8],
     ) -> Result<[u8; 32], ClientError> {
-        let guard = self.mls.lock().unwrap();
+        let guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let s = guard
             .as_ref()
             .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -1403,7 +1403,7 @@ impl ServerConnection {
     ///
     /// **P0-5**：供 `room.rs::host_add_peer` 做 sender_id 碰撞检查。
     pub fn mls_member_uids(&self) -> Vec<String> {
-        let guard = self.mls.lock().unwrap();
+        let guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|s| s.member_uids()).unwrap_or_default()
     }
 
@@ -1444,7 +1444,7 @@ impl ServerConnection {
     )]
     #[allow(deprecated)]
     pub fn mls_snapshot(&self) -> Result<Vec<u8>, ClientError> {
-        let guard = self.mls.lock().unwrap();
+        let guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let s = guard
             .as_ref()
             .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -1456,7 +1456,7 @@ impl ServerConnection {
         &self,
         cipher: &dyn kaede_mls::SnapshotCipher,
     ) -> Result<Vec<u8>, ClientError> {
-        let guard = self.mls.lock().unwrap();
+        let guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let s = guard
             .as_ref()
             .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
@@ -1471,7 +1471,7 @@ impl ServerConnection {
     #[allow(deprecated)]
     pub fn mls_restore_from_snapshot(&self, snapshot: &[u8]) -> Result<(), ClientError> {
         let session = MlsSession::from_snapshot(snapshot)?;
-        let mut guard = self.mls.lock().unwrap();
+        let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(session);
         Ok(())
     }
@@ -1483,7 +1483,7 @@ impl ServerConnection {
         cipher: Option<&dyn kaede_mls::SnapshotCipher>,
     ) -> Result<(), ClientError> {
         let session = MlsSession::from_snapshot_with(snapshot, cipher)?;
-        let mut guard = self.mls.lock().unwrap();
+        let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(session);
         Ok(())
     }
@@ -1510,7 +1510,7 @@ impl ServerConnection {
             ServerMessage::PeerJoined { uid } => {
                 // 去重：重连时服务器可能重发 PeerJoined，避免 peers 出现重复
                 let is_new = {
-                    let mut p = self.peers.lock().unwrap();
+                    let mut p = self.peers.lock().unwrap_or_else(|e| e.into_inner());
                     if p.contains(&uid) {
                         false
                     } else {
@@ -1526,7 +1526,7 @@ impl ServerConnection {
                 }
             }
             ServerMessage::PeerLeft { uid } => {
-                self.peers.lock().unwrap().retain(|u| u != &uid);
+                self.peers.lock().unwrap_or_else(|e| e.into_inner()).retain(|u| u != &uid);
                 self.emit(ClientEvent::PeerLeft {
                     server_id: self.server_id.clone(),
                     uid,
@@ -1618,7 +1618,7 @@ impl ServerConnection {
                 // C-2: 锁内处理、锁外 emit（避免 emit 阻塞锁）
                 let before = self.mls_epoch();
                 let result = {
-                    let mut guard = self.mls.lock().unwrap();
+                    let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
                     match guard.as_mut() {
                         Some(s) if s.is_ready() => s.process_handshake(&payload).map(|_| ()),
                         _ => Ok(()), // 未 ready 时静默（无 group 状态可破坏）
@@ -1680,7 +1680,7 @@ impl ServerConnection {
             }
             ServerMessage::MlsAppMessage { from, payload } => {
                 let plaintext = {
-                    let mut guard = self.mls.lock().unwrap();
+                    let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
                     match guard.as_mut() {
                         Some(s) if s.is_ready() => match s.decrypt(&payload) {
                             Ok(pt) => Some(pt),
@@ -2046,7 +2046,7 @@ impl ServerConnection {
             }
 
             ServerMessage::Joined { peers } => {
-                *self.peers.lock().unwrap() = peers.clone();
+                *self.peers.lock().unwrap_or_else(|e| e.into_inner()) = peers.clone();
                 self.emit(ClientEvent::Joined {
                     server_id: self.server_id.clone(),
                     peers,
@@ -2366,7 +2366,7 @@ mod tests {
     async fn mls_create_group_transitions_to_ready() {
         let (client_t, _server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
-        conn.state.lock().unwrap().force(ClientState::MlsJoining);
+        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
 
         conn.mls_init("alice").unwrap();
         assert!(!conn.mls_is_ready());
@@ -2381,7 +2381,7 @@ mod tests {
     async fn mls_send_app_goes_through_transport() {
         let (client_t, server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
-        conn.state.lock().unwrap().force(ClientState::MlsJoining);
+        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
 
         conn.mls_init("alice").unwrap();
         conn.mls_create_group().unwrap();
@@ -2409,7 +2409,7 @@ mod tests {
         }
         impl crate::ClientObserver for CollectingObserver {
             fn on_event(&self, event: ClientEvent) {
-                self.events.lock().unwrap().push(event);
+                self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
             }
         }
 
@@ -2452,7 +2452,7 @@ mod tests {
         .unwrap();
 
         // 应该没有 AppMessage 事件（因为没 MLS state）
-        let events = observer.events.lock().unwrap();
+        let events = observer.events.lock().unwrap_or_else(|e| e.into_inner());
         let app_events = events
             .iter()
             .filter(|e| matches!(e, ClientEvent::AppMessage { .. }))
@@ -2469,7 +2469,7 @@ mod tests {
 
         let (client_t, _server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
-        conn.state.lock().unwrap().force(ClientState::MlsJoining);
+        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
         conn.mls_init("alice").unwrap();
         conn.mls_create_group().unwrap();
 
@@ -2484,7 +2484,7 @@ mod tests {
     async fn mls_export_sframe_key_for_purpose_via_connection() {
         let (client_t, _server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
-        conn.state.lock().unwrap().force(ClientState::MlsJoining);
+        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
         conn.mls_init("alice").unwrap();
         conn.mls_create_group().unwrap();
 
@@ -2511,7 +2511,7 @@ mod tests {
     async fn mls_export_sframe_key_via_connection() {
         let (client_t, _server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
-        conn.state.lock().unwrap().force(ClientState::MlsJoining);
+        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
 
         conn.mls_init("alice").unwrap();
         conn.mls_create_group().unwrap();
@@ -2537,7 +2537,7 @@ mod tests {
         }
         impl crate::ClientObserver for CollectingObserver {
             fn on_event(&self, event: ClientEvent) {
-                self.events.lock().unwrap().push(event);
+                self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
             }
         }
 
@@ -2549,7 +2549,7 @@ mod tests {
 
         // 初始化 MLS 并进入 MlsReady
         conn.mls_init("alice").unwrap();
-        conn.state.lock().unwrap().force(ClientState::MlsJoining);
+        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
         conn.mls_create_group().unwrap();
         assert!(conn.mls_is_ready());
 
@@ -2563,7 +2563,7 @@ mod tests {
         .unwrap();
 
         // 验证 emit 了 MlsSyncError
-        let events = observer.events.lock().unwrap();
+        let events = observer.events.lock().unwrap_or_else(|e| e.into_inner());
         let has_sync_error = events.iter().any(|e| {
             matches!(
                 e,
@@ -2593,7 +2593,7 @@ mod tests {
         }
         impl crate::ClientObserver for CollectingObserver {
             fn on_event(&self, event: ClientEvent) {
-                self.events.lock().unwrap().push(event);
+                self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
             }
         }
 
@@ -2604,7 +2604,7 @@ mod tests {
         // 构造一条“主群”消息（正文声称属于私密频道 "ch_secret"）。
         let (client_t, _server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), Some(observer.clone()));
-        conn.state.lock().unwrap().force(ClientState::MlsJoining);
+        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
         conn.mls_init("alice").unwrap();
         conn.mls_create_group().unwrap();
 
@@ -2633,7 +2633,7 @@ mod tests {
         .await
         .unwrap();
 
-        let events = observer.events.lock().unwrap();
+        let events = observer.events.lock().unwrap_or_else(|e| e.into_inner());
         assert!(
             !events
                 .iter()
@@ -2668,13 +2668,13 @@ mod tests {
 
         let (client_t, _server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
-        *conn.mls.lock().unwrap() = Some(bob);
+        *conn.mls.lock().unwrap_or_else(|e| e.into_inner()) = Some(bob);
 
         let changed = conn.mls_join_or_reset_welcome(&w2, Some(&gid2)).unwrap();
         assert!(changed, "different group id must rebuild local group");
 
         {
-            let mut guard = conn.mls.lock().unwrap();
+            let mut guard = conn.mls.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard.as_mut().unwrap();
             assert_eq!(s.group_id().unwrap(), &gid2[..]);
             assert_eq!(s.epoch(), alice2.epoch());
@@ -2709,7 +2709,7 @@ mod tests {
 
         let (bob_t, _bob_s) = MockTransport::pair();
         let bob_conn = ServerConnection::new("s-bob", Arc::new(bob_t), None);
-        *bob_conn.mls.lock().unwrap() = Some(bob);
+        *bob_conn.mls.lock().unwrap_or_else(|e| e.into_inner()) = Some(bob);
 
         // 第一次建群：gen=1。
         let (w1, gen1) = alice.dm_init_group(conv, &bob_kp1).unwrap();

@@ -89,23 +89,23 @@ impl KaedeClient {
             transport,
             self.observer.clone(),
         ));
-        self.servers.lock().unwrap().insert(server_id, conn.clone());
+        self.servers.lock().unwrap_or_else(|e| e.into_inner()).insert(server_id, conn.clone());
         conn
     }
 
     /// 获取某个 server 连接。
     pub fn server(&self, server_id: &str) -> Option<Arc<ServerConnection>> {
-        self.servers.lock().unwrap().get(server_id).cloned()
+        self.servers.lock().unwrap_or_else(|e| e.into_inner()).get(server_id).cloned()
     }
 
     /// 当前所有 server ID。
     pub fn server_ids(&self) -> Vec<String> {
-        self.servers.lock().unwrap().keys().cloned().collect()
+        self.servers.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect()
     }
 
     /// 移除一个 server 连接。
     pub fn remove_server(&self, server_id: &str) -> Option<Arc<ServerConnection>> {
-        self.servers.lock().unwrap().remove(server_id)
+        self.servers.lock().unwrap_or_else(|e| e.into_inner()).remove(server_id)
     }
 }
 

@@ -151,21 +151,21 @@ impl AppState {
             loop {
                 tick.tick().await;
                 {
-                    let mut m = buckets_clone.lock().unwrap();
+                    let mut m = buckets_clone.lock().unwrap_or_else(|e| e.into_inner());
                     m.retain(|_, b| b.last.elapsed() < RATE_BUCKET_TTL);
                 }
                 {
-                    let mut m = kp_budget_clone.lock().unwrap();
+                    let mut m = kp_budget_clone.lock().unwrap_or_else(|e| e.into_inner());
                     m.retain(|_, (_, start)| start.elapsed() < Duration::from_secs(600));
                 }
                 {
-                    let mut m = login_failures_clone.lock().unwrap();
+                    let mut m = login_failures_clone.lock().unwrap_or_else(|e| e.into_inner());
                     m.retain(|_, (_, first)| first.elapsed() < Duration::from_secs(900));
                 }
                 {
                     // 先剔除超过 TTL 未续期的参与者（崩溃/关页不会调用 /leave），
                     // 再删除空房间 + 1 小时未活动的 seed。
-                    let mut m = room_media_clone.lock().unwrap();
+                    let mut m = room_media_clone.lock().unwrap_or_else(|e| e.into_inner());
                     prune_media_rooms(&mut m, MEDIA_PARTICIPANT_TTL, Duration::from_secs(3600));
                 }
                 if let Err(e) = crate::db::cleanup_expired(&pool_clone).await {
@@ -194,7 +194,7 @@ impl AppState {
     pub fn check_kp_fetch(&self, target: &str) -> bool {
         const LIMIT: u32 = 10;
         const WINDOW: Duration = Duration::from_secs(60);
-        let mut m = self.kp_fetch_budget.lock().unwrap();
+        let mut m = self.kp_fetch_budget.lock().unwrap_or_else(|e| e.into_inner());
         let entry = m.entry(target.to_string()).or_insert((0, Instant::now()));
         if entry.1.elapsed() > WINDOW {
             *entry = (0, Instant::now());
@@ -218,7 +218,7 @@ impl AppState {
 
     /// P0-1（单设备止血）：后登连接踢掉前登。返回被踢的旧 handle。
     pub fn add_peer(&self, handle: PeerHandle) -> Option<PeerHandle> {
-        let mut room = self.room.lock().unwrap();
+        let mut room = self.room.lock().unwrap_or_else(|e| e.into_inner());
         room.presence
             .insert(handle.uid.clone(), "online".to_string());
         let old = room.peers.insert(handle.uid.clone(), handle);
@@ -234,13 +234,13 @@ impl AppState {
     /// 移除并返回 peer handle。调用方负责向该 handle 发最后一条消息
     /// （例如 Kicked 错误），之后再 drop 掉。
     pub fn take_peer(&self, uid: &UserId) -> Option<PeerHandle> {
-        let mut room = self.room.lock().unwrap();
+        let mut room = self.room.lock().unwrap_or_else(|e| e.into_inner());
         room.presence.remove(uid);
         room.peers.remove(uid)
     }
 
     pub fn remove_peer(&self, uid: &UserId) {
-        let mut room = self.room.lock().unwrap();
+        let mut room = self.room.lock().unwrap_or_else(|e| e.into_inner());
         room.peers.remove(uid);
         room.presence.remove(uid);
     }
@@ -248,7 +248,7 @@ impl AppState {
     /// P0-X：仅当 stored session_id 匹配时才移除。
     /// 防止旧连接退出清理误删新连接（多设备 / 重连）。
     pub fn remove_peer_if_session(&self, uid: &UserId, session_id: u64) -> bool {
-        let mut room = self.room.lock().unwrap();
+        let mut room = self.room.lock().unwrap_or_else(|e| e.into_inner());
         if room.peers.get(uid).map(|p| p.session_id) == Some(session_id) {
             room.peers.remove(uid);
             room.presence.remove(uid);
@@ -282,7 +282,7 @@ impl AppState {
     }
 
     pub fn peer_uids(&self) -> Vec<UserId> {
-        self.room.lock().unwrap().peers.keys().cloned().collect()
+        self.room.lock().unwrap_or_else(|e| e.into_inner()).peers.keys().cloned().collect()
     }
 
     /// per-uid 限流。返回 true = 允许通过。
@@ -299,7 +299,7 @@ impl AppState {
     /// 共用一个桶会让聊天把 KeyPackage 拉取额度挤掉。scope 用于隔离它们。
     pub fn check_rate_scoped(&self, uid: &UserId, scope: &str, rate: f64, capacity: f64) -> bool {
         let key = format!("{}:{}", uid.as_str(), scope);
-        let mut map = self.rate_buckets.lock().unwrap();
+        let mut map = self.rate_buckets.lock().unwrap_or_else(|e| e.into_inner());
         let bucket = map.entry(key).or_insert_with(|| RateBucket::new(capacity));
         if bucket.last.elapsed() > RATE_BUCKET_TTL {
             *bucket = RateBucket::new(capacity);
@@ -322,7 +322,7 @@ impl AppState {
     /// 这样将来即使换成带 backpressure 的 sender，也不会在锁内 await 造成死锁。
     pub fn broadcast_except(&self, sender: &UserId, msg: ServerMessage) {
         let targets: Vec<mpsc::Sender<ServerMessage>> = {
-            let room = self.room.lock().unwrap();
+            let room = self.room.lock().unwrap_or_else(|e| e.into_inner());
             room.peers
                 .iter()
                 .filter(|(uid, _)| *uid != sender)
@@ -339,7 +339,7 @@ impl AppState {
     /// 所有目标**并发发送**：单个 slow consumer 最多拖 2s，而不是串行 N×2s。
     pub async fn broadcast_except_important(&self, sender: &UserId, msg: ServerMessage) {
         let targets: Vec<mpsc::Sender<ServerMessage>> = {
-            let room = self.room.lock().unwrap();
+            let room = self.room.lock().unwrap_or_else(|e| e.into_inner());
             room.peers
                 .iter()
                 .filter(|(uid, _)| *uid != sender)
@@ -362,7 +362,7 @@ impl AppState {
     /// 广播给所有在线成员（不过滤发送者）。
     pub fn broadcast_all(&self, msg: ServerMessage) {
         let targets: Vec<mpsc::Sender<ServerMessage>> = {
-            let room = self.room.lock().unwrap();
+            let room = self.room.lock().unwrap_or_else(|e| e.into_inner());
             room.peers.values().map(|p| p.tx.clone()).collect()
         };
         for tx in targets {
@@ -373,7 +373,7 @@ impl AppState {
     /// 定向发送。
     pub fn send_to(&self, target: &UserId, msg: ServerMessage) -> bool {
         let tx = {
-            let room = self.room.lock().unwrap();
+            let room = self.room.lock().unwrap_or_else(|e| e.into_inner());
             room.peers.get(target).map(|p| p.tx.clone())
         };
         if let Some(tx) = tx {

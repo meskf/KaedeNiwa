@@ -87,13 +87,13 @@ impl Transport for MockTransport {
     }
 
     async fn recv(&self) -> Result<ServerMessage, ClientError> {
-        let rx = self.inbound.lock().unwrap().clone();
+        let rx = self.inbound.lock().unwrap_or_else(|e| e.into_inner()).clone();
         rx.recv().await.map_err(|_| ClientError::Closed)
     }
 
     async fn close(&self) -> Result<(), ClientError> {
         self.outbound.close();
-        self.inbound.lock().unwrap().close();
+        self.inbound.lock().unwrap_or_else(|e| e.into_inner()).close();
         Ok(())
     }
 }

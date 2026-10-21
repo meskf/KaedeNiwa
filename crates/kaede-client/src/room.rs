@@ -1142,7 +1142,7 @@ impl RoomSession {
     pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, ClientError> {
         let list = self.http.list_channels().await?;
         {
-            let mut map = self.channel_privacy.lock().unwrap();
+            let mut map = self.channel_privacy.lock().unwrap_or_else(|e| e.into_inner());
             for ch in &list {
                 map.insert(ch.id.clone(), ch.is_private);
             }

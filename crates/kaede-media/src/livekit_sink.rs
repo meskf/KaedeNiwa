@@ -81,16 +81,6 @@ impl LiveKitConfig {
         self
     }
 
-    /// 兼容旧 API：把 passphrase 当 key 用。
-    /// 与浏览器端 `setKey(string)` 走相同 PBKDF2 派生。
-    ///
-    /// **DEPRECATED**：passphrase 通常熵不足，PBKDF2 无法弥补弱口令。
-    /// 生产必须用 `with_e2ee_key` + 32 字节 CSPRNG（MLS exporter）。
-    #[deprecated(note = "passphrase may be low-entropy; use with_e2ee_key(CSPRNG output)")]
-    pub fn with_e2ee(mut self, passphrase: &str) -> Self {
-        self.e2ee_key = Some(passphrase.as_bytes().to_vec());
-        self
-    }
 }
 
 // ============================================================
@@ -449,14 +439,14 @@ impl LiveKitSession {
             .store(MediaState::Stopping.as_u8(), Ordering::Relaxed);
 
         // H21: detached std::thread join（同 MediaSession::stop）
-        let collector_task = self.collector.lock().unwrap().take();
+        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();
             });
         }
         // H22: abort 而非 timeout
-        let pusher_task = self.pusher_task.lock().unwrap().take();
+        let pusher_task = self.pusher_task.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = pusher_task {
             h.abort();
             let _ = h.await;
@@ -476,7 +466,7 @@ impl Drop for LiveKitSession {
         self.stop_flag.store(true, Ordering::Relaxed);
         // C-4: detached join 采集线程，避免 OS 线程泄漏
         // （同步 join 会阻塞 Drop；这里用 std::thread 后台 join）
-        let collector_task = self.collector.lock().unwrap().take();
+        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();
@@ -782,14 +772,14 @@ impl LiveKitAudioSession {
             .store(MediaState::Stopping.as_u8(), Ordering::Relaxed);
 
         // H21: detached std::thread join
-        let collector_task = self.collector.lock().unwrap().take();
+        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();
             });
         }
         // H22: abort 而非 timeout
-        let pusher_task = self.pusher_task.lock().unwrap().take();
+        let pusher_task = self.pusher_task.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = pusher_task {
             h.abort();
             let _ = h.await;
@@ -809,7 +799,7 @@ impl Drop for LiveKitAudioSession {
         self.stop_flag.store(true, Ordering::Relaxed);
         // C-4: detached join 采集线程，避免 OS 线程泄漏
         // （同步 join 会阻塞 Drop；这里用 std::thread 后台 join）
-        let collector_task = self.collector.lock().unwrap().take();
+        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();

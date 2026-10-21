@@ -278,17 +278,17 @@ impl HttpApi {
 
     /// 设置 session token（登录/注册成功后调用）。
     pub fn set_token(&self, token: impl Into<String>) {
-        *self.token.lock().unwrap() = Some(token.into());
+        *self.token.lock().unwrap_or_else(|e| e.into_inner()) = Some(token.into());
     }
 
     /// 清除 token。
     pub fn clear_token(&self) {
-        *self.token.lock().unwrap() = None;
+        *self.token.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// 当前 token 副本。
     pub fn token(&self) -> Option<String> {
-        self.token.lock().unwrap().clone()
+        self.token.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     // -----------------------------------------------------------------

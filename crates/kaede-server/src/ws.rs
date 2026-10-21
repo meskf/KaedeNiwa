@@ -516,7 +516,7 @@ fn ensure_joined(
     if sid == 0 {
         anyhow::bail!("not joined; send Join first");
     }
-    let room = state.room.lock().unwrap();
+    let room = state.room.lock().unwrap_or_else(|e| e.into_inner());
     match room.peers.get(&uid) {
         Some(p) if p.session_id == sid => Ok(uid),
         _ => anyhow::bail!("session superseded by another connection"),

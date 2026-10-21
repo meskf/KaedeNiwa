@@ -221,7 +221,7 @@ impl MediaSession {
 
     async fn publish_screen(self: &Arc<Self>, config: VideoConfig) -> Result<(), MediaError> {
         let kind = TrackKind::ScreenVideo;
-        if self.published.lock().unwrap().contains_key(&kind) {
+        if self.published.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&kind) {
             return Err(MediaError::InvalidState(format!(
                 "{:?} already published",
                 kind
@@ -390,7 +390,7 @@ impl MediaSession {
             .await;
 
             // 任务无论因 stop 还是异常（3s 无帧）退出，都要撤销 track 并清理表项。
-            published_map.lock().unwrap().remove(&kind);
+            published_map.lock().unwrap_or_else(|e| e.into_inner()).remove(&kind);
             let _ = room_handle
                 .local_participant()
                 .unpublish_track(&sid_for_cleanup)
@@ -398,7 +398,7 @@ impl MediaSession {
             let _ = events_for_cleanup.send(MediaEvent::LocalUnpublished { kind });
         });
 
-        self.published.lock().unwrap().insert(
+        self.published.lock().unwrap_or_else(|e| e.into_inner()).insert(
             kind,
             PublishedEntry {
                 sid: sid.clone(),
@@ -421,7 +421,7 @@ impl MediaSession {
         track_kind: TrackKind,
         denoise: bool,
     ) -> Result<(), MediaError> {
-        if self.published.lock().unwrap().contains_key(&track_kind) {
+        if self.published.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&track_kind) {
             return Err(MediaError::InvalidState(format!(
                 "{:?} already published",
                 track_kind
@@ -549,7 +549,7 @@ impl MediaSession {
             })
             .await;
 
-            published_map.lock().unwrap().remove(&track_kind);
+            published_map.lock().unwrap_or_else(|e| e.into_inner()).remove(&track_kind);
             let _ = room_handle
                 .local_participant()
                 .unpublish_track(&sid_for_cleanup)
@@ -557,7 +557,7 @@ impl MediaSession {
             let _ = events_for_cleanup.send(MediaEvent::LocalUnpublished { kind: track_kind });
         });
 
-        self.published.lock().unwrap().insert(
+        self.published.lock().unwrap_or_else(|e| e.into_inner()).insert(
             track_kind,
             PublishedEntry {
                 sid: sid.clone(),
@@ -574,7 +574,7 @@ impl MediaSession {
 
     /// 取消发布某 track。
     pub async fn unpublish(&self, kind: TrackKind) -> Result<(), MediaError> {
-        let entry = self.published.lock().unwrap().remove(&kind);
+        let entry = self.published.lock().unwrap_or_else(|e| e.into_inner()).remove(&kind);
         let Some(mut e) = entry else {
             return Err(MediaError::InvalidState(format!(
                 "{:?} not published",
@@ -597,7 +597,7 @@ impl MediaSession {
         sink: Arc<LiveKitVideoSink>,
     ) -> Result<ConsumerHandle, MediaError> {
         let remote = {
-            let map = self.remote_tracks.lock().unwrap();
+            let map = self.remote_tracks.lock().unwrap_or_else(|e| e.into_inner());
             map.get(&track).cloned()
         };
         let Some(remote) = remote else {
@@ -653,7 +653,7 @@ impl MediaSession {
         player: Arc<AudioPlayer>,
     ) -> Result<ConsumerHandle, MediaError> {
         let remote = {
-            let map = self.remote_tracks.lock().unwrap();
+            let map = self.remote_tracks.lock().unwrap_or_else(|e| e.into_inner());
             map.get(&track).cloned()
         };
         let Some(remote) = remote else {
@@ -713,7 +713,7 @@ impl MediaSession {
     /// 断开连接。幂等。
     pub async fn disconnect(&self) {
         // 停所有 published
-        let published: Vec<_> = self.published.lock().unwrap().drain().collect();
+        let published: Vec<_> = self.published.lock().unwrap_or_else(|e| e.into_inner()).drain().collect();
         for (_, mut e) in published {
             if let Some(tx) = e.stop_tx.take() {
                 let _ = tx.send(());
@@ -722,7 +722,7 @@ impl MediaSession {
         }
 
         // 停 event task
-        if let Some(h) = self.event_task.lock().unwrap().take() {
+        if let Some(h) = self.event_task.lock().unwrap_or_else(|e| e.into_inner()).take() {
             h.abort();
         }
 
@@ -735,7 +735,7 @@ impl MediaSession {
 
 impl Drop for MediaSession {
     fn drop(&mut self) {
-        if let Some(e) = self.event_task.lock().unwrap().take() {
+        if let Some(e) = self.event_task.lock().unwrap_or_else(|e| e.into_inner()).take() {
             e.abort();
         }
         // published 里的 task 会在 Arc drop 后由 oneshot 失效自然终止
@@ -781,7 +781,7 @@ async fn forward_room_events(
                     RemoteTrack::Audio(_) => RemoteKind::Audio,
                 };
                 let id = TrackId::new(uid, sid);
-                remote_tracks.lock().unwrap().remove(&id);
+                remote_tracks.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
                 let _ = events_tx.send(MediaEvent::TrackGone { track: id, kind });
             }
             RoomEvent::ParticipantConnected(p) => {
@@ -791,7 +791,7 @@ async fn forward_room_events(
             }
             RoomEvent::ParticipantDisconnected(p) => {
                 let uid = p.identity().to_string();
-                remote_tracks.lock().unwrap().retain(|id, _| id.uid != uid);
+                remote_tracks.lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| id.uid != uid);
                 let _ = events_tx.send(MediaEvent::PeerLeft { uid });
             }
             RoomEvent::Disconnected { .. } => {
