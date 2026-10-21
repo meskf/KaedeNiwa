@@ -82,8 +82,10 @@ pub fn MobileDmPage() -> Element {
                 {
                     let cid = c.conv_id.clone();
                     let cid2 = c.conv_id.clone();
+                    let cid3 = c.conv_id.clone();
                     let nick = c.peer_nickname.clone();
                     let initial = nick.chars().next().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string());
+                    let app_for_load = app;
                     rsx! {
                         div {
                             key: "{cid}",
@@ -91,6 +93,10 @@ pub fn MobileDmPage() -> Element {
                                 ui.selected_dm_conv.set(Some(cid2.clone()));
                                 ui.mobile_detail.set(Some(cid2.clone()));
                                 ui.mobile_detail_kind.set(Some(MobileDetailKind::Dm));
+                                let cid3 = cid3.clone();
+                                spawn(async move {
+                                    crate::dm_view::load_messages(app_for_load, cid3).await;
+                                });
                             },
                             style: "padding: 14px 12px; border-radius: 10px; display: flex; align-items: center; gap: 10px; cursor: pointer; color: var(--fg);",
                             div {

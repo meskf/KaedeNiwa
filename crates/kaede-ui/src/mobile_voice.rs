@@ -11,7 +11,7 @@ pub fn MobileVoiceSheet() -> Element {
     use crate::state::{UiState, VoiceControls, VoiceState};
 
     let mut ui = use_context::<UiState>();
-    let mut voice = use_context::<VoiceState>();
+    let voice = use_context::<VoiceState>();
     let mut controls = use_context::<VoiceControls>();
 
     if !*ui.voice_sheet_open.read() {

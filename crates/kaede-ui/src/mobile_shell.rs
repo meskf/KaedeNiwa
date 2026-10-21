@@ -35,8 +35,8 @@ pub fn MobileShell() -> Element {
                         },
                         Some(MobileDetailKind::Dm) => rsx! {
                             div {
-                                style: "padding: 32px 16px; text-align: center; color: var(--fg-faint); font-size: 14px;",
-                                "私聊消息（M3 实现）"
+                                style: "height: 100%; display: flex; flex-direction: column;",
+                                crate::dm_view::DmView {}
                             }
                         },
                         None => rsx! {},

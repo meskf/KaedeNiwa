@@ -5,7 +5,7 @@ use kaede_client::http::DmConversation;
 
 use crate::state::{AppState, UiMessage, UiState};
 
-async fn load_messages(mut app: AppState, conv_id: String) {
+pub(crate) async fn load_messages(mut app: AppState, conv_id: String) {
     let room_opt = app.room.read().clone();
     let Some(room) = room_opt else { return };
     match room.dm_load_history(&conv_id, None, 100).await {
