@@ -93,10 +93,10 @@ pub fn App() -> Element {
                 LoginView {}
             }
             if view == View::Main {
-                if layout == LayoutMode::Mobile {
-                    MobileShell {}
-                } else {
-                    MainBody {}
+                match layout {
+                    LayoutMode::Mobile => rsx! { MobileShell {} },
+                    LayoutMode::Tablet => rsx! { MainBody { compact: true } },
+                    LayoutMode::Desktop => rsx! { MainBody { compact: false } },
                 }
             }
             ServerModal {}

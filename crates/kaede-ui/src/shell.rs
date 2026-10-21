@@ -174,11 +174,11 @@ fn TopTab(active: bool, onclick: EventHandler<MouseEvent>, children: Element) ->
 // ============================================================================
 
 #[component]
-pub fn MainBody() -> Element {
+pub fn MainBody(compact: bool) -> Element {
     let mut ui = use_context::<UiState>();
     let i18n = use_i18n();
     let tab = *ui.main_tab.read();
-    let members_open = *ui.members_open.read();
+    let members_open = *ui.members_open.read() && !compact;
 
     rsx! {
         div {

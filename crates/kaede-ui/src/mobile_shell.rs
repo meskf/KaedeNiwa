@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 
 use crate::icons::{IconMail, IconSettings, IconUserList, IconUsers};
 use crate::mobile_pages::{MobileDmPage, MobileFriendsPage, MobileGroupsPage};
-use crate::state::{MainTab, MobileDetailKind, UiState};
+use crate::state::{MainTab, MobileDetailKind, UiState, VoiceState};
 
 #[component]
 pub fn MobileShell() -> Element {
@@ -49,7 +49,27 @@ pub fn MobileShell() -> Element {
                     }
                 }
             }
+            MobileVoiceBar {}
             MobileTabBar {}
+        }
+    }
+}
+
+#[component]
+fn MobileVoiceBar() -> Element {
+    let voice = use_context::<VoiceState>();
+    let ch = voice.active_channel.read().clone();
+    let Some(ch) = ch else {
+        return rsx! {};
+    };
+    let count = ch.members.len();
+    let name = ch.name.clone();
+    rsx! {
+        div {
+            style: "padding: 10px 14px; background: var(--positive); color: #fff; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 8px; flex-shrink: 0;",
+            span { "🔊" }
+            span { "{name}" }
+            span { style: "opacity: 0.8; font-size: 11px;", "· {count} 人" }
         }
     }
 }
