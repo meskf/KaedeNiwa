@@ -1,5 +1,8 @@
 //! 登录页。
 
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+// wasm 单线程：RoomSession 内部 Rc<RefCell> 非 Send/Sync，Arc 仅为与 native 签名统一
+
 use crate::app::ObserverRef;
 use crate::i18n::use_i18n;
 use crate::observer::history_to_ui;

@@ -298,7 +298,11 @@ pub async fn upload_file_from_bytes(
         None
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let thumb_bytes = if is_image { make_thumbnail(&bytes) } else { None };
+    let thumb_bytes = if is_image {
+        make_thumbnail(&bytes)
+    } else {
+        None
+    };
     let mut att = room.upload_attachment(target_id, name, mime, bytes).await?;
     if let Some(thumb_bytes) = thumb_bytes {
         let thumb_name = format!("{}_thumb.jpg", name);
@@ -312,4 +316,3 @@ pub async fn upload_file_from_bytes(
     }
     Ok(att)
 }
-

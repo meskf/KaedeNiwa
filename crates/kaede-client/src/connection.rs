@@ -534,13 +534,19 @@ impl ServerConnection {
     ///
     /// 用途：`ChannelSync 0x05` 处理完 commit 后 emit `ChannelEpochChanged` 用。
     pub fn channel_epoch(&self, channel_id: &str) -> Option<u64> {
-        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
+        let map = self
+            .channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         map.get(channel_id).map(|s| s.epoch())
     }
 
     /// 频道是否有独立 MLS group（私密频道）。
     pub fn channel_has_group(&self, channel_id: &str) -> bool {
-        self.channel_groups.lock().unwrap_or_else(|e| e.into_inner()).contains_key(channel_id)
+        self.channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(channel_id)
     }
 
     /// 从 channel group 按 purpose 派生密钥（P0：附件加密用 File）。
@@ -549,7 +555,10 @@ impl ServerConnection {
         channel_id: &str,
         purpose: kaede_mls::SframePurpose,
     ) -> Result<[u8; 32], ClientError> {
-        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
+        let map = self
+            .channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -619,7 +628,10 @@ impl ServerConnection {
         channel_id: &str,
         kp: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), ClientError> {
-        let mut map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self
+            .channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let s = map
             .get_mut(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -673,7 +685,10 @@ impl ServerConnection {
         channel_id: &str,
         commit: &[u8],
     ) -> Result<bool, ClientError> {
-        let mut map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self
+            .channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let s = map
             .get_mut(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -689,7 +704,10 @@ impl ServerConnection {
         channel_id: &str,
         uid: &str,
     ) -> Result<Vec<u8>, ClientError> {
-        let mut map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self
+            .channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let s = map
             .get_mut(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -705,9 +723,19 @@ impl ServerConnection {
     /// 恢复回内存，重新加入时会误判“已有 group”而不走 Welcome，
     /// 导致本地 epoch 永久停留在旧值。
     pub async fn channel_drop_group(&self, channel_id: &str) {
-        self.channel_groups.lock().unwrap_or_else(|e| e.into_inner()).remove(channel_id);
-        self.dirty_channel_groups.lock().unwrap_or_else(|e| e.into_inner()).remove(channel_id);
-        let hook = self.aux_storage.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        self.channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(channel_id);
+        self.dirty_channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(channel_id);
+        let hook = self
+            .aux_storage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(hook) = hook {
             let key = format!("{}/{}", hook.server_url, channel_id);
             if let Err(e) = hook.store.delete("channel", &key).await {
@@ -722,7 +750,10 @@ impl ServerConnection {
 
     /// 从频道独立 group 导出 SFrame key。
     pub fn channel_export_key(&self, channel_id: &str) -> Result<[u8; 32], ClientError> {
-        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
+        let map = self
+            .channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -738,7 +769,10 @@ impl ServerConnection {
         channel_id: &str,
         seed: &[u8],
     ) -> Result<[u8; 32], ClientError> {
-        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
+        let map = self
+            .channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -794,8 +828,16 @@ impl ServerConnection {
             .lock()
             .unwrap()
             .insert(conv_id.clone(), generation);
-        if self.aux_storage.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-            self.dirty_dm_meta.lock().unwrap_or_else(|e| e.into_inner()).insert(conv_id);
+        if self
+            .aux_storage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            self.dirty_dm_meta
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(conv_id);
         }
     }
 
@@ -870,7 +912,12 @@ impl ServerConnection {
     }
 
     fn mark_dm_dirty(&self, conv_id: &str) {
-        if self.aux_storage.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        if self
+            .aux_storage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
             self.dirty_dm_groups
                 .lock()
                 .unwrap()
@@ -879,7 +926,12 @@ impl ServerConnection {
     }
 
     fn mark_channel_dirty(&self, channel_id: &str) {
-        if self.aux_storage.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        if self
+            .aux_storage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
             self.dirty_channel_groups
                 .lock()
                 .unwrap()
@@ -923,7 +975,10 @@ impl ServerConnection {
         channel_id: &str,
         cipher: &dyn kaede_mls::SnapshotCipher,
     ) -> Result<Vec<u8>, ClientError> {
-        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
+        let map = self
+            .channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let s = map
             .get(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
@@ -947,7 +1002,12 @@ impl ServerConnection {
 
     /// B3+: 把所有 dirty snapshot flush 到 storage。没有 hook 时 no-op。
     pub async fn flush_dirty_snapshots(&self) {
-        let hook = match self.aux_storage.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        let hook = match self
+            .aux_storage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
             Some(h) => h,
             None => return,
         };
@@ -989,7 +1049,10 @@ impl ServerConnection {
                     let key = format!("{}/{}", hook.server_url, conv_id);
                     match hook.store.put("dm", &key, &snap).await {
                         Ok(()) => {
-                            self.dirty_dm_groups.lock().unwrap_or_else(|e| e.into_inner()).remove(&conv_id);
+                            self.dirty_dm_groups
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&conv_id);
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -1006,7 +1069,10 @@ impl ServerConnection {
                         conv_id,
                         e
                     );
-                    self.dirty_dm_groups.lock().unwrap_or_else(|e| e.into_inner()).remove(&conv_id);
+                    self.dirty_dm_groups
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&conv_id);
                 }
             }
         }
@@ -1053,7 +1119,13 @@ impl ServerConnection {
         }
 
         // DM 代际元数据：用于单侧重建后的仲裁与崩溃恢复。
-        let meta_ids: Vec<String> = self.dirty_dm_meta.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
+        let meta_ids: Vec<String> = self
+            .dirty_dm_meta
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
         for conv_id in meta_ids {
             let generation = self.dm_generation(&conv_id);
             let key = format!("{}/{}", hook.server_url, conv_id);
@@ -1063,7 +1135,10 @@ impl ServerConnection {
                 .await
             {
                 Ok(()) => {
-                    self.dirty_dm_meta.lock().unwrap_or_else(|e| e.into_inner()).remove(&conv_id);
+                    self.dirty_dm_meta
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&conv_id);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1244,7 +1319,12 @@ impl ServerConnection {
         let key = self.dm_derive_key(conv_id)?;
         match kaede_crypto::dm_cipher::open(&key, conv_id, from, &me, ciphertext) {
             Ok((pt, msg_id)) => {
-                if !self.dm_replay.lock().unwrap_or_else(|e| e.into_inner()).accept(conv_id, msg_id) {
+                if !self
+                    .dm_replay
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .accept(conv_id, msg_id)
+                {
                     return Err(ClientError::Protocol("replayed DM message".into()));
                 }
                 Ok(pt)
@@ -1526,7 +1606,10 @@ impl ServerConnection {
                 }
             }
             ServerMessage::PeerLeft { uid } => {
-                self.peers.lock().unwrap_or_else(|e| e.into_inner()).retain(|u| u != &uid);
+                self.peers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .retain(|u| u != &uid);
                 self.emit(ClientEvent::PeerLeft {
                     server_id: self.server_id.clone(),
                     uid,
@@ -2366,7 +2449,10 @@ mod tests {
     async fn mls_create_group_transitions_to_ready() {
         let (client_t, _server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
-        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
+        conn.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .force(ClientState::MlsJoining);
 
         conn.mls_init("alice").unwrap();
         assert!(!conn.mls_is_ready());
@@ -2381,7 +2467,10 @@ mod tests {
     async fn mls_send_app_goes_through_transport() {
         let (client_t, server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
-        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
+        conn.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .force(ClientState::MlsJoining);
 
         conn.mls_init("alice").unwrap();
         conn.mls_create_group().unwrap();
@@ -2409,7 +2498,10 @@ mod tests {
         }
         impl crate::ClientObserver for CollectingObserver {
             fn on_event(&self, event: ClientEvent) {
-                self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+                self.events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(event);
             }
         }
 
@@ -2469,7 +2561,10 @@ mod tests {
 
         let (client_t, _server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
-        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
+        conn.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .force(ClientState::MlsJoining);
         conn.mls_init("alice").unwrap();
         conn.mls_create_group().unwrap();
 
@@ -2484,7 +2579,10 @@ mod tests {
     async fn mls_export_sframe_key_for_purpose_via_connection() {
         let (client_t, _server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
-        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
+        conn.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .force(ClientState::MlsJoining);
         conn.mls_init("alice").unwrap();
         conn.mls_create_group().unwrap();
 
@@ -2511,7 +2609,10 @@ mod tests {
     async fn mls_export_sframe_key_via_connection() {
         let (client_t, _server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
-        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
+        conn.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .force(ClientState::MlsJoining);
 
         conn.mls_init("alice").unwrap();
         conn.mls_create_group().unwrap();
@@ -2537,7 +2638,10 @@ mod tests {
         }
         impl crate::ClientObserver for CollectingObserver {
             fn on_event(&self, event: ClientEvent) {
-                self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+                self.events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(event);
             }
         }
 
@@ -2549,7 +2653,10 @@ mod tests {
 
         // 初始化 MLS 并进入 MlsReady
         conn.mls_init("alice").unwrap();
-        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
+        conn.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .force(ClientState::MlsJoining);
         conn.mls_create_group().unwrap();
         assert!(conn.mls_is_ready());
 
@@ -2593,7 +2700,10 @@ mod tests {
         }
         impl crate::ClientObserver for CollectingObserver {
             fn on_event(&self, event: ClientEvent) {
-                self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+                self.events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(event);
             }
         }
 
@@ -2604,7 +2714,10 @@ mod tests {
         // 构造一条“主群”消息（正文声称属于私密频道 "ch_secret"）。
         let (client_t, _server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), Some(observer.clone()));
-        conn.state.lock().unwrap_or_else(|e| e.into_inner()).force(ClientState::MlsJoining);
+        conn.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .force(ClientState::MlsJoining);
         conn.mls_init("alice").unwrap();
         conn.mls_create_group().unwrap();
 

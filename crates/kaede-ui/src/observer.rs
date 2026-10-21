@@ -1,6 +1,9 @@
 //! 客户端事件 → UI 状态的桥接。
 
 #![allow(clippy::collapsible_if)]
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+// wasm 单线程：RoomSession 内部 Rc<RefCell> 非 Send/Sync，Arc 仅为与 native 签名统一
+
 use async_channel::{Receiver, Sender, unbounded};
 #[allow(unused_imports)]
 use dioxus::prelude::*;

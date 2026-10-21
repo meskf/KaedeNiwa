@@ -23,10 +23,10 @@ thread_local! {
 /// 断开当前会话（幂等）。Drop 里也会兜底 disconnect，这里是显式清理 + 允许重建。
 pub async fn leave_voice() {
     let old = SESSION.with(|s| s.borrow_mut().take());
-    if let Some(s) = old {
-        if let Err(e) = s.disconnect().await {
-            tracing::debug!("[voice-web] disconnect on leave: {}", e);
-        }
+    if let Some(s) = old
+        && let Err(e) = s.disconnect().await
+    {
+        tracing::debug!("[voice-web] disconnect on leave: {}", e);
     }
 }
 

@@ -187,7 +187,10 @@ async fn login(
     // 就能把已知账号锁死 15 分钟。
     let failure_key = (req.login_id.clone(), peer.ip());
     {
-        let mut failures = state.login_failures.lock().unwrap_or_else(|e| e.into_inner());
+        let mut failures = state
+            .login_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some((count, first)) = failures.get(&failure_key) {
             if *count >= 5 && first.elapsed() < std::time::Duration::from_secs(900) {
                 return Err(ApiError::Unauthorized);
@@ -217,7 +220,10 @@ async fn login(
         .verify_password(req.password.as_bytes(), &parsed)
         .is_err()
     {
-        let mut failures = state.login_failures.lock().unwrap_or_else(|e| e.into_inner());
+        let mut failures = state
+            .login_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let entry = failures
             .entry(failure_key)
             .or_insert((0, std::time::Instant::now()));

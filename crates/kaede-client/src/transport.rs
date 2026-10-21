@@ -3,6 +3,9 @@
 //! - [`MockTransport`]：内存，测试用
 //! - [`WebSocketTransport`]：native 用 tokio-tungstenite，wasm 用 web-sys
 
+#![cfg_attr(target_arch = "wasm32", allow(clippy::type_complexity))]
+// wasm 分支：Rc<RefCell<Option<Closure<dyn FnMut(...)>>>> 是 wasm-bindgen 标准模式
+
 use async_trait::async_trait;
 use kaede_protocol::{ClientMessage, ServerMessage};
 
@@ -87,13 +90,20 @@ impl Transport for MockTransport {
     }
 
     async fn recv(&self) -> Result<ServerMessage, ClientError> {
-        let rx = self.inbound.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let rx = self
+            .inbound
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         rx.recv().await.map_err(|_| ClientError::Closed)
     }
 
     async fn close(&self) -> Result<(), ClientError> {
         self.outbound.close();
-        self.inbound.lock().unwrap_or_else(|e| e.into_inner()).close();
+        self.inbound
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .close();
         Ok(())
     }
 }

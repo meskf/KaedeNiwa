@@ -22,7 +22,10 @@ struct Collector {
 
 impl ClientObserver for Collector {
     fn on_event(&self, event: ClientEvent) {
-        self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(event);
     }
 }
 
@@ -32,7 +35,12 @@ impl Collector {
     }
 
     fn count<F: Fn(&ClientEvent) -> bool>(&self, f: F) -> usize {
-        self.events.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|e| f(e)).count()
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|e| f(e))
+            .count()
     }
 
     /// 等待某事件出现（最多等 3 秒）。

@@ -250,10 +250,10 @@ impl LiveKitWebSession {
                     "width: 100%; max-width: 480px; border-radius: 4px; background:#000;",
                 );
 
-                if let Ok(attach) = Reflect::get(&track, &JsValue::from_str("attach")) {
-                    if let Ok(f) = attach.dyn_into::<Function>() {
-                        let _ = f.call1(&track, &video);
-                    }
+                if let Ok(attach) = Reflect::get(&track, &JsValue::from_str("attach"))
+                    && let Ok(f) = attach.dyn_into::<Function>()
+                {
+                    let _ = f.call1(&track, &video);
                 }
 
                 let container: web_sys::Node = document

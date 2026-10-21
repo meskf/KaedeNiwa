@@ -17,6 +17,9 @@
 //! [`KaedeClient`] 用 `std::sync::Mutex` 保护 `HashMap`，**不跨 await 持锁**。
 //! 网络 IO 完全交给 [`Transport`]。
 
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+// wasm 单线程：ServerConnection 构造时同样需要 allow
+
 pub mod connection;
 pub mod endpoint;
 pub mod error;
@@ -89,23 +92,38 @@ impl KaedeClient {
             transport,
             self.observer.clone(),
         ));
-        self.servers.lock().unwrap_or_else(|e| e.into_inner()).insert(server_id, conn.clone());
+        self.servers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(server_id, conn.clone());
         conn
     }
 
     /// 获取某个 server 连接。
     pub fn server(&self, server_id: &str) -> Option<Arc<ServerConnection>> {
-        self.servers.lock().unwrap_or_else(|e| e.into_inner()).get(server_id).cloned()
+        self.servers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(server_id)
+            .cloned()
     }
 
     /// 当前所有 server ID。
     pub fn server_ids(&self) -> Vec<String> {
-        self.servers.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect()
+        self.servers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// 移除一个 server 连接。
     pub fn remove_server(&self, server_id: &str) -> Option<Arc<ServerConnection>> {
-        self.servers.lock().unwrap_or_else(|e| e.into_inner()).remove(server_id)
+        self.servers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(server_id)
     }
 }
 

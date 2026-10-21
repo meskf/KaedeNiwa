@@ -42,7 +42,8 @@ async fn start_server() -> (String, SqlitePool) {
         let _ = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        ).await;
+        )
+        .await;
     });
     (format!("ws://{}/ws", addr), pool)
 }

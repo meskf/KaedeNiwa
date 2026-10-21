@@ -204,7 +204,8 @@ fn MessageList() -> Element {
     // 1.2 滚到顶自动加载：监听 #msg-list 滚动，靠近顶部时自动触发"加载更早"按钮。
     //     按钮保留作为 fallback；用 data-loading + 元素属性 + 重试做三重保护。
     use_effect(move || {
-        let _ = dioxus::document::eval(r#"
+        let _ = dioxus::document::eval(
+            r#"
             (function(){
                 function tryBind(attemptsLeft){
                     const list = document.getElementById('msg-list');
@@ -232,7 +233,8 @@ fn MessageList() -> Element {
                 }
                 tryBind(10);
             })();
-        "#);
+        "#,
+        );
     });
 
     rsx! {
@@ -731,8 +733,7 @@ pub(crate) fn send_attachments_bytes(
         }
         let ts = crate::observer::now_ms();
         if let Err(e) = room.send_text_with_attachments_at(&ch, "", &atts, ts).await {
-            ui.toast
-                .set(Some((format!("发送附件失败: {}", e), true)));
+            ui.toast.set(Some((format!("发送附件失败: {}", e), true)));
             return;
         }
         let acc = ui.common_account.read();

@@ -81,7 +81,10 @@ async fn issue_token(
     let seed: [u8; 32] = {
         use rand::RngCore;
         use std::collections::HashMap;
-        let mut seeds = state.room_media_seeds.lock().unwrap_or_else(|e| e.into_inner());
+        let mut seeds = state
+            .room_media_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
         let entry = seeds.entry(room.clone()).or_insert_with(|| {
             let mut s = [0u8; 32];
@@ -175,7 +178,10 @@ async fn leave_room(
     }
     let room = format!("kaede-{}", req.channel_id);
     {
-        let mut seeds = state.room_media_seeds.lock().unwrap_or_else(|e| e.into_inner());
+        let mut seeds = state
+            .room_media_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = seeds.get_mut(&room) {
             entry.participants.remove(uid.as_str());
             entry.last_used = std::time::Instant::now();

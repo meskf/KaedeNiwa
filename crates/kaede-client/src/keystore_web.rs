@@ -11,7 +11,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::CryptoKey;
 
 thread_local! {
-    static CACHED_DEK: RefCell<Option<[u8; 32]>> = RefCell::new(None);
+    static CACHED_DEK: RefCell<Option<[u8; 32]>> = const { RefCell::new(None) };
 }
 
 pub fn cached_dek() -> Option<[u8; 32]> {

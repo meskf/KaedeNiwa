@@ -159,7 +159,9 @@ impl AppState {
                     m.retain(|_, (_, start)| start.elapsed() < Duration::from_secs(600));
                 }
                 {
-                    let mut m = login_failures_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut m = login_failures_clone
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     m.retain(|_, (_, first)| first.elapsed() < Duration::from_secs(900));
                 }
                 {
@@ -194,7 +196,10 @@ impl AppState {
     pub fn check_kp_fetch(&self, target: &str) -> bool {
         const LIMIT: u32 = 10;
         const WINDOW: Duration = Duration::from_secs(60);
-        let mut m = self.kp_fetch_budget.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = self
+            .kp_fetch_budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let entry = m.entry(target.to_string()).or_insert((0, Instant::now()));
         if entry.1.elapsed() > WINDOW {
             *entry = (0, Instant::now());
@@ -282,7 +287,13 @@ impl AppState {
     }
 
     pub fn peer_uids(&self) -> Vec<UserId> {
-        self.room.lock().unwrap_or_else(|e| e.into_inner()).peers.keys().cloned().collect()
+        self.room
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .peers
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// per-uid 限流。返回 true = 允许通过。

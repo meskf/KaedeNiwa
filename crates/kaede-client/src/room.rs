@@ -1,5 +1,8 @@
 //! 房间会话：把 HTTP 登录 + WS 连接 + MLS 建组 + 持久化 串成一条路径。
 
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+// wasm 单线程：ServerConnection 里的 Rc<RefCell<...>> 天然非 Send/Sync，Arc 仅为与 native 签名统一
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1142,7 +1145,10 @@ impl RoomSession {
     pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, ClientError> {
         let list = self.http.list_channels().await?;
         {
-            let mut map = self.channel_privacy.lock().unwrap_or_else(|e| e.into_inner());
+            let mut map = self
+                .channel_privacy
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             for ch in &list {
                 map.insert(ch.id.clone(), ch.is_private);
             }

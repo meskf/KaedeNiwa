@@ -51,12 +51,7 @@ pub fn primary_display_size() -> (u32, u32) {
             GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
         };
         // SAFETY: 两个调用都是无副作用的只读系统指标查询。
-        let (w, h) = unsafe {
-            (
-                GetSystemMetrics(SM_CXSCREEN),
-                GetSystemMetrics(SM_CYSCREEN),
-            )
-        };
+        let (w, h) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
         if w > 0 && h > 0 {
             return (w as u32, h as u32);
         }

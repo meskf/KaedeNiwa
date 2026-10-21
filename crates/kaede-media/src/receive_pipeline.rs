@@ -87,13 +87,23 @@ impl ReceivePipeline {
         #[cfg(not(target_arch = "wasm32"))]
         match &self.mode {
             ReceiveMode::Video => {
-                if let Some(v) = self.video.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                if let Some(v) = self
+                    .video
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                {
                     v.push(&dec.data, dec.pts_ms)
                         .map_err(|e| ReceiveError::Decode(e.to_string()))?;
                 }
             }
             ReceiveMode::Audio { .. } => {
-                if let Some(a) = self.audio.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                if let Some(a) = self
+                    .audio
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                {
                     a.push(&dec.data, dec.pts_ms)
                         .map_err(|e| ReceiveError::Decode(e.to_string()))?;
                 }
@@ -116,10 +126,20 @@ impl ReceivePipeline {
     pub fn stop(&self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(v) = self.video.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            if let Some(v) = self
+                .video
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
                 v.stop();
             }
-            if let Some(a) = self.audio.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            if let Some(a) = self
+                .audio
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
                 a.stop();
             }
         }

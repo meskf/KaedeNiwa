@@ -42,10 +42,8 @@ pub fn bind_drop_and_paste(ui: UiState, app: AppState) {
                 let _ = el.class_list().add_1("drag-over");
             }
         });
-        let _ = wrap.add_event_listener_with_callback(
-            "dragover",
-            over_closure.as_ref().unchecked_ref(),
-        );
+        let _ = wrap
+            .add_event_listener_with_callback("dragover", over_closure.as_ref().unchecked_ref());
         over_closure.forget();
     }
 
@@ -58,10 +56,8 @@ pub fn bind_drop_and_paste(ui: UiState, app: AppState) {
                 let _ = el.class_list().remove_1("drag-over");
             }
         });
-        let _ = wrap.add_event_listener_with_callback(
-            "dragleave",
-            leave_closure.as_ref().unchecked_ref(),
-        );
+        let _ = wrap
+            .add_event_listener_with_callback("dragleave", leave_closure.as_ref().unchecked_ref());
         leave_closure.forget();
     }
 
@@ -112,10 +108,8 @@ pub fn bind_drop_and_paste(ui: UiState, app: AppState) {
                 }
             });
         });
-        let _ = wrap.add_event_listener_with_callback(
-            "drop",
-            drop_closure.as_ref().unchecked_ref(),
-        );
+        let _ =
+            wrap.add_event_listener_with_callback("drop", drop_closure.as_ref().unchecked_ref());
         drop_closure.forget();
     }
 }

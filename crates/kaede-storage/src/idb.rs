@@ -156,12 +156,11 @@ impl IndexedDbStore {
         for r in records {
             let id = js_sys::Reflect::get(&r, &JsValue::from_str("id"))
                 .map_err(|e| StorageError::Backend(format!("{:?}", e)))?;
-            if let Some(s) = id.as_string() {
-                if let Some((parsed_ns, k)) = Self::split_id(&s) {
-                    if parsed_ns == ns {
-                        out.push(k.to_string());
-                    }
-                }
+            if let Some(s) = id.as_string()
+                && let Some((parsed_ns, k)) = Self::split_id(&s)
+                && parsed_ns == ns
+            {
+                out.push(k.to_string());
             }
         }
         Ok(out)

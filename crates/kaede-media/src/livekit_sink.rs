@@ -80,7 +80,6 @@ impl LiveKitConfig {
         self.e2ee_key = Some(key);
         self
     }
-
 }
 
 // ============================================================
@@ -439,14 +438,22 @@ impl LiveKitSession {
             .store(MediaState::Stopping.as_u8(), Ordering::Relaxed);
 
         // H21: detached std::thread join（同 MediaSession::stop）
-        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let collector_task = self
+            .collector
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();
             });
         }
         // H22: abort 而非 timeout
-        let pusher_task = self.pusher_task.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let pusher_task = self
+            .pusher_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some(h) = pusher_task {
             h.abort();
             let _ = h.await;
@@ -466,7 +473,11 @@ impl Drop for LiveKitSession {
         self.stop_flag.store(true, Ordering::Relaxed);
         // C-4: detached join 采集线程，避免 OS 线程泄漏
         // （同步 join 会阻塞 Drop；这里用 std::thread 后台 join）
-        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let collector_task = self
+            .collector
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();
@@ -772,14 +783,22 @@ impl LiveKitAudioSession {
             .store(MediaState::Stopping.as_u8(), Ordering::Relaxed);
 
         // H21: detached std::thread join
-        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let collector_task = self
+            .collector
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();
             });
         }
         // H22: abort 而非 timeout
-        let pusher_task = self.pusher_task.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let pusher_task = self
+            .pusher_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some(h) = pusher_task {
             h.abort();
             let _ = h.await;
@@ -799,7 +818,11 @@ impl Drop for LiveKitAudioSession {
         self.stop_flag.store(true, Ordering::Relaxed);
         // C-4: detached join 采集线程，避免 OS 线程泄漏
         // （同步 join 会阻塞 Drop；这里用 std::thread 后台 join）
-        let collector_task = self.collector.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let collector_task = self
+            .collector
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some(h) = collector_task {
             std::thread::spawn(move || {
                 let _ = h.join();

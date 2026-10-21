@@ -59,20 +59,19 @@ pub fn App() -> Element {
     #[cfg(target_arch = "wasm32")]
     {
         use_effect(move || {
-            if let Some(w) = web_sys::window() {
-                if let Ok(inner) = w.inner_width() {
-                    if let Some(w) = inner.as_f64() {
-                        let new_mode = if w < 768.0 {
-                            LayoutMode::Mobile
-                        } else if w < 1200.0 {
-                            LayoutMode::Tablet
-                        } else {
-                            LayoutMode::Desktop
-                        };
-                        if new_mode != layout {
-                            ui.layout_mode.set(new_mode);
-                        }
-                    }
+            if let Some(w) = web_sys::window()
+                && let Ok(inner) = w.inner_width()
+                && let Some(w) = inner.as_f64()
+            {
+                let new_mode = if w < 768.0 {
+                    LayoutMode::Mobile
+                } else if w < 1200.0 {
+                    LayoutMode::Tablet
+                } else {
+                    LayoutMode::Desktop
+                };
+                if new_mode != layout {
+                    ui.layout_mode.set(new_mode);
                 }
             }
         });
