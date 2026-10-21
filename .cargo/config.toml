@@ -35,6 +35,9 @@ rustflags = [
 # 开发环境变量
 # ============================================================
 [env]
+# Rust 1.95+ metadata 分离，wasm 增量缓存损坏时报 "only metadata stub found"
+# 强制嵌入 rlib 回到旧行为
+CARGO_UNSTABLE_EMBED_METADATA = "true"
 # 未来可加：WASM_BINDGEN_DEBUG=1
 
 # NOTE: LK_CUSTOM_WEBRTC 是绝对路径。换机器 / 换用户名需修改此路径，
