@@ -1,5 +1,6 @@
 //! 客户端事件 → UI 状态的桥接。
 
+#![allow(clippy::collapsible_if)]
 use async_channel::{Receiver, Sender, unbounded};
 #[allow(unused_imports)]
 use dioxus::prelude::*;
@@ -139,11 +140,11 @@ pub fn apply_event(
             sent,
             total,
         } => {
-            let pct = if total == 0 {
-                0
-            } else {
-                ((sent.saturating_mul(100) / total).min(100)) as u32
-            };
+            let pct = sent
+                .saturating_mul(100)
+                .checked_div(total)
+                .map(|v| v.min(100) as u32)
+                .unwrap_or(0);
             ui.upload_progress.set(Some((name, pct)));
         }
 

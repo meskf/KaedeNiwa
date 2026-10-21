@@ -727,6 +727,7 @@ pub fn CreateChannelModal() -> Element {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn do_create(
     mut ui: UiState,
     mut app: AppState,

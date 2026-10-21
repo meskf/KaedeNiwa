@@ -1,5 +1,6 @@
 //! 从当前服务器成员中挑选（好友请求 / 新建 DM）。
 
+#![allow(clippy::collapsible_if)]
 use dioxus::prelude::*;
 use kaede_protocol::Member;
 

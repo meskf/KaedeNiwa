@@ -251,7 +251,6 @@ pub fn AttachmentView(att: Attachment, target_id: String) -> Element {
                     onclick: {
                         let att = att_for_render.clone();
                         let target_id = target_id.clone();
-                        let app = app;
                         move |_| {
                             download_and_save(app, target_id.clone(), att.clone());
                         }
@@ -272,7 +271,6 @@ pub fn AttachmentView(att: Attachment, target_id: String) -> Element {
             onclick: {
                 let att = att_for_render.clone();
                 let target_id = target_id.clone();
-                let app = app;
                 move |_| {
                     download_and_save(app, target_id.clone(), att.clone());
                 }
