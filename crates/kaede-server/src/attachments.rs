@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/attachments", post(upload))
         .route("/api/attachments/{id}", get(download))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES))
         .with_state(state)
 }
 

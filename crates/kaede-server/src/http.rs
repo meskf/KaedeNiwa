@@ -28,6 +28,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/keypackages/{login_id}", get(fetch_keypackage))
         .route("/api/messages", post(post_message))
         .route("/api/messages/{channel_id}", get(get_messages))
+        // B2: 消息密文上限 4 MiB（附件在 attachments router 里单独 32 MiB）
+        .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
         .with_state(state)
 }
 

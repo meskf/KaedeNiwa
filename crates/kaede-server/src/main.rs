@@ -61,6 +61,14 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!("listening on http://{}", listener.local_addr()?);
+    // B2: CORS 允许任意 origin（Bearer token，不走 cookie，无 CSRF 风险）；
+    // 生产若需收紧可改为 allow_origin([...]) 白名单。
+    let app = app.layer(
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(tower_http::cors::Any)
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any),
+    );
     axum::serve(listener, app).await?;
 
     Ok(())
