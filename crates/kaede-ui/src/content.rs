@@ -8,6 +8,10 @@ use dioxus::prelude::*;
 use crate::icons::{IconHash, IconVolume2};
 use crate::state::{AppState, ReplyTarget, UiMessage, UiState};
 
+/// 消息缓存硬上限：超过后一次性裁到 TRIM_TO 条（避免每条消息都裁）。
+const MAX_MESSAGES_HARD_CAP: usize = 1000;
+const MAX_MESSAGES_TRIM_TO: usize = 500;
+
 #[component]
 pub fn ContentArea() -> Element {
     rsx! {
@@ -639,11 +643,15 @@ fn send_attachments(
             reactions: Vec::new(),
             mentions: Vec::new(),
         };
-        app.messages
-            .write()
-            .entry(AppState::channel_key(&sid, &ch))
-            .or_default()
-            .push(msg);
+        {
+            let mut map = app.messages.write();
+            let list = map.entry(AppState::channel_key(&sid, &ch)).or_default();
+            list.push(msg);
+            if list.len() > MAX_MESSAGES_HARD_CAP {
+                let drop_n = list.len() - MAX_MESSAGES_TRIM_TO;
+                list.drain(0..drop_n);
+            }
+        }
     });
 }
 
@@ -692,7 +700,15 @@ fn send_message(mut ui: UiState, mut app: AppState, text: &str) {
         mentions: mentions.clone(),
     };
     let key = AppState::channel_key(&sid, &ch);
-    app.messages.write().entry(key).or_default().push(msg);
+    {
+        let mut map = app.messages.write();
+        let list = map.entry(key).or_default();
+        list.push(msg);
+        if list.len() > MAX_MESSAGES_HARD_CAP {
+            let drop_n = list.len() - MAX_MESSAGES_TRIM_TO;
+            list.drain(0..drop_n);
+        }
+    }
 
     ui.reply_target.set(None);
 
