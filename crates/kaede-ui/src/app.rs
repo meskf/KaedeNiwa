@@ -12,9 +12,10 @@ use crate::members::MemberContextMenu;
 use crate::observer::{UiObserver, apply_event};
 use crate::server_modal::ServerModal;
 use crate::settings_modal::SettingsModal;
+use crate::mobile_shell::MobileShell;
 use crate::shell::{MainBody, TitleBar};
 use crate::sidebar::{ChannelContextMenu, CreateChannelModal, JoinChannelModal};
-use crate::state::{AppState, UiState, View, VoiceControls, VoiceState};
+use crate::state::{AppState, UiState, View, VoiceControls, VoiceState, LayoutMode};
 use crate::video_picker::VideoProfilePicker;
 
 #[derive(Clone)]
@@ -22,7 +23,7 @@ pub struct ObserverRef(pub Arc<UiObserver>);
 
 #[component]
 pub fn App() -> Element {
-    let ui = use_context_provider(UiState::new);
+    let mut ui = use_context_provider(UiState::new);
     let app_state = use_context_provider(AppState::new);
     let voice_state = use_context_provider(VoiceState::new);
     let _voice_controls = use_context_provider(VoiceControls::new);
@@ -48,6 +49,30 @@ pub fn App() -> Element {
 
     let mode = *ui.theme_mode.read();
     let view = *ui.view.read();
+    let layout = *ui.layout_mode.read();
+
+    // wasm 下根据窗口宽度自动切换 LayoutMode（M1 简化：只在挂载时检测一次）
+    #[cfg(target_arch = "wasm32")]
+    {
+        use_effect(move || {
+            if let Some(w) = web_sys::window() {
+                if let Ok(inner) = w.inner_width() {
+                    if let Some(w) = inner.as_f64() {
+                        let new_mode = if w < 768.0 {
+                            LayoutMode::Mobile
+                        } else if w < 1200.0 {
+                            LayoutMode::Tablet
+                        } else {
+                            LayoutMode::Desktop
+                        };
+                        if new_mode != layout {
+                            ui.layout_mode.set(new_mode);
+                        }
+                    }
+                }
+            }
+        });
+    }
     let css_text = use_memo(css::global);
 
     rsx! {
@@ -67,7 +92,11 @@ pub fn App() -> Element {
                 LoginView {}
             }
             if view == View::Main {
-                MainBody {}
+                if layout == LayoutMode::Mobile {
+                    MobileShell {}
+                } else {
+                    MainBody {}
+                }
             }
             ServerModal {}
             CreateChannelModal {}

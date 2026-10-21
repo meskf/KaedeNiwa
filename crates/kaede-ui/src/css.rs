@@ -13,8 +13,21 @@ pub fn global() -> String {
     s.push_str(MODAL);
     s.push_str(TOPTAB_CSS);
     s.push_str(FIX_CSS);
+    s.push_str(MOBILE_CSS);
     s
 }
+
+const MOBILE_CSS: &str = r#"
+/* ===== 移动端（<768px） ===== */
+@media (max-width: 767px) {
+  /* 触控目标最小 44px */
+  button, a, [role="button"] { min-height: 44px; min-width: 44px; }
+  /* 安全区 */
+  body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  /* 禁用横向滚动 */
+  html, body { overflow-x: hidden; max-width: 100vw; }
+}
+"#;
 
 const FIX_CSS: &str = r#"
 /* 语音面板：启用态 hover 保持白底 */

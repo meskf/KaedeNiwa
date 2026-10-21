@@ -16,6 +16,8 @@ mod observer;
 mod server_modal;
 mod settings_modal;
 mod shell;
+mod mobile_shell;
+mod mobile_pages;
 mod sidebar;
 mod state;
 #[cfg(target_arch = "wasm32")]

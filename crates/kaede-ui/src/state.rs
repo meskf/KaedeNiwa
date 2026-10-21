@@ -161,6 +161,15 @@ pub enum View {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutMode {
+    #[default]
+    Desktop,
+    #[allow(dead_code)] // M3 平板双栏启用
+    Tablet,
+    Mobile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MainTab {
     #[default]
     Server,
@@ -186,6 +195,9 @@ pub struct UiState {
     /// 弹窗里选中的服务器 id；`None` = 通用账户面板。
     pub server_modal_selected: Signal<Option<String>>,
     pub main_tab: Signal<MainTab>,
+    pub layout_mode: Signal<LayoutMode>,
+    /// 移动端是否处于详情页（频道消息 / 私聊会话），None = 列表页。
+    pub mobile_detail: Signal<Option<String>>,
     pub members_open: Signal<bool>,
     pub create_channel_kind: Signal<Option<&'static str>>,
     pub join_channel_open: Signal<bool>,
@@ -229,6 +241,8 @@ impl UiState {
             server_modal_open: Signal::new(false),
             server_modal_selected: Signal::new(None),
             main_tab: Signal::new(MainTab::default()),
+            layout_mode: Signal::new(LayoutMode::default()),
+            mobile_detail: Signal::new(None),
             members_open: Signal::new(true),
             create_channel_kind: Signal::new(None),
             join_channel_open: Signal::new(false),
