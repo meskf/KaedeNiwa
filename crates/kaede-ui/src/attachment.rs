@@ -279,3 +279,37 @@ pub fn AttachmentView(att: Attachment, target_id: String) -> Element {
         }
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+/// 从原始字节上传附件（供 wasm 拖拽 / 粘贴桥接复用）。
+/// 与 upload_file 逻辑一致：上传原文件 → 可选生成缩略图 → 上传缩略图。
+pub async fn upload_file_from_bytes(
+    room: std::sync::Arc<kaede_client::RoomSession>,
+    target_id: &str,
+    name: &str,
+    mime: Option<&str>,
+    bytes: Vec<u8>,
+) -> Result<kaede_protocol::Attachment, kaede_client::ClientError> {
+    let is_image = mime.is_some_and(is_safe_image_mime) && bytes.len() > THUMB_TRIGGER_BYTES;
+    #[cfg(target_arch = "wasm32")]
+    let thumb_bytes = if is_image {
+        make_thumbnail(&bytes).await
+    } else {
+        None
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let thumb_bytes = if is_image { make_thumbnail(&bytes) } else { None };
+    let mut att = room.upload_attachment(target_id, name, mime, bytes).await?;
+    if let Some(thumb_bytes) = thumb_bytes {
+        let thumb_name = format!("{}_thumb.jpg", name);
+        match room
+            .upload_attachment(target_id, &thumb_name, Some("image/jpeg"), thumb_bytes)
+            .await
+        {
+            Ok(t) => att.thumbnail_url = Some(t.id),
+            Err(e) => tracing::warn!("thumbnail upload failed: {}", e),
+        }
+    }
+    Ok(att)
+}
+

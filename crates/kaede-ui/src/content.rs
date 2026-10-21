@@ -537,8 +537,15 @@ fn Composer() -> Element {
     let is_empty = draft.read().trim().is_empty();
     let reply = ui.reply_target.read().clone();
 
+    // D1: 拖拽 / 粘贴桥接（wasm-only，幂等）
+    #[cfg(target_arch = "wasm32")]
+    use_effect(move || {
+        crate::dom_bridge::bind_drop_and_paste(ui, app);
+    });
+
     rsx! {
         div {
+            id: "composer-wrap",
             class: "composer-wrap",
             if let Some(r) = reply {
                 div {
@@ -649,6 +656,83 @@ fn send_attachments(
         let ts = crate::observer::now_ms();
         if let Err(e) = room.send_text_with_attachments_at(&ch, "", &atts, ts).await {
             ui.toast.set(Some((format!("发送附件失败: {}", e), true)));
+            return;
+        }
+        let acc = ui.common_account.read();
+        let author = if acc.login_id.is_empty() {
+            "me".to_string()
+        } else {
+            acc.login_id.clone()
+        };
+        drop(acc);
+        let initial = author
+            .chars()
+            .next()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let msg = UiMessage {
+            id: format!("local-file-{}-{}", ts, atts.len()),
+            channel_id: ch.clone(),
+            author,
+            author_initial: initial,
+            day: crate::observer::day_label(ts),
+            time: crate::observer::format_hhmm(ts),
+            ts,
+            text: String::new(),
+            attachments: atts,
+            reply_to: None,
+            reactions: Vec::new(),
+            mentions: Vec::new(),
+        };
+        {
+            let mut map = app.messages.write();
+            let list = map.entry(AppState::channel_key(&sid, &ch)).or_default();
+            list.push(msg);
+            if list.len() > MAX_MESSAGES_HARD_CAP {
+                let drop_n = list.len() - MAX_MESSAGES_TRIM_TO;
+                list.drain(0..drop_n);
+            }
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+/// 从原始字节上传附件（供 dom_bridge 拖拽 / 粘贴复用）。
+pub(crate) fn send_attachments_bytes(
+    mut ui: UiState,
+    mut app: AppState,
+    ch: String,
+    sid: String,
+    files: Vec<crate::state::UploadFile>,
+) {
+    let room = app.room.read().clone();
+    spawn(async move {
+        let Some(room) = room else { return };
+        let mut atts = Vec::new();
+        for f in files {
+            match crate::attachment::upload_file_from_bytes(
+                room.clone(),
+                &ch,
+                &f.name,
+                Some(f.mime.as_str()),
+                f.data,
+            )
+            .await
+            {
+                Ok(a) => atts.push(a),
+                Err(e) => {
+                    ui.toast.set(Some((format!("上传失败: {}", e), true)));
+                }
+            }
+        }
+        ui.upload_progress.set(None);
+        if atts.is_empty() {
+            return;
+        }
+        let ts = crate::observer::now_ms();
+        if let Err(e) = room.send_text_with_attachments_at(&ch, "", &atts, ts).await {
+            ui.toast
+                .set(Some((format!("发送附件失败: {}", e), true)));
             return;
         }
         let acc = ui.common_account.read();

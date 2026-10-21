@@ -618,3 +618,12 @@ pub struct ReplyTarget {
     pub preview: String,
     pub ts: i64,
 }
+
+#[cfg(target_arch = "wasm32")]
+/// D1: 拖拽 / 粘贴桥接用的上传载荷（wasm-only）。
+#[derive(Clone, Debug)]
+pub struct UploadFile {
+    pub name: String,
+    pub mime: String,
+    pub data: Vec<u8>,
+}

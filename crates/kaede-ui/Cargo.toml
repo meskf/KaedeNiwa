@@ -28,6 +28,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 web-sys = { version = "0.3", features = [
     "Window", "Storage", "Document",
     "Blob", "ImageBitmap", "HtmlCanvasElement", "CanvasRenderingContext2d",
+    # D1: 拖拽 / 粘贴桥接
+    "Element", "HtmlElement", "Event", "EventTarget",
+    "DragEvent", "DataTransfer", "File", "FileList", "DomTokenList",
+    "ClipboardEvent",
 ] }
 kaede-livekit-web = { workspace = true }
 wasm-bindgen = { workspace = true }

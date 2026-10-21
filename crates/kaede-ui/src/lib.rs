@@ -30,3 +30,6 @@ mod voice_web;
 pub use app::App;
 pub use state::View;
 pub use theme::Mode;
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod dom_bridge;

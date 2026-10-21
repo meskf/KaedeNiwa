@@ -683,4 +683,13 @@ const MODAL: &str = r#"
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+
+/* D1: 拖拽高亮 */
+.composer-wrap.drag-over {
+    outline: 2px dashed #5865f2;
+    outline-offset: -4px;
+    background: rgba(88, 101, 242, 0.08);
+    border-radius: 8px;
+}
 "#;
