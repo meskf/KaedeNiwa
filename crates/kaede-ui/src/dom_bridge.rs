@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
-use web_sys::{DragEvent, Event, File};
+use web_sys::{ClipboardEvent, DragEvent, Event, File};
 
 /// 把拖拽 / 粘贴事件绑定到 `#composer-wrap`。
 /// 幂等：重复调用不会重复绑定（用 DOM 元素属性标记）。
@@ -129,4 +129,72 @@ async fn file_to_upload(file: File) -> Option<UploadFile> {
     let mut data = vec![0u8; uint8.length() as usize];
     uint8.copy_to(&mut data);
     Some(UploadFile { name, mime, data })
+}
+
+/// 把 paste 事件绑定到 `#composer-input`（textarea）。
+///
+/// 只处理剪贴板里的"文件"项（截图 / 复制的文件）；纯文本粘贴放行给浏览器原生处理。
+/// 幂等：重复调用不会重复绑定（DOM 元素属性标记）。
+pub fn bind_paste(ui: UiState, app: AppState) {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Some(input) = doc.get_element_by_id("composer-input") else {
+        return;
+    };
+
+    let already = js_sys::Reflect::get(&input, &JsValue::from_str("__kaedePasteBound"))
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if already {
+        return;
+    }
+    let _ = js_sys::Reflect::set(&input, &JsValue::from_str("__kaedePasteBound"), &JsValue::TRUE);
+
+    let closure = Closure::<dyn FnMut(ClipboardEvent)>::new(move |e: ClipboardEvent| {
+        let Some(dt) = e.clipboard_data() else {
+            return;
+        };
+        let items = dt.items();
+        let mut file_list = Vec::new();
+        for i in 0..items.length() {
+            let Some(item) = items.get(i) else { continue };
+            if item.kind() != "file" {
+                continue;
+            }
+            if let Ok(Some(f)) = item.get_as_file() {
+                file_list.push(f);
+            }
+        }
+        if file_list.is_empty() {
+            // 纯文本粘贴：放行给浏览器原生
+            return;
+        }
+        e.prevent_default();
+
+        dioxus::prelude::spawn(async move {
+            let Some(ch) = ui.selected_channel.read().clone() else {
+                return;
+            };
+            let Some(sid) = app.current_server.read().clone() else {
+                return;
+            };
+            let mut uploads = Vec::new();
+            for f in file_list {
+                if let Some(u) = file_to_upload(f).await {
+                    uploads.push(u);
+                }
+            }
+            if !uploads.is_empty() {
+                crate::content::send_attachments_bytes(ui, app, ch, sid, uploads);
+            }
+        });
+    });
+
+    let _ = input.add_event_listener_with_callback(
+        "paste",
+        closure.as_ref().unchecked_ref(),
+    );
+    closure.forget();
 }

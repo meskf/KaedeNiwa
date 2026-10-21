@@ -543,6 +543,7 @@ fn Composer() -> Element {
     #[cfg(target_arch = "wasm32")]
     use_effect(move || {
         crate::dom_bridge::bind_drop_and_paste(ui, app);
+        crate::dom_bridge::bind_paste(ui, app);
     });
 
     rsx! {
@@ -565,6 +566,7 @@ fn Composer() -> Element {
             div {
                 class: "composer",
                 textarea {
+                    id: "composer-input",
                     class: "composer-input",
                     placeholder: "{i18n.t(\"channel.inputPlaceholder\")}",
                     value: "{draft}",
