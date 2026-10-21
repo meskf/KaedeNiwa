@@ -144,6 +144,15 @@ pub enum ClientEvent {
     /// 语音通话中的客户端应重新建立媒体会话，让 LiveKit E2EE key
     /// 跟随新 epoch 轮换（否则通话中有人加入/离开后互相解不开）。
     MlsEpochChanged { server_id: String, epoch: u64 },
+    /// 私密频道 MLS group epoch 变化（成员加/减）。
+    ///
+    /// 与 `MlsEpochChanged`（主群）平行。收到此事件时若正在该频道语音，
+    /// 应触发媒体会话重连——旧 epoch 派生的 key 已失效。
+    ChannelEpochChanged {
+        server_id: String,
+        channel_id: String,
+        epoch: u64,
+    },
 
     /// 服务器报告错误。
     ServerError {

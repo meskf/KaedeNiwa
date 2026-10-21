@@ -482,6 +482,14 @@ impl ServerConnection {
             .remove(&canonical_conv_id(conv_id));
     }
 
+    /// 私密频道 group 的当前 epoch；无 group 时返回 None。
+    ///
+    /// 用途：`ChannelSync 0x05` 处理完 commit 后 emit `ChannelEpochChanged` 用。
+    pub fn channel_epoch(&self, channel_id: &str) -> Option<u64> {
+        let map = self.channel_groups.lock().unwrap();
+        map.get(channel_id).map(|s| s.epoch())
+    }
+
     /// 频道是否有独立 MLS group（私密频道）。
     pub fn channel_has_group(&self, channel_id: &str) -> bool {
         self.channel_groups.lock().unwrap().contains_key(channel_id)
@@ -1768,11 +1776,22 @@ impl ServerConnection {
                     0x05 => {
                         let commit = &payload[1..];
                         match self.channel_process_commit(&channel_id, commit) {
-                            Ok(_) => tracing::info!(
-                                "[client:{}] processed channel commit for {}",
-                                self.server_id,
-                                channel_id
-                            ),
+                            Ok(_) => {
+                                tracing::info!(
+                                    "[client:{}] processed channel commit for {}",
+                                    self.server_id,
+                                    channel_id
+                                );
+                                // 块 B：私密频道 epoch 变化 → 若正在该频道语音，
+                                // observer 会触发媒体会话重连。
+                                if let Some(epoch) = self.channel_epoch(&channel_id) {
+                                    self.emit(ClientEvent::ChannelEpochChanged {
+                                        server_id: self.server_id.clone(),
+                                        channel_id: channel_id.clone(),
+                                        epoch,
+                                    });
+                                }
+                            }
                             Err(e) => tracing::warn!(
                                 "[client:{}] process_commit failed for {}: {}",
                                 self.server_id,

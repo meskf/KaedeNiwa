@@ -318,6 +318,23 @@ pub fn apply_event(
             }
         }
 
+        ClientEvent::ChannelEpochChanged { channel_id, epoch, .. } => {
+            // 块 B：私密频道 epoch 变化。只有正在该频道语音时才重连。
+            let active = voice.active_channel.read().as_ref().map(|c| c.id.clone());
+            if active.as_deref() == Some(channel_id.as_str()) {
+                tracing::info!(
+                    "[voice] private channel {} epoch changed to {}; reconnect",
+                    channel_id,
+                    epoch
+                );
+                voice.reconnect_request.set(Some(channel_id));
+                ui.toast.set(Some((
+                    "私密频道密钥已轮换，正在自动重连…".to_string(),
+                    false,
+                )));
+            }
+        }
+
         ClientEvent::Joined { peers, .. } => {
             // 房主在**自己登录时**也要补加已经在房间里的成员。
             // 服务端 Join 只回 peers 列表，不会为这些老成员重发 PeerJoined；
