@@ -225,7 +225,11 @@ async fn mls_self_update_advances_epoch() {
 
     let epoch0 = alice.epoch();
     let commit = alice.connection().mls_self_update().unwrap();
-    alice.connection().send_commit(commit).await.unwrap();
+    alice
+        .connection()
+        .send_commit(alice.epoch(), commit)
+        .await
+        .unwrap();
     let epoch1 = alice.epoch();
 
     assert!(
@@ -242,7 +246,8 @@ async fn mls_self_update_advances_epoch() {
 // 无法在 CI 跑。本测试覆盖不依赖 LiveKit 的核心假设：
 //   1. mls_self_update 前进 epoch
 //   2. 相同 seed + 不同 epoch => 不同 key
-// 只要这两条成立，P0-Z（每次媒体会话 key 轮换 -> 无 AES-GCM nonce 复用）就成立。
+// 注意：`begin_media_session` 现在不再每次进频道都 self_update（否则多人 key
+// 不一致）；跨会话 key 轮换由 server seed 生命周期保证。
 #[tokio::test]
 async fn begin_media_session_key_rotates_per_epoch() {
     let (alice, _bob, _, _) = setup_two_users().await;
@@ -258,9 +263,13 @@ async fn begin_media_session_key_rotates_per_epoch() {
         .mls_export_sframe_key_for_with_extra("voice", kaede_mls::SframePurpose::LivekitE2ee, &seed)
         .unwrap();
 
-    // 模拟 begin_media_session 内部：强制 epoch 前进 + 广播
+    // 手动推进 epoch，验证同 seed / 不同 epoch 会派生出不同 key
     let commit = alice.connection().mls_self_update().unwrap();
-    alice.connection().send_commit(commit).await.unwrap();
+    alice
+        .connection()
+        .send_commit(alice.epoch(), commit)
+        .await
+        .unwrap();
 
     // Session 2：epoch1 下派生 key（同 seed）
     let epoch2 = alice.epoch();

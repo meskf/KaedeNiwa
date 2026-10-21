@@ -14,11 +14,11 @@ async fn start_server() -> String {
     // 每个测试独立的临时文件 SQLite。
     // 注意：sqlx 的 `sqlite::memory:` 是 per-connection 独立内存库，
     // 用 pool 时不同连接看到不同 DB，必须用文件或 shared cache。
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let db_path = std::env::temp_dir().join(format!("kaede_test_{}.db", unique));
+    // 用进程内原子计数，避免并行测试拿到相同 nanos 导致 DB 锁冲突。
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let db_path =
+        std::env::temp_dir().join(format!("kaede_test_{}_{}.db", std::process::id(), unique));
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
 
     let cfg = Config {
@@ -69,6 +69,24 @@ async fn recv(ws: &mut Ws) -> ServerMessage {
         other => panic!("expected binary, got {:?}", other),
     };
     ServerMessage::decode(&bytes).expect("decode")
+}
+
+/// 等待指定 nonce 的 Pong，跳过 NotJoined 等非致命错误。
+async fn recv_pong(ws: &mut Ws, nonce: u64) {
+    for _ in 0..10 {
+        match recv(ws).await {
+            ServerMessage::Pong { nonce: n } => {
+                assert_eq!(n, nonce);
+                return;
+            }
+            ServerMessage::Error {
+                code: ErrorCode::NotJoined,
+                ..
+            } => continue,
+            other => panic!("expected Pong({}), got {:?}", nonce, other),
+        }
+    }
+    panic!("recv_pong: no Pong({}) in 10 tries", nonce);
 }
 
 /// 一直收消息，直到匹配 `pred`（最多尝试 20 次）。
@@ -140,12 +158,17 @@ async fn join_requires_session_token() {
     let url = start_server().await;
     let mut ws = connect_and_hello(&url).await;
 
-    // 没 token 直接 join
+    // 没 token 直接 join：必须收到明确的 NotJoined 错误，而不是静默。
     send(&mut ws, ClientMessage::Join).await;
+    match recv(&mut ws).await {
+        ServerMessage::Error {
+            code: ErrorCode::NotJoined,
+            ..
+        } => {}
+        other => panic!("expected NotJoined, got {:?}", other),
+    }
 
-    // 服务器会以 PeerJoined 之前的状态拒绝 —— 我们的实现里
-    // 由于 my_uid 为 None，会走 Err 分支（暂不主动回错）
-    // 至少确认连接不崩，客户端发 Ping 还能收到 Pong。
+    // 连接必须保持可用（不是 fatal error）。
     send(&mut ws, ClientMessage::Ping { nonce: 42 }).await;
     match recv(&mut ws).await {
         ServerMessage::Pong { nonce } => assert_eq!(nonce, 42),
@@ -489,10 +512,7 @@ async fn p0d_sdp_offer_without_join_dropped() {
 
     // 屏障：Ping → Pong，确认 server 已处理完前面的 SdpOffer
     send(&mut a_ws, ClientMessage::Ping { nonce: 111 }).await;
-    match recv(&mut a_ws).await {
-        ServerMessage::Pong { nonce: 111 } => {}
-        other => panic!("expected Pong(111), got {:?}", other),
-    }
+    recv_pong(&mut a_ws, 111).await;
 
     // victim 队列应仍为空（150ms 内无任何消息）
     assert!(
@@ -557,10 +577,7 @@ async fn p0d_mls_app_message_without_join_dropped() {
     .await;
 
     send(&mut a_ws, ClientMessage::Ping { nonce: 222 }).await;
-    match recv(&mut a_ws).await {
-        ServerMessage::Pong { nonce: 222 } => {}
-        other => panic!("expected Pong(222), got {:?}", other),
-    }
+    recv_pong(&mut a_ws, 222).await;
 
     assert!(
         try_recv(&mut v_ws, Duration::from_millis(150))
@@ -617,16 +634,14 @@ async fn p0d_mls_commit_without_join_dropped() {
     send(
         &mut a_ws,
         ClientMessage::MlsCommit {
+            epoch: 1,
             payload: b"should-be-dropped".to_vec(),
         },
     )
     .await;
 
     send(&mut a_ws, ClientMessage::Ping { nonce: 333 }).await;
-    match recv(&mut a_ws).await {
-        ServerMessage::Pong { nonce: 333 } => {}
-        other => panic!("expected Pong(333), got {:?}", other),
-    }
+    recv_pong(&mut a_ws, 333).await;
 
     assert!(
         try_recv(&mut v_ws, Duration::from_millis(150))
@@ -654,13 +669,14 @@ async fn p0d_mls_commit_without_join_dropped() {
     send(
         &mut a_ws,
         ClientMessage::MlsCommit {
+            epoch: 1,
             payload: b"after-join".to_vec(),
         },
     )
     .await;
 
     match recv_until(&mut v_ws, |m| matches!(m, ServerMessage::MlsCommit { .. })).await {
-        ServerMessage::MlsCommit { from, payload } => {
+        ServerMessage::MlsCommit { from, payload, .. } => {
             assert_eq!(from, UserId::new("p0d-attacker"));
             assert_eq!(payload, b"after-join");
         }

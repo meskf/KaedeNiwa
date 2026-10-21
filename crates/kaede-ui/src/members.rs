@@ -87,6 +87,8 @@ fn MemberRow(member: kaede_protocol::Member, #[props(default)] offline: bool) ->
             title: "{member.login_id}",
             oncontextmenu: move |e| {
                 e.prevent_default();
+                // M54: 切到新成员时重置编辑状态，防上一名成员的 title 串台
+                ui.member_editing_title.set(None);
                 ui.member_menu.set(Some(mid_ctx.clone()));
             },
             div {

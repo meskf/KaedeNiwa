@@ -93,12 +93,18 @@ pub struct AesGcmCipher {
 
 impl AesGcmCipher {
     pub fn from_bytes(key: [u8; 32]) -> Self {
-        // Z8: 入参 [u8; 32] 在栈上，构造后原参数不清零会残留。
-        // 内部拷贝一份到 self.key（Self 已 derive ZeroizeOnDrop），原 key 清零。
+        // MM1: [u8; 32] 是 Copy —— 参数 key 本身在栈上有一份，
+        // 内部拷贝后清零**参数副本**。调用方应改用 from_zeroizing。
         let mut k = key;
         let result = Self { key: k };
         zeroize::Zeroize::zeroize(&mut k);
         result
+    }
+
+    /// MM1: 推荐入口 —— 调用方用 Zeroizing 包装原始 key buffer，
+    /// 出作用域时自动清零。
+    pub fn from_zeroizing(key: zeroize::Zeroizing<[u8; 32]>) -> Self {
+        Self { key: *key }
     }
 }
 

@@ -19,17 +19,61 @@ pub mod state;
 pub mod ws;
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use axum::Router;
+use axum::extract::DefaultBodyLimit;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::http::{HeaderValue, Method};
+use tower_http::cors::CorsLayer;
+
+static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 给最终 Router 加上全局中间件：CORS + 请求体上限。
+///
+/// - Body limit 必须 > `attachments::MAX_ATTACHMENT_BYTES`（32 MiB）。
+///   axum 默认只有 2 MiB，会让 32 MiB 的常量失效。
+/// - CORS 默认只允许常见本地开发端口；生产用 `KAEDE_CORS_ORIGINS`
+///   逗号分隔配置，`*` 表示允许任意来源。
+pub fn with_middleware(app: Router) -> Router {
+    let raw = std::env::var("KAEDE_CORS_ORIGINS").unwrap_or_else(|_| {
+        "http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081,http://127.0.0.1:8081"
+            .to_string()
+    });
+    let cors = if raw.trim() == "*" {
+        CorsLayer::new()
+            .allow_origin(tower_http::cors::Any)
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any)
+    } else {
+        let origins: Vec<HeaderValue> = raw
+            .split(',')
+            .filter_map(|s| s.trim().parse::<HeaderValue>().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PATCH,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
+            .allow_headers([AUTHORIZATION, CONTENT_TYPE])
+    };
+
+    app.layer(DefaultBodyLimit::max(34 * 1024 * 1024))
+        .layer(cors)
+}
 
 /// 起一个 in-process 测试服务器。返回监听的地址。
 ///
 /// 用临时文件 SQLite（`sqlite::memory:` 在 sqlx pool 里 per-connection
 /// 独立，会跟连接池语义冲突）。
 pub async fn spawn_test_server() -> std::io::Result<SocketAddr> {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let db_path = std::env::temp_dir().join(format!("kaede_test_{}.db", unique));
+    let pid = std::process::id();
+    let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+    let db_path = std::env::temp_dir().join(format!("kaede_test_{}_{}.db", pid, id));
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
 
     let cfg = config::Config {
@@ -43,14 +87,16 @@ pub async fn spawn_test_server() -> std::io::Result<SocketAddr> {
     let pool = db::init(&cfg.database_url).await.expect("db init");
     ensure_default_channels(&pool).await;
     let state = state::AppState::new(pool, cfg);
-    let app = http::router(state.clone())
-        .merge(attachments::router(state.clone()))
-        .merge(friends::router(state.clone()))
-        .merge(dm::router(state.clone()))
-        .merge(livekit::router(state.clone()))
-        .merge(channels::router(state.clone()))
-        .merge(members::router(state.clone()))
-        .merge(ws::router(state));
+    let app = with_middleware(
+        http::router(state.clone())
+            .merge(attachments::router(state.clone()))
+            .merge(friends::router(state.clone()))
+            .merge(dm::router(state.clone()))
+            .merge(livekit::router(state.clone()))
+            .merge(channels::router(state.clone()))
+            .merge(members::router(state.clone()))
+            .merge(ws::router(state)),
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
@@ -61,7 +107,10 @@ pub async fn spawn_test_server() -> std::io::Result<SocketAddr> {
 }
 
 /// 首次启动建默认频道（general + voice）。
-async fn ensure_default_channels(pool: &sqlx::SqlitePool) {
+///
+/// 幂等：已有任何频道时直接返回。生产入口（`main.rs`）也必须调用，
+/// 否则全新部署没有任何频道可用。
+pub async fn ensure_default_channels(pool: &sqlx::SqlitePool) {
     let (count,): (i64,) = match sqlx::query_as("SELECT COUNT(*) FROM channels")
         .fetch_one(pool)
         .await
@@ -94,4 +143,39 @@ async fn ensure_default_channels(pool: &sqlx::SqlitePool) {
     .bind(now)
     .execute(pool)
     .await;
+}
+
+#[cfg(test)]
+mod default_channel_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn empty_database_gets_default_channels_idempotently() {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("kaede_default_{}_{}.db", std::process::id(), id));
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let pool = db::init(&url).await.unwrap();
+
+        ensure_default_channels(&pool).await;
+        ensure_default_channels(&pool).await;
+
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, kind FROM channels ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 2, "default channels must be created once");
+        assert!(
+            rows.iter()
+                .any(|(id, kind)| id == "general" && kind == "text")
+        );
+        assert!(
+            rows.iter()
+                .any(|(id, kind)| id == "voice" && kind == "voice")
+        );
+
+        pool.close().await;
+        let _ = std::fs::remove_file(path);
+    }
 }

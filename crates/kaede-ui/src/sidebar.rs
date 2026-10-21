@@ -291,7 +291,25 @@ fn ChannelRow(channel: kaede_protocol::Channel, display: String) -> Element {
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
-                        let _ = (app, ch_id_v);
+                        let room_opt = app.room.read().clone();
+                        let mut voice_h = voice;
+                        let controls_h = controls;
+                        let mut ui_h = ui;
+                        let ch_id_wasm = ch_id_v;
+                        spawn(async move {
+                            let Some(room) = room_opt else {
+                                ui_h.toast.set(Some(("未连接".into(), true)));
+                                voice_h.active_channel.set(None);
+                                return;
+                            };
+                            if let Err(e) =
+                                crate::voice_web::connect_voice(voice_h, controls_h, room, ch_id_wasm).await
+                            {
+                                tracing::warn!("[voice-web] connect: {}", e);
+                                ui_h.toast.set(Some((format!("语音连接失败: {}", e), true)));
+                                voice_h.active_channel.set(None);
+                            }
+                        });
                     }
                 } else {
                     // A1: 私密频道总是弹密码框（不管是否已有 group）
@@ -347,7 +365,7 @@ pub fn ChannelContextMenu() -> Element {
         return rsx! {};
     };
 
-    let (ch_name, sid) = {
+    let (ch_name, sid, ch_private) = {
         let Some(sid) = app.current_server.read().clone() else {
             return rsx! {};
         };
@@ -356,7 +374,7 @@ pub fn ChannelContextMenu() -> Element {
             .get(&sid)
             .and_then(|l| l.iter().find(|c| c.id == ch_id).cloned())
         {
-            Some(c) => (c.name, sid),
+            Some(c) => (c.name, sid, c.is_private),
             None => return rsx! {},
         }
     };
@@ -366,6 +384,8 @@ pub fn ChannelContextMenu() -> Element {
     let rename_input_str = rename_input.clone().unwrap_or_default();
     let ch_name_for_btn = ch_name.clone();
     let ch_id_for_copy = ch_id.clone();
+    let ch_id_for_leave = ch_id.clone();
+    let sid_for_leave = sid.clone();
 
     rsx! {
         div {
@@ -391,8 +411,9 @@ pub fn ChannelContextMenu() -> Element {
                         onclick: {
                             let id = ch_id_for_copy.clone();
                             move |_| {
+                                // C17: 用 {:?}（Debug 格式）保证 id 在 JS 字符串里被正确转义
                                 let script = format!(
-                                    "navigator.clipboard.writeText(\"{}\").catch(()=>{{}})",
+                                    "navigator.clipboard.writeText({:?}).catch(()=>{{}})",
                                     id
                                 );
                                 let _ = dioxus::document::eval(&script);
@@ -468,6 +489,41 @@ pub fn ChannelContextMenu() -> Element {
                             ui.channel_rename_input.set(Some(ch_name_for_btn.clone()));
                         },
                         "重命名频道"
+                    }
+                    if ch_private {
+                        button {
+                            style: "width: 100%; text-align: left; padding: 8px 12px; border-radius: 6px; color: var(--negative); font-size: 14px;",
+                            onclick: move |_| {
+                                let Some(room) = app.room.read().clone() else { return; };
+                                let ch_leave = ch_id_for_leave.clone();
+                                let sid_clone = sid_for_leave.clone();
+                                ui.channel_menu.set(None);
+                                ui.channel_rename_input.set(None);
+                                spawn(async move {
+                                    match room.leave_channel(&ch_leave).await {
+                                        Ok(()) => {
+                                            if let Some(list) = app.channels.write().get_mut(&sid_clone) {
+                                                list.retain(|c| c.id != ch_leave);
+                                            }
+                                            if ui.selected_channel.read().as_deref()
+                                                == Some(ch_leave.as_str())
+                                            {
+                                                ui.selected_channel.set(None);
+                                            }
+                                            ui.toast
+                                                .set(Some(("已退出私密频道".into(), false)));
+                                        }
+                                        Err(e) => {
+                                            ui.toast.set(Some((
+                                                format!("退出频道失败: {}", e),
+                                                true,
+                                            )));
+                                        }
+                                    }
+                                });
+                            },
+                            "退出私密频道"
+                        }
                     }
                     button {
                         style: "width: 100%; text-align: left; padding: 8px 12px; border-radius: 6px; color: var(--negative); font-size: 14px;",
@@ -715,7 +771,7 @@ fn do_create(
 pub fn JoinChannelModal() -> Element {
     let mut ui = use_context::<UiState>();
     let mut app = use_context::<AppState>();
-    let mut voice = use_context::<VoiceState>();
+    let voice = use_context::<VoiceState>();
     let controls = use_context::<VoiceControls>();
     let mut channel_id = use_signal(String::new);
     let mut password = use_signal(String::new);
@@ -777,7 +833,7 @@ pub fn JoinChannelModal() -> Element {
                     if *ui.join_channel_then_voice.read() {
                         ui.join_channel_then_voice.set(false);
                         let ch_id_v = id.clone();
-                        let ch_name_v = app
+                        let _ch_name_v = app
                             .channels
                             .read()
                             .get(&sid)
@@ -807,7 +863,25 @@ pub fn JoinChannelModal() -> Element {
                         }
                         #[cfg(target_arch = "wasm32")]
                         {
-                            let _ = ch_id_v;
+                            let room_opt = app.room.read().clone();
+                            let mut voice_h = voice;
+                            let controls_h = controls;
+                            let mut ui_h = ui;
+                            let ch_id_wasm = ch_id_v;
+                            spawn(async move {
+                                let Some(room) = room_opt else {
+                                    ui_h.toast.set(Some(("未连接".into(), true)));
+                                    voice_h.active_channel.set(None);
+                                    return;
+                                };
+                                if let Err(e) =
+                                    crate::voice_web::connect_voice(voice_h, controls_h, room, ch_id_wasm).await
+                                {
+                                    tracing::warn!("[voice-web] connect: {}", e);
+                                    ui_h.toast.set(Some((format!("语音连接失败: {}", e), true)));
+                                    voice_h.active_channel.set(None);
+                                }
+                            });
                         }
                     }
                 }
@@ -903,6 +977,8 @@ pub fn JoinChannelModal() -> Element {
 fn VoicePanel() -> Element {
     let i18n = use_i18n();
     let mut ui = use_context::<UiState>();
+    let app = use_context::<AppState>();
+    // app 在 native / wasm 两个分支都被使用（native: NativeHandle；wasm: app.room）
     let mut voice = use_context::<VoiceState>();
     let mut controls = use_context::<VoiceControls>();
 
@@ -916,6 +992,50 @@ fn VoicePanel() -> Element {
     let scr = *controls.screen_on.read();
     let profile_label = voice.current_profile.read().label();
 
+    // 主群 epoch 变化 → 媒体 E2EE key 已变，自动重建媒体会话。
+    use_effect(move || {
+        let req = voice.reconnect_request.read().clone();
+        let Some(ch) = req else {
+            return;
+        };
+        voice.reconnect_request.set(None);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let h = voice.handle.write().take();
+            let consumers = std::mem::take(&mut *voice.media_consumers.write());
+            let mut ui2 = ui;
+            spawn(async move {
+                for (_, c) in consumers {
+                    c.stop().await;
+                }
+                if let Some(h) = h {
+                    h.inner().disconnect().await;
+                }
+                if let Err(e) = connect_voice(app, voice, controls, ch).await {
+                    ui2.toast.set(Some((format!("语音重连失败: {}", e), true)));
+                }
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let room_opt = app.room.read().clone();
+            let voice_h = voice;
+            let controls_h = controls;
+            let mut ui_h = ui;
+            let ch_id_wasm = ch;
+            spawn(async move {
+                crate::voice_web::leave_voice().await;
+                let Some(room) = room_opt else { return; };
+                if let Err(e) =
+                    crate::voice_web::connect_voice(voice_h, controls_h, room, ch_id_wasm).await
+                {
+                    tracing::warn!("[voice-web] reconnect: {}", e);
+                    ui_h.toast.set(Some((format!("语音重连失败: {}", e), true)));
+                }
+            });
+        }
+    });
+
     rsx! {
         div {
             class: "voice-panel",
@@ -924,6 +1044,10 @@ fn VoicePanel() -> Element {
                 span { class: "voice-panel-icon", IconVolume2 { size: 13 } }
                 span { class: "voice-panel-name", "{ch.name}" }
                 span { class: "voice-panel-count", "{ch.members.len()}" }
+            }
+            div {
+                id: "kaede-remote-videos",
+                style: "display: flex; flex-direction: column; gap: 4px; padding: 6px; max-height: 240px; overflow-y: auto; background: rgba(0,0,0,0.15); border-radius: 4px; empty-cells: hide;",
             }
             if let Some(stats) = voice.screen_stats.read().as_ref() {
                 {
@@ -981,6 +1105,7 @@ fn VoicePanel() -> Element {
                                         .publish(kaede_media_session::PublishSource::Mic {
                                             sample_rate: 48_000,
                                             channels: 2,
+                                            denoise: true,
                                         })
                                         .await;
                                     if let Err(e) = result {
@@ -1003,8 +1128,17 @@ fn VoicePanel() -> Element {
                         }
                         #[cfg(target_arch = "wasm32")]
                         {
-                            let v = *controls.mic_on.read();
-                            controls.mic_on.set(!v);
+                            let new_val = !*controls.mic_on.read();
+                            let mut controls_h = controls;
+                            let mut ui_h = ui;
+                            spawn(async move {
+                                if let Err(e) = crate::voice_web::set_microphone(new_val).await {
+                                    tracing::warn!("[voice-web] mic: {}", e);
+                                    ui_h.toast.set(Some((format!("麦克风: {}", e), true)));
+                                    return;
+                                }
+                                controls_h.mic_on.set(new_val);
+                            });
                         }
                     },
                     IconMic { size: 15 }
@@ -1076,8 +1210,17 @@ fn VoicePanel() -> Element {
                         }
                         #[cfg(target_arch = "wasm32")]
                         {
-                            let v = *controls.screen_on.read();
-                            controls.screen_on.set(!v);
+                            let new_val = !*controls.screen_on.read();
+                            let mut controls_h = controls;
+                            let mut ui_h = ui;
+                            spawn(async move {
+                                if let Err(e) = crate::voice_web::set_screen_share(new_val).await {
+                                    tracing::warn!("[voice-web] screen: {}", e);
+                                    ui_h.toast.set(Some((format!("屏幕共享: {}", e), true)));
+                                    return;
+                                }
+                                controls_h.screen_on.set(new_val);
+                            });
                         }
                     },
                     IconMonitor { size: 15 }
@@ -1093,14 +1236,40 @@ fn VoicePanel() -> Element {
                     class: "vp-btn vp-leave",
                     title: "{i18n.t(\"voice.leave\")}",
                     onclick: move |_| {
+                        let leaving = voice
+                            .active_channel
+                            .read()
+                            .as_ref()
+                            .map(|c| c.id.clone());
                         #[cfg(not(target_arch = "wasm32"))]
                         {
-                            if let Some(h) = voice.handle.read().clone() {
-                                spawn(async move {
+                            // H25: 先清空本地状态，再执行异步断开，避免 UI 残留
+                            let h = voice.handle.write().take();
+                            let consumers = std::mem::take(&mut *voice.media_consumers.write());
+                            let room = app.room.read().clone();
+                            spawn(async move {
+                                for (_, c) in consumers {
+                                    c.stop().await;
+                                }
+                                if let Some(h) = h {
                                     h.inner().disconnect().await;
-                                });
-                            }
-                            voice.handle.set(None);
+                                }
+                                // 通知服务器结束媒体会话（seed 生命周期）。
+                                if let (Some(room), Some(ch)) = (room, leaving) {
+                                    let _ = room.leave_media_room(&ch).await;
+                                }
+                            });
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            let room_opt = app.room.read().clone();
+                            let leave_ch = leaving.clone();
+                            spawn(async move {
+                                crate::voice_web::leave_voice().await;
+                                if let (Some(room), Some(ch)) = (room_opt, leave_ch) {
+                                    let _ = room.leave_media_room(&ch).await;
+                                }
+                            });
                         }
                         voice.active_channel.set(None);
                     },
@@ -1171,6 +1340,15 @@ async fn connect_voice(
         .clone()
         .ok_or_else(|| "not connected".to_string())?;
 
+    // 重连/重建媒体会话时，清掉上一轮残留的远端成员（只保留自己）。
+    {
+        let current = voice.active_channel.read().clone();
+        if let Some(mut ch) = current {
+            ch.members.retain(|m| m.uid == "me");
+            voice.active_channel.set(Some(ch));
+        }
+    }
+
     // P0-2: begin_media_session 现在返回 (token, e2ee_key)。
     // - token 自带 room-level e2ee_seed
     // - e2ee_key = MLS exporter(channel_id, "livekit-e2ee", seed)
@@ -1183,7 +1361,8 @@ async fn connect_voice(
     let cfg = ConnectConfig {
         ws_url: token.ws_url,
         token: token.token,
-        e2ee_key: key,
+        // H19: Zeroizing 包装，出作用域时清零原始 key 数组
+        e2ee_key: key, // Option<Zeroizing>,
         room_name: token.room,
     };
 
@@ -1214,18 +1393,71 @@ async fn connect_voice(
                 }) => match AudioPlayer::new(48_000, 2) {
                     Ok(player) => {
                         let player = Arc::new(player);
-                        match handle_for_loop.inner().attach_audio(track, player) {
-                            Ok(_h) => {
-                                tracing::info!("[voice] audio attached (consumer handle leaked)")
+                        match handle_for_loop.inner().attach_audio(track.clone(), player) {
+                            Ok(h) => {
+                                tracing::info!("[voice] audio attached");
+                                // C16: 将 handle 存入全局状态，防止泄漏，并支持主动清理
+                                voice.media_consumers.write().push((track, h));
                             }
                             Err(e) => tracing::warn!("[voice] attach_audio: {}", e),
                         }
                     }
                     Err(e) => tracing::warn!("[voice] AudioPlayer::new: {}", e),
                 },
+                Ok(MediaEvent::TrackGone {
+                    track,
+                    kind: RemoteKind::Audio,
+                }) => {
+                    // C16: 对方关闭音频流，主动清理对应的 consumer handle
+                    let mut to_stop = None;
+                    {
+                        let mut list = voice.media_consumers.write();
+                        if let Some(pos) = list.iter().position(|(id, _)| *id == track) {
+                            to_stop = Some(list.remove(pos).1);
+                        }
+                    }
+                    if let Some(h) = to_stop {
+                        spawn(async move {
+                            h.stop().await;
+                        });
+                    }
+                }
+                Ok(MediaEvent::PeerJoined { uid }) => {
+                    let current = voice.active_channel.read().clone();
+                    if let Some(mut ch) = current {
+                        if !ch.members.iter().any(|m| m.uid == uid) {
+                            let initial = uid
+                                .chars()
+                                .next()
+                                .map(|c| c.to_string())
+                                .unwrap_or_default();
+                            ch.members.push(crate::state::VoiceMember {
+                                name: uid.clone(),
+                                initial,
+                                uid,
+                                speaking: false,
+                            });
+                            voice.active_channel.set(Some(ch));
+                        }
+                    }
+                }
+                Ok(MediaEvent::PeerLeft { uid }) => {
+                    let current = voice.active_channel.read().clone();
+                    if let Some(mut ch) = current {
+                        ch.members.retain(|m| m.uid != uid);
+                        voice.active_channel.set(Some(ch));
+                    }
+                }
                 Ok(MediaEvent::ScreenStats(s)) => {
                     let mut v = voice;
-                    v.screen_stats.set(Some(s));
+                    v.screen_stats.set(Some(crate::state::ScreenStatsView {
+                        width: s.width,
+                        height: s.height,
+                        fps_actual: s.fps_actual,
+                        fps_target: s.fps_target,
+                        bitrate_kbps: s.bitrate_kbps,
+                        bitrate_actual_kbps: s.bitrate_actual_kbps,
+                    }));
                 }
                 Ok(ev) => tracing::info!("[voice] {:?}", ev),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -1244,6 +1476,7 @@ async fn connect_voice(
             .publish(kaede_media_session::PublishSource::Mic {
                 sample_rate: 48_000,
                 channels: 1,
+                denoise: true,
             })
             .await;
         match result {

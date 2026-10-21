@@ -68,6 +68,37 @@ const RATE_BUCKET_TTL: Duration = Duration::from_secs(600);
 /// `pub(crate)` 供测试断言使用（`assert!(elapsed >= 0.9 * BROADCAST_SEND_TIMEOUT)`）。
 pub(crate) const BROADCAST_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// 参与者的“最近一次拿 token”的保留时长。
+///
+/// LiveKit token 有效期 6 小时；超过 8 小时未续期的 participant 视为已离线
+/// （关闭页面/崩溃/断网来不及调用 `/leave`），清理任务据此轮换 seed，
+/// 避免 seed 永久复用 + `room_media_seeds` 无界增长。
+pub const MEDIA_PARTICIPANT_TTL: Duration = Duration::from_secs(8 * 3600);
+
+/// 房间级媒体 seed 状态。
+///
+/// `participants` 记录每个参与者最近一次获取 token 的时间；最后一个
+/// participant 过期/离开后移除条目，下一次进入会生成全新 seed，
+/// 避免同一个 key 在 LiveKit SDK ratchet 重启后被复用。
+pub struct RoomMedia {
+    pub seed: [u8; 32],
+    pub participants: HashMap<String, Instant>,
+    pub last_used: Instant,
+}
+
+/// 清理媒体房间：先剔除 TTL 过期的 participant，再删除空且久未活动的 seed。
+pub(crate) fn prune_media_rooms(
+    map: &mut HashMap<String, RoomMedia>,
+    participant_ttl: Duration,
+    empty_ttl: Duration,
+) {
+    for r in map.values_mut() {
+        r.participants
+            .retain(|_, last_seen| last_seen.elapsed() < participant_ttl);
+    }
+    map.retain(|_, r| !r.participants.is_empty() || r.last_used.elapsed() < empty_ttl);
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: SqlitePool,
@@ -82,13 +113,17 @@ pub struct AppState {
     pub login_semaphore: Arc<tokio::sync::Semaphore>,
     /// P0-2：login 失败计数 uid -> (次数, 首次失败时间)。
     pub login_failures: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
-    /// P0-2：每个 LiveKit room 的 e2ee seed（room name -> 32 bytes）。
+    /// P0-2：每个 LiveKit room 的媒体会话状态。
     ///
-    /// 第一次有人请求 token 时生成；之后同房间所有人都拿同一个 seed。
-    /// 客户端用 `MLS exporter(channel_id, "livekit-e2ee", seed)` 派生
-    /// 真正的 e2ee key——服务端不知道 exporter 输出，仍然是 E2EE。
-    /// 两次会话（进程重启 / 房间清理）seed 不同 → key 不同 → 防 nonce 复用。
-    pub room_media_seeds: Arc<Mutex<HashMap<String, [u8; 32]>>>,
+    /// - 同一媒体会话内所有参与者拿同一个 seed；
+    /// - 最后一个参与者 leave 后条目删除，下次进入生成新 seed；
+    /// - 进程重启也会自然换 seed。
+    ///
+    /// 客户端用 `MLS exporter(channel_id, "livekit-e2ee", seed)` 派生真正的
+    /// e2ee key——服务端不知道 exporter 输出，仍然是 E2EE。
+    pub room_media_seeds: Arc<Mutex<HashMap<String, RoomMedia>>>,
+    /// KeyPackage 拉取的 per-target 限流（target -> (次数, 窗口起点)）。
+    pub kp_fetch_budget: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
 }
 
 impl AppState {
@@ -96,13 +131,33 @@ impl AppState {
         let rate_buckets = Arc::new(Mutex::new(HashMap::<UserId, RateBucket>::new()));
         // P1-6：后台清理任务，防恶意注册 uid 撑爆 rate_buckets。
         let buckets_clone = rate_buckets.clone();
+        let kp_budget = Arc::new(Mutex::new(HashMap::<String, (u32, Instant)>::new()));
+        let kp_budget_clone = kp_budget.clone();
+        let room_media_seeds = Arc::new(Mutex::new(HashMap::<String, RoomMedia>::new()));
+        let room_media_clone = room_media_seeds.clone();
+        let pool_clone = pool.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(300));
             tick.tick().await;
             loop {
                 tick.tick().await;
-                let mut m = buckets_clone.lock().unwrap();
-                m.retain(|_, b| b.last.elapsed() < RATE_BUCKET_TTL);
+                {
+                    let mut m = buckets_clone.lock().unwrap();
+                    m.retain(|_, b| b.last.elapsed() < RATE_BUCKET_TTL);
+                }
+                {
+                    let mut m = kp_budget_clone.lock().unwrap();
+                    m.retain(|_, (_, start)| start.elapsed() < Duration::from_secs(600));
+                }
+                {
+                    // 先剔除超过 TTL 未续期的参与者（崩溃/关页不会调用 /leave），
+                    // 再删除空房间 + 1 小时未活动的 seed。
+                    let mut m = room_media_clone.lock().unwrap();
+                    prune_media_rooms(&mut m, MEDIA_PARTICIPANT_TTL, Duration::from_secs(3600));
+                }
+                if let Err(e) = crate::db::cleanup_expired(&pool_clone).await {
+                    tracing::warn!("cleanup_expired failed: {}", e);
+                }
             }
         });
         Self {
@@ -114,8 +169,38 @@ impl AppState {
             ws_semaphore: Arc::new(tokio::sync::Semaphore::new(5000)),
             login_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
             login_failures: Arc::new(Mutex::new(HashMap::new())),
-            room_media_seeds: Arc::new(Mutex::new(HashMap::new())),
+            room_media_seeds,
+            kp_fetch_budget: kp_budget,
         }
+    }
+
+    /// 某个 target 的 KeyPackage 是否还可以被拉取。
+    ///
+    /// 限流目的：防止任意登录用户把别人的 KeyPackage 队列抽干
+    /// （每个 KP 只能消费一次）。10 次/分钟对一个 target 足够宽松。
+    pub fn check_kp_fetch(&self, target: &str) -> bool {
+        const LIMIT: u32 = 10;
+        const WINDOW: Duration = Duration::from_secs(60);
+        let mut m = self.kp_fetch_budget.lock().unwrap();
+        let entry = m.entry(target.to_string()).or_insert((0, Instant::now()));
+        if entry.1.elapsed() > WINDOW {
+            *entry = (0, Instant::now());
+        }
+        if entry.0 >= LIMIT {
+            return false;
+        }
+        entry.0 += 1;
+        true
+    }
+
+    /// 当前连接的 session id（若用户在线）。
+    pub fn peer_session_id(&self, uid: &UserId) -> Option<u64> {
+        self.room
+            .lock()
+            .unwrap()
+            .peers
+            .get(uid)
+            .map(|p| p.session_id)
     }
 
     /// P0-1（单设备止血）：后登连接踢掉前登。返回被踢的旧 handle。
@@ -226,6 +311,8 @@ impl AppState {
     }
 
     /// P1-7：关键消息（MlsCommit 等）用 await send 有背压，避免 try_send 静默丢弃。
+    ///
+    /// 所有目标**并发发送**：单个 slow consumer 最多拖 2s，而不是串行 N×2s。
     pub async fn broadcast_except_important(&self, sender: &UserId, msg: ServerMessage) {
         let targets: Vec<mpsc::Sender<ServerMessage>> = {
             let room = self.room.lock().unwrap();
@@ -235,13 +322,17 @@ impl AppState {
                 .map(|(_, peer)| peer.tx.clone())
                 .collect()
         };
-        for tx in targets {
-            match tokio::time::timeout(BROADCAST_SEND_TIMEOUT, tx.send(msg.clone())).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => tracing::warn!("broadcast_important: target closed"),
-                Err(_) => tracing::warn!("broadcast_important: target slow (2s), dropped"),
+        let sends = targets.into_iter().map(|tx| {
+            let msg = msg.clone();
+            async move {
+                match tokio::time::timeout(BROADCAST_SEND_TIMEOUT, tx.send(msg)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => tracing::warn!("broadcast_important: target closed"),
+                    Err(_) => tracing::warn!("broadcast_important: target slow (2s), dropped"),
+                }
             }
-        }
+        });
+        futures_util::future::join_all(sends).await;
     }
 
     /// 广播给所有在线成员（不过滤发送者）。
@@ -478,6 +569,40 @@ mod tests {
         assert!(!state.peer_uids().contains(&alice));
     }
 
+    /// R2-06：参与者长期不再取 token 后，seed 必须被回收（下次进入换新 seed）。
+    #[test]
+    fn media_seed_rotates_after_participant_ttl() {
+        use std::collections::HashMap;
+        use std::time::Instant;
+
+        let mut rooms = HashMap::new();
+        let mut participants = HashMap::new();
+        participants.insert("alice".to_string(), Instant::now());
+        rooms.insert(
+            "kaede-general".to_string(),
+            RoomMedia {
+                seed: [7u8; 32],
+                participants,
+                last_used: Instant::now(),
+            },
+        );
+
+        // 未超过 TTL：房间保留。
+        prune_media_rooms(
+            &mut rooms,
+            Duration::from_secs(3600),
+            Duration::from_secs(3600),
+        );
+        assert!(rooms.contains_key("kaede-general"));
+
+        // TTL=0：participant 立即过期 → 房间被删除 → 下次重新生成 seed。
+        prune_media_rooms(&mut rooms, Duration::ZERO, Duration::ZERO);
+        assert!(
+            rooms.is_empty(),
+            "stale media room/seed must be dropped after participant TTL"
+        );
+    }
+
     // ============================================================
     // Batch 5：P1-I（broadcast_except_important 超时）回归测试
     // ============================================================
@@ -513,6 +638,7 @@ mod tests {
         let sender = UserId::new("sender");
         let msg = ServerMessage::MlsCommit {
             from: sender.clone(),
+            epoch: 1,
             payload: b"test".to_vec(),
         };
 
@@ -569,6 +695,7 @@ mod tests {
         let sender = UserId::new("sender");
         let msg = ServerMessage::MlsCommit {
             from: sender.clone(),
+            epoch: 1,
             payload: b"important".to_vec(),
         };
 
@@ -613,6 +740,7 @@ mod tests {
         let sender = UserId::new("sender");
         let msg = ServerMessage::MlsCommit {
             from: sender.clone(),
+            epoch: 1,
             payload: b"fast".to_vec(),
         };
 

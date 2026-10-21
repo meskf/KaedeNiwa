@@ -27,11 +27,14 @@ pub fn FriendsView() -> Element {
     let app = use_context::<AppState>();
     let mut ui = use_context::<crate::state::UiState>();
 
-    use_future(move || {
+    // M58: use_effect + current_server.read() 订阅，切服务器时重拉；
+    // 原 use_future 闭包内没 read 任何 signal → 只跑一次。
+    use_effect(move || {
+        let _sid = app.current_server.read();
         let app = app;
-        async move {
+        spawn(async move {
             load_friends_into(app).await;
-        }
+        });
     });
 
     let server_id = app.current_server.read().clone();

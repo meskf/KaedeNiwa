@@ -77,10 +77,22 @@ pub fn LoginView() -> Element {
                                     let key = AppState::channel_key(&server_id, &ch);
                                     app.messages.write().insert(key, msgs);
                                 }
-                                app.room.set(Some(room));
+                                app.room.set(Some(room.clone()));
+                                // 关键顺序：先让 app.room 就位，再启动 event loop。
+                                // 否则 `Joined` 事件可能在 room 赋值前被处理而丢失，
+                                // 房主就永远不知道需要把老成员加进主群。
+                                room.spawn_event_loop();
+                                // 房主登录时补加“已经在线”的成员。
+                                // event loop 的 Joined 事件可能早于 app.room 赋值，
+                                // 这里显式做一次，且与 observer 共用 pending 去重。
+                                if is_host {
+                                    for uid in room.connection().peers() {
+                                        crate::observer::spawn_host_add(app, room.clone(), uid);
+                                    }
+                                }
                                 ui.common_account.set(AccountInfo {
                                     login_id: user.clone(),
-                                    password: pass.clone(),
+                                    password: zeroize::Zeroizing::new(pass.clone()),
                                 });
                                 let first = {
                                     let chans = app.channels.read();
@@ -209,7 +221,7 @@ async fn connect_and_load(
     let room = RoomSession::connect_with_storage(http, ws, user, pass, Some(store), Some(observer))
         .await
         .map_err(|e| format!("connect: {}", e))?;
-    room.spawn_event_loop();
+    // H28: event loop 延迟到所有加载成功后再启动，避免部分失败时 task 泄漏
 
     // P0-1 完整版：先拉成员表判断当前用户 op（server 第一个注册 = op5 = host）
     let members = room
@@ -222,6 +234,9 @@ async fn connect_and_load(
         .map(|m| m.op.clone())
         .unwrap_or_else(|| "op2".into());
     let is_host = my_op == "op5";
+    // 让 ServerConnection 自己知道 host 身份：Joined/PeerJoined 事件可能
+    // 在 app.is_host 被设置之前就到达 event loop。
+    room.connection().set_is_host(is_host);
     let already_ready = room.is_mls_ready();
 
     if !already_ready {
@@ -246,10 +261,12 @@ async fn connect_and_load(
         );
     }
 
-    let _ = room.set_presence("online").await;
+    // 先 Join 再 SetPresence：服务端 SetPresence 要求已 joined，
+    // 旧顺序会把第一条 presence 静默丢掉。
     room.join_room()
         .await
         .map_err(|e| format!("join_room: {}", e))?;
+    let _ = room.set_presence("online").await;
 
     let channels = room
         .list_channels()
@@ -270,6 +287,9 @@ async fn connect_and_load(
             messages.push((ch.id.clone(), ui_msgs));
         }
     }
+
+    // event loop 由调用方在 app.room 就位后再启动（见 LoginView），
+    // 避免首条 Joined 事件丢失。
 
     Ok(LoadedData {
         server_id,

@@ -83,6 +83,10 @@ impl LiveKitConfig {
 
     /// 兼容旧 API：把 passphrase 当 key 用。
     /// 与浏览器端 `setKey(string)` 走相同 PBKDF2 派生。
+    ///
+    /// **DEPRECATED**：passphrase 通常熵不足，PBKDF2 无法弥补弱口令。
+    /// 生产必须用 `with_e2ee_key` + 32 字节 CSPRNG（MLS exporter）。
+    #[deprecated(note = "passphrase may be low-entropy; use with_e2ee_key(CSPRNG output)")]
     pub fn with_e2ee(mut self, passphrase: &str) -> Self {
         self.e2ee_key = Some(passphrase.as_bytes().to_vec());
         self
@@ -107,8 +111,9 @@ struct PusherStats {
 pub struct LiveKitPusher {
     source: livekit::webrtc::video_source::native::NativeVideoSource,
     resolution: livekit::webrtc::video_source::VideoResolution,
-    /// 保持 Room 存活。drop 会导致连接断开。
-    _room: livekit::Room,
+    /// H23: drop 会断开 LiveKit 连接。不可删除此字段（保活资源）。
+    #[allow(dead_code)]
+    room: livekit::Room,
     stats: PusherStats,
     closed: AtomicBool,
 }
@@ -164,7 +169,7 @@ impl LiveKitPusher {
         Ok(Self {
             source,
             resolution,
-            _room: room,
+            room,
             stats: PusherStats::default(),
             closed: AtomicBool::new(false),
         })
@@ -432,16 +437,18 @@ impl LiveKitSession {
         self.state
             .store(MediaState::Stopping.as_u8(), Ordering::Relaxed);
 
+        // H21: detached std::thread join（同 MediaSession::stop）
         let collector_task = self.collector.lock().unwrap().take();
         if let Some(h) = collector_task {
-            let join = tokio::task::spawn_blocking(move || {
+            std::thread::spawn(move || {
                 let _ = h.join();
             });
-            let _ = tokio::time::timeout(Duration::from_secs(2), join).await;
         }
+        // H22: abort 而非 timeout
         let pusher_task = self.pusher_task.lock().unwrap().take();
         if let Some(h) = pusher_task {
-            let _ = tokio::time::timeout(Duration::from_secs(1), h).await;
+            h.abort();
+            let _ = h.await;
         }
 
         self.pusher.close();
@@ -474,7 +481,9 @@ impl Drop for LiveKitSession {
 /// LiveKit 音频推流器（`NativeAudioSource` → LiveKit）。
 pub struct LiveKitAudioPusher {
     source: livekit::webrtc::audio_source::native::NativeAudioSource,
-    _room: livekit::Room,
+    /// H23: 保活字段，不可删除。
+    #[allow(dead_code)]
+    room: livekit::Room,
     sample_rate: u32,
     channels: u32,
     stats: PusherStats,
@@ -527,7 +536,7 @@ impl LiveKitAudioPusher {
 
         Ok(Self {
             source,
-            _room: room,
+            room,
             sample_rate,
             channels,
             stats: PusherStats::default(),
@@ -545,7 +554,15 @@ impl LiveKitAudioPusher {
 
         // 转 i16
         let mut samples: Vec<i16> = Vec::with_capacity(data.len() / 2);
-        let (pairs, _rem) = data.as_chunks::<2>();
+        // M42: PCM S16LE 要求偶数长度。奇数尾字节静默丢弃，但留日志方便诊断
+        let (pairs, rem) = data.as_chunks::<2>();
+        if !rem.is_empty() {
+            tracing::warn!(
+                "push_pcm: odd data len {} (dropping trailing {} byte)",
+                data.len(),
+                rem.len()
+            );
+        }
         for &[lo, hi] in pairs {
             samples.push(i16::from_le_bytes([lo, hi]));
         }
@@ -753,16 +770,18 @@ impl LiveKitAudioSession {
         self.state
             .store(MediaState::Stopping.as_u8(), Ordering::Relaxed);
 
+        // H21: detached std::thread join
         let collector_task = self.collector.lock().unwrap().take();
         if let Some(h) = collector_task {
-            let join = tokio::task::spawn_blocking(move || {
+            std::thread::spawn(move || {
                 let _ = h.join();
             });
-            let _ = tokio::time::timeout(Duration::from_secs(2), join).await;
         }
+        // H22: abort 而非 timeout
         let pusher_task = self.pusher_task.lock().unwrap().take();
         if let Some(h) = pusher_task {
-            let _ = tokio::time::timeout(Duration::from_secs(1), h).await;
+            h.abort();
+            let _ = h.await;
         }
 
         self.pusher.close();

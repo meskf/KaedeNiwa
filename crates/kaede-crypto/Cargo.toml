@@ -5,12 +5,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-x25519-dalek     = { workspace = true }
-ml-kem           = { workspace = true }
+# 清理：ml-kem / x25519-dalek / chacha20poly1305 在本 crate 零使用
+# （MLS 用 openmls 自己的 crypto provider；SFrame/DM 只用 AES-GCM）。
 hkdf             = { workspace = true }
 sha2             = { workspace = true }
 aes-gcm          = { workspace = true }
-chacha20poly1305 = { workspace = true }
 zeroize          = { workspace = true }
 rand_core        = { workspace = true }
 subtle           = { workspace = true }

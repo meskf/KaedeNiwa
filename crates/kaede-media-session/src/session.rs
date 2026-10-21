@@ -19,8 +19,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use kaede_capture::{EncodedVideoStream, VideoConfig};
 use kaede_media::{
-    AudioCaptureConfig, AudioFrame, AudioPlayer, AudioSource, AudioSourceKind, GstAudioSource,
-    LiveKitVideoSink, MediaError,
+    AudioCaptureConfig, AudioFrame, AudioPlayer, AudioSourceKind, GstAudioSource, LiveKitVideoSink,
+    MediaError,
 };
 
 use crate::config::{ConnectConfig, PublishSource, TrackKind};
@@ -95,16 +95,21 @@ impl MediaSession {
         );
 
         let mut opts = livekit::RoomOptions::default();
-        let kp_opts = KeyProviderOptions {
-            key_derivation_algorithm: KeyDerivationAlgorithm::PBKDF2,
-            ratchet_salt: b"LKFrameEncryptionKey".to_vec(),
-            ..Default::default()
-        };
-        let kp = KeyProvider::with_shared_key(kp_opts, cfg.e2ee_key.to_vec());
-        opts.encryption = Some(E2eeOptions {
-            encryption_type: EncryptionType::Gcm,
-            key_provider: kp,
-        });
+        if let Some(key) = cfg.e2ee_key {
+            let kp_opts = KeyProviderOptions {
+                key_derivation_algorithm: KeyDerivationAlgorithm::PBKDF2,
+                ratchet_salt: b"LKFrameEncryptionKey".to_vec(),
+                ..Default::default()
+            };
+            let kp = KeyProvider::with_shared_key(kp_opts, key.as_slice().to_vec());
+            opts.encryption = Some(E2eeOptions {
+                encryption_type: EncryptionType::Gcm,
+                key_provider: kp,
+            });
+            tracing::info!("[media-session] E2EE enabled");
+        } else {
+            tracing::warn!("[media-session] E2EE DISABLED (fallback to DTLS-SRTP)");
+        }
 
         let (room, room_events) = livekit::Room::connect(&cfg.ws_url, &cfg.token, opts)
             .await
@@ -171,12 +176,14 @@ impl MediaSession {
             PublishSource::Mic {
                 sample_rate,
                 channels,
+                denoise,
             } => {
                 self.publish_audio(
                     sample_rate,
                     channels,
                     AudioSourceKind::Microphone,
                     TrackKind::VoiceAudio,
+                    denoise,
                 )
                 .await
             }
@@ -189,6 +196,7 @@ impl MediaSession {
                     channels,
                     AudioSourceKind::SystemLoopback,
                     TrackKind::ScreenAudio,
+                    false,
                 )
                 .await
             }
@@ -381,6 +389,7 @@ impl MediaSession {
         channels: u16,
         kind_source: AudioSourceKind,
         track_kind: TrackKind,
+        denoise: bool,
     ) -> Result<(), MediaError> {
         if self.published.lock().unwrap().contains_key(&track_kind) {
             return Err(MediaError::InvalidState(format!(
@@ -396,7 +405,14 @@ impl MediaSession {
             pid: None,
             frame_duration_ms: 20,
         };
-        let mut source = GstAudioSource::start(cfg)?;
+        let mut source: Box<dyn kaede_media::AudioSource> = {
+            let s = GstAudioSource::start(cfg)?;
+            if denoise {
+                Box::new(kaede_media::DenoisedSource::new(s))
+            } else {
+                Box::new(s)
+            }
+        };
 
         let lk_source = NativeAudioSource::new(
             AudioSourceOptions::default(),
@@ -427,18 +443,32 @@ impl MediaSession {
         let sid_for_ev = sid.clone();
         let bytes_per_frame = 2 * channels as u32;
 
+        let events_for_collector = events.clone();
         let handle = tokio::spawn(async move {
             let (frame_tx, frame_rx) = async_channel::bounded::<AudioFrame>(8);
             let stop_flag = Arc::new(AtomicBool::new(false));
             let stop_flag_thread = stop_flag.clone();
 
             let collector = std::thread::spawn(move || {
+                let mut consecutive_timeouts: u32 = 0;
                 while !stop_flag_thread.load(Ordering::Relaxed) {
                     match source.next_audio_timeout(Duration::from_millis(200)) {
                         Ok(Some(f)) => {
+                            consecutive_timeouts = 0;
                             let _ = frame_tx.try_send(f);
                         }
                         Ok(None) => break,
+                        Err(MediaError::Timeout) => {
+                            // 50 × 200ms = 10s 无帧：设备切换 / 驱动异常 / 独占模式冲突。
+                            // 主动 break + emit error，让上层有机会提示用户。
+                            consecutive_timeouts += 1;
+                            if consecutive_timeouts >= 50 {
+                                let _ = events_for_collector.send(MediaEvent::Error {
+                                    message: "audio source produced no frames for 10s (device switched or driver failure); stopping track".into(),
+                                });
+                                break;
+                            }
+                        }
                         Err(_) => continue,
                     }
                 }

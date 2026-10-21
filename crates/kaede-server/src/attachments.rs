@@ -136,8 +136,9 @@ async fn download(
 ) -> Result<impl IntoResponse, ApiError> {
     let _uid = authenticate(&state, &headers).await?;
 
-    // 防御路径穿越
-    if id.contains('/') || id.contains('\\') || id.contains("..") {
+    // H17: 严格 id 校验——白名单字符集，防路径穿越 / Windows ADS / 保留名
+    if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
         return Err(ApiError::BadRequest("invalid id".into()));
     }
 

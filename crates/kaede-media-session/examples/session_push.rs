@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = ConnectConfig {
         ws_url: LIVEKIT_WS.into(),
         token,
-        e2ee_key,
+        e2ee_key: Some(zeroize::Zeroizing::new(e2ee_key)),
         room_name: format!("kaede-{}", channel_id),
     };
 

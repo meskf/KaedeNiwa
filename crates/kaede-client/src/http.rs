@@ -193,10 +193,16 @@ struct ErrorResp {
 impl HttpApi {
     /// 新建。`base_url` 形如 `http://localhost:8080`。
     pub fn new(base_url: impl Into<String>) -> Result<Self, ClientError> {
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("kaede-client/", env!("CARGO_PKG_VERSION")))
-            .timeout(std::time::Duration::from_secs(30))
-            .connect_timeout(std::time::Duration::from_secs(10))
+        #[allow(unused_mut)]
+        let mut builder = reqwest::Client::builder()
+            .user_agent(concat!("kaede-client/", env!("CARGO_PKG_VERSION")));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            builder = builder
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10));
+        }
+        let http = builder
             .build()
             .map_err(|e| ClientError::Transport(format!("build http client: {}", e)))?;
         Ok(Self {
@@ -306,9 +312,21 @@ impl HttpApi {
                 target, body.target
             )));
         }
-        URL_SAFE_NO_PAD
+        let kp_bytes = URL_SAFE_NO_PAD
             .decode(&body.package)
-            .map_err(|e| ClientError::Protocol(format!("bad kp base64: {}", e)))
+            .map_err(|e| ClientError::Protocol(format!("bad kp base64: {}", e)))?;
+        // H8: 校验 KP 内部 credential 与 target 一致。
+        // server 侧 C8 已校验，但恶意/故障 server 仍可能返回错误 KP；
+        // 客户端必须独立验证，否则 group state 会被污染。
+        let cred = kaede_mls::extract_credential_from_kp(&kp_bytes)
+            .map_err(|e| ClientError::Protocol(format!("invalid kp credential: {}", e)))?;
+        if cred != target.as_str() {
+            return Err(ClientError::Protocol(format!(
+                "kp credential mismatch: expected {}, got {}",
+                target, cred
+            )));
+        }
+        Ok(kp_bytes)
     }
 
     /// 保存一条消息（服务端只存密文，不解密）。
@@ -757,6 +775,23 @@ impl HttpApi {
         parse_json::<LivekitToken>(resp).await
     }
 
+    /// 通知服务器离开媒体房间（用于 seed 生命周期管理）。
+    pub async fn leave_livekit_room(&self, channel_id: &str) -> Result<(), ClientError> {
+        let resp = self
+            .http
+            .post(format!("{}/api/livekit/leave", self.base_url))
+            .bearer_auth(self.bearer()?)
+            .json(&serde_json::json!({ "channel_id": channel_id }))
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(parse_api_error(resp).await)
+        }
+    }
+
     // -----------------------------------------------------------------
     // E2EE
     // -----------------------------------------------------------------
@@ -822,15 +857,19 @@ impl HttpApi {
 }
 
 fn map_reqwest_err(e: reqwest::Error) -> ClientError {
-    if e.is_timeout() {
-        ClientError::Timeout
-    } else if e.is_connect() {
-        ClientError::Connection(format!("http: {}", e))
-    } else if e.is_decode() {
-        ClientError::Protocol(format!("decode: {}", e))
-    } else {
-        ClientError::Transport(format!("http: {}", e))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if e.is_timeout() {
+            return ClientError::Timeout;
+        }
+        if e.is_connect() {
+            return ClientError::Connection(format!("http: {}", e));
+        }
+        if e.is_decode() {
+            return ClientError::Protocol(format!("decode: {}", e));
+        }
     }
+    ClientError::Transport(format!("http: {}", e))
 }
 
 async fn parse_json<T: serde::de::DeserializeOwned>(

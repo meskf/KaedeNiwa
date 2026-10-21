@@ -44,16 +44,20 @@ async fn main() -> Result<()> {
     }
     let bind = cfg.bind.clone();
     let pool = db::init(&cfg.database_url).await?;
+    // 全新数据库必须补齐默认频道，否则客户端默认的 `general` 会 404。
+    kaede_server::ensure_default_channels(&pool).await;
     let state = AppState::new(pool, cfg);
 
-    let app = http::router(state.clone())
-        .merge(attachments::router(state.clone()))
-        .merge(friends::router(state.clone()))
-        .merge(dm::router(state.clone()))
-        .merge(livekit::router(state.clone()))
-        .merge(channels::router(state.clone()))
-        .merge(members::router(state.clone()))
-        .merge(ws::router(state));
+    let app = kaede_server::with_middleware(
+        http::router(state.clone())
+            .merge(attachments::router(state.clone()))
+            .merge(friends::router(state.clone()))
+            .merge(dm::router(state.clone()))
+            .merge(livekit::router(state.clone()))
+            .merge(channels::router(state.clone()))
+            .merge(members::router(state.clone()))
+            .merge(ws::router(state)),
+    );
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!("listening on http://{}", listener.local_addr()?);

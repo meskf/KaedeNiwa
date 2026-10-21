@@ -13,6 +13,9 @@ pub struct MessagePayload {
     pub c: String,
     pub u: String,
     pub t: String,
+    /// C18: 发送端本地时间（毫秒）。旧客户端不传时为 0，接收端回退到 now_ms()
+    #[serde(default)]
+    pub ts: i64,
     #[serde(default)]
     pub a: Vec<Attachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,6 +34,7 @@ impl MessagePayload {
             c: channel_id.into(),
             u: uid.into(),
             t: text.into(),
+            ts: crate::room::now_ms(), // C18: 自动打上当前发送时间
             a: attachments,
             r: reply_to,
         }

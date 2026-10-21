@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use kaede_protocol::{Channel, ServerMessage};
+use kaede_protocol::{Channel, ServerMessage, UserId};
 
 use crate::db;
 use crate::error::ApiError;
@@ -67,7 +67,8 @@ async fn list_channels(
     let uid = authenticate(&state, &headers).await?;
 
     // 私密频道只对已加入的成员可见。
-    let rows: Vec<(String, String, String, i64, i64, i64, Option<String>)> = sqlx::query_as(
+    type ChannelRow = (String, String, String, i64, i64, i64, Option<String>);
+    let rows: Vec<ChannelRow> = sqlx::query_as(
         "SELECT id, name, kind, position, created_at, is_private, hash_tier \
          FROM channels \
          WHERE is_private = 0 \
@@ -114,6 +115,17 @@ async fn create_channel(
 
     // 私密频道必须提供 password，且长度 4..=128。
     let password_hash = if req.is_private {
+        // 创建私密频道会跑 Argon2（最高 256 MiB）。必须和 login 一样限流 + 限并发，
+        // 否则 op3+ 用户可用并发建频道打爆内存。
+        if !state.check_rate(&uid, 0.2, 3.0) {
+            return Err(ApiError::BadRequest("create_channel rate limited".into()));
+        }
+        let _permit = state
+            .login_semaphore
+            .acquire()
+            .await
+            .map_err(|_| ApiError::Internal("create_channel queue closed".into()))?;
+
         let pw = req
             .password
             .as_deref()
@@ -180,10 +192,16 @@ async fn create_channel(
         hash_tier: hash_tier.clone(),
     };
 
-    // 广播给所有在线成员
-    state.broadcast_all(ServerMessage::ChannelCreated {
-        channel: channel.clone(),
-    });
+    // 私密频道只广播给成员，避免向全服泄露频道名/存在性。
+    broadcast_channel_scoped(
+        &state,
+        &channel.id,
+        req.is_private,
+        ServerMessage::ChannelCreated {
+            channel: channel.clone(),
+        },
+    )
+    .await;
 
     Ok((StatusCode::CREATED, Json(channel)))
 }
@@ -221,6 +239,10 @@ async fn update_channel(
     }
 
     if let Some(p) = req.position {
+        // M28: 上限校验，防 create_channel 的 MAX(position)+1 溢出
+        if !(0..=i32::MAX as i64).contains(&p) {
+            return Err(ApiError::BadRequest("position must be 0..=i32::MAX".into()));
+        }
         position = p;
         sqlx::query("UPDATE channels SET position = ? WHERE id = ?")
             .bind(position)
@@ -238,9 +260,15 @@ async fn update_channel(
         is_private,
         hash_tier,
     };
-    state.broadcast_all(ServerMessage::ChannelUpdated {
-        channel: channel.clone(),
-    });
+    broadcast_channel_scoped(
+        &state,
+        &channel.id,
+        is_private,
+        ServerMessage::ChannelUpdated {
+            channel: channel.clone(),
+        },
+    )
+    .await;
     Ok(Json(channel))
 }
 
@@ -251,6 +279,42 @@ async fn delete_channel(
 ) -> Result<StatusCode, ApiError> {
     let uid = authenticate(&state, &headers).await?;
     check_write_perm(&state, uid.as_str()).await?;
+
+    // 私密频道：非成员即使是 op3/op4 也不能删（防通过广播泄露的 id 越权删除）。
+    // op5（服主）保留兜底删除能力。
+    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let is_private = meta.ok_or_else(|| ApiError::NotFound("channel".into()))?.0 != 0;
+    let mut private_members: Vec<String> = Vec::new();
+    if is_private {
+        let member: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM channel_members WHERE channel_id = ? AND login_id = ?")
+                .bind(&id)
+                .bind(uid.as_str())
+                .fetch_optional(&state.pool)
+                .await?;
+        if member.is_none() {
+            let op: Option<(String,)> = sqlx::query_as("SELECT op FROM members WHERE login_id = ?")
+                .bind(uid.as_str())
+                .fetch_optional(&state.pool)
+                .await?;
+            if op.map(|(o,)| o).as_deref() != Some("op5") {
+                return Err(ApiError::Unauthorized);
+            }
+        }
+        // 必须在删除 channel_members 之前保存成员列表，否则删完就没人可通知了。
+        private_members = sqlx::query_as::<_, (String,)>(
+            "SELECT login_id FROM channel_members WHERE channel_id = ?",
+        )
+        .bind(&id)
+        .fetch_all(&state.pool)
+        .await?
+        .into_iter()
+        .map(|(m,)| m)
+        .collect();
+    }
 
     // P1-O：事务包裹，防"删 channel 成功但删 messages 崩溃"留孤儿
     let mut tx = state.pool.begin().await?;
@@ -271,11 +335,56 @@ async fn delete_channel(
         .execute(&mut *tx)
         .await?;
 
+    // M32: 清理 channel_members，防孤儿行
+    sqlx::query("DELETE FROM channel_members WHERE channel_id = ?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+
     tx.commit().await?;
 
-    state.broadcast_all(ServerMessage::ChannelDeleted { id });
+    // 删除时成员关系已清理：私密频道用事先保存的成员列表通知，
+    // 公开频道广播给所有人。
+    if is_private {
+        for member in private_members {
+            state.send_to(
+                &UserId::new(member),
+                ServerMessage::ChannelDeleted { id: id.clone() },
+            );
+        }
+    } else {
+        state.broadcast_all(ServerMessage::ChannelDeleted { id: id.clone() });
+    }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 按频道可见性广播：私密频道只发给 `channel_members`，公开频道广播给所有人。
+async fn broadcast_channel_scoped(
+    state: &AppState,
+    channel_id: &str,
+    is_private: bool,
+    msg: ServerMessage,
+) {
+    if !is_private {
+        state.broadcast_all(msg);
+        return;
+    }
+    let members: Vec<(String,)> =
+        match sqlx::query_as("SELECT login_id FROM channel_members WHERE channel_id = ?")
+            .bind(channel_id)
+            .fetch_all(&state.pool)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("broadcast_channel_scoped query failed: {}", e);
+                return;
+            }
+        };
+    for (login_id,) in members {
+        state.send_to(&UserId::new(login_id), msg.clone());
+    }
 }
 
 #[derive(Deserialize)]
@@ -293,6 +402,29 @@ async fn join_channel(
     Json(req): Json<JoinChannelReq>,
 ) -> Result<StatusCode, ApiError> {
     let uid = authenticate(&state, &headers).await?;
+
+    // C10: per-uid 限流，防频道密码暴破
+    if !state.check_rate(&uid, 0.5, 3.0) {
+        return Err(ApiError::BadRequest("join_channel rate limited".into()));
+    }
+    // C10: 并发 Argon2 上限（同 login），防 OOM DoS
+    let _permit = state
+        .login_semaphore
+        .acquire()
+        .await
+        .map_err(|_| ApiError::Internal("join_channel queue closed".into()))?;
+
+    // C8: 若提交了 KP，先校验 credential == auth uid。
+    // 无论首次加入还是重广播，KP 都会流到 channel group 的 add_member，
+    // 恶意 credential 会污染 group state。
+    if let Some(kp_b64) = &req.key_package {
+        let kp_bytes = base64_decode(kp_b64)?;
+        let cred = kaede_mls::extract_credential_from_kp(&kp_bytes)
+            .map_err(|e| ApiError::BadRequest(format!("invalid keypackage: {}", e)))?;
+        if cred != uid.as_str() {
+            return Err(ApiError::Unauthorized);
+        }
+    }
 
     let row: Option<(i64, Option<String>)> =
         sqlx::query_as("SELECT is_private, password_hash FROM channels WHERE id = ?")
@@ -340,43 +472,33 @@ async fn join_channel(
                 ));
             }
 
-            // 有其他成员 → 重广播 ChannelMemberJoined，让他们补发 Welcome
+            // 有其他成员 → 只请求**权威成员**（最早加入者）补发 Welcome。
+            // 发给所有人会导致多人同时 add → group split。
             if let Some(kp_b64) = req.key_package.as_ref() {
                 tracing::info!(
-                    "join_channel: re-broadcast welcome request for {} to {} peers",
-                    id,
-                    others.len()
+                    "join_channel: re-broadcast welcome request for {} to authority",
+                    id
                 );
-                for (member_id,) in others {
-                    let target = kaede_protocol::UserId::new(&member_id);
-                    state.send_to(
-                        &target,
-                        kaede_protocol::ServerMessage::ChannelMemberJoined {
-                            channel_id: id.clone(),
-                            requester: uid.clone(),
-                            key_package: kp_b64.clone(),
-                        },
-                    );
-                }
+                notify_authority(&state, &id, &uid, kp_b64, &others).await;
             }
         }
         return Ok(StatusCode::NO_CONTENT);
     }
-
-    // 先取出其他已有成员（用于广播）——必须在 INSERT 前拿，否则会把自己也广播到
-    let other_members: Vec<(String,)> = sqlx::query_as(
-        "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ?",
-    )
-    .bind(&id)
-    .bind(uid.as_str())
-    .fetch_all(&state.pool)
-    .await?;
 
     let kp_blob: Option<Vec<u8>> = match &req.key_package {
         Some(s) => Some(base64_decode(s)?),
         None => None,
     };
 
+    // H18: INSERT + SELECT others 必须同一事务。
+    // 原顺序（先 SELECT 再 INSERT）在并发 join 下：两个请求都看不到对方
+    // → 各自广播 ChannelMemberJoined → 接收方 MLS group 并发 add 失败。
+    //
+    // 事务内 INSERT 先落地，SELECT 才能看到刚加入的自己 + 并发者（如已提交）。
+    // **注**：SQLite WAL 下，BEGIN 在 T1 COMMIT 前开始的事务仍可能看不到
+    // T1 的 INSERT。要完全串行化需 per-channel mutex 或 SELECT FOR UPDATE
+    // （SQLite 不支持）。当前事务至少消除"自己 INSERT 失败但已广播"的问题。
+    let mut tx = state.pool.begin().await?;
     sqlx::query(
         "INSERT OR IGNORE INTO channel_members (channel_id, login_id, joined_at, key_package) \
          VALUES (?, ?, ?, ?)",
@@ -385,26 +507,98 @@ async fn join_channel(
     .bind(uid.as_str())
     .bind(db::now_ms())
     .bind(kp_blob.as_deref())
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
 
-    // B2：广播给其他已有成员，让他们把当前用户 add 进 channel group。
+    tx.commit().await?;
+
+    // B2：只通知权威成员（最早加入者）执行 add + Welcome（事务外）。
+    // 发给所有成员会触发多次独立 add → epoch 分叉。
     if let Some(kp_bytes) = &kp_blob {
         let kp_b64 = crate::db::base64_url(kp_bytes);
-        for (member_id,) in other_members {
-            let target = kaede_protocol::UserId::new(&member_id);
-            state.send_to(
-                &target,
-                kaede_protocol::ServerMessage::ChannelMemberJoined {
-                    channel_id: id.clone(),
-                    requester: uid.clone(),
-                    key_package: kp_b64.clone(),
-                },
-            );
-        }
+        let members: Vec<(String,)> = sqlx::query_as(
+            "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ? \
+             ORDER BY joined_at ASC",
+        )
+        .bind(&id)
+        .bind(uid.as_str())
+        .fetch_all(&state.pool)
+        .await?;
+        notify_authority(&state, &id, &uid, &kp_b64, &members).await;
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 把“加入申请”按 `joined_at` 顺序投给第一个在线的成员（频道 group 权威）。
+///
+/// 权威成员的客户端负责 `add_member` → 发 Welcome → 广播 Commit。
+async fn notify_authority(
+    state: &AppState,
+    channel_id: &str,
+    requester: &UserId,
+    key_package_b64: &str,
+    members: &[(String,)],
+) {
+    for (member_id,) in members {
+        let target = UserId::new(member_id);
+        let sent = state.send_to(
+            &target,
+            ServerMessage::ChannelMemberJoined {
+                channel_id: channel_id.to_string(),
+                requester: requester.clone(),
+                key_package: key_package_b64.to_string(),
+            },
+        );
+        if sent {
+            tracing::info!(
+                "join_channel: authority {} handles requester {} for {}",
+                member_id,
+                requester,
+                channel_id
+            );
+            return;
+        }
+    }
+
+    // 没有在线权威成员：把“加入申请”持久化，等第一个成员上线 Join 时补投，
+    // 否则创建者离线期间新成员永远无法入群。
+    if let Some((authority,)) = members.first() {
+        let payload = match serde_json::to_vec(&serde_json::json!({
+            "requester": requester.as_str(),
+            "key_package": key_package_b64,
+        })) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("join_channel: encode pending authority request: {}", e);
+                return;
+            }
+        };
+        if let Err(e) = crate::db::enqueue_envelope(
+            &state.pool,
+            authority,
+            requester.as_str(),
+            "channel_member_joined",
+            Some(channel_id),
+            &payload,
+        )
+        .await
+        {
+            tracing::warn!("join_channel: enqueue authority request failed: {}", e);
+        } else {
+            tracing::info!(
+                "join_channel: queued authority request for {} (authority {} offline)",
+                channel_id,
+                authority
+            );
+        }
+    } else {
+        tracing::warn!(
+            "join_channel: no authority for {} (requester {})",
+            channel_id,
+            requester
+        );
+    }
 }
 
 async fn leave_channel(
@@ -413,11 +607,66 @@ async fn leave_channel(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let uid = authenticate(&state, &headers).await?;
+
+    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let is_private = meta.map(|(v,)| v != 0).unwrap_or(false);
+
+    // 先保存其余成员（删除后查不到），用于通知权威成员轮换频道密钥。
+    let others: Vec<(String,)> = if is_private {
+        sqlx::query_as(
+            "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ? \
+             ORDER BY joined_at ASC",
+        )
+        .bind(&id)
+        .bind(uid.as_str())
+        .fetch_all(&state.pool)
+        .await?
+    } else {
+        Vec::new()
+    };
+
     sqlx::query("DELETE FROM channel_members WHERE channel_id = ? AND login_id = ?")
         .bind(&id)
         .bind(uid.as_str())
         .execute(&state.pool)
         .await?;
+
+    if is_private {
+        let fallback = others.first().map(|(m,)| m.clone());
+        let mut delivered = false;
+        for (member,) in others {
+            let sent = state.send_to(
+                &UserId::new(member),
+                ServerMessage::ChannelMemberLeft {
+                    channel_id: id.clone(),
+                    member: uid.clone(),
+                },
+            );
+            if sent {
+                delivered = true;
+                break;
+            }
+        }
+        // 权威成员不在线：暂存事件，等它下次 Join 时补投并轮换频道密钥。
+        if !delivered
+            && let Some(authority) = fallback
+            && let Err(e) = crate::db::enqueue_envelope(
+                &state.pool,
+                &authority,
+                uid.as_str(),
+                "channel_member_left",
+                Some(&id),
+                uid.as_str().as_bytes(),
+            )
+            .await
+        {
+            tracing::warn!("enqueue channel_member_left failed: {}", e);
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 

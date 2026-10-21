@@ -4,10 +4,11 @@ use crate::i18n::use_i18n;
 use dioxus::prelude::*;
 
 use crate::content::ContentArea;
-use crate::icons::{
-    IconHelpCircle, IconMail, IconMoon, IconServer, IconSettings, IconSun, IconUserList, IconUsers,
-    IconWinClose, IconWinMax, IconWinMin,
-};
+use crate::icons::{ IconHelpCircle, IconMail, IconMoon, IconServer, IconSettings, IconSun, IconUserList, IconUsers };
+
+// native-only window controls（wasm 下不编译，避免 unused_imports 告警）
+#[cfg(not(target_arch = "wasm32"))]
+use crate::icons::{IconWinClose, IconWinMax, IconWinMin};
 use crate::logo::AppLogo;
 use crate::members::MemberList;
 use crate::sidebar::Sidebar;

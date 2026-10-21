@@ -34,10 +34,19 @@ pub enum AccountMode {
     PerServer,
 }
 
-#[derive(Clone, PartialEq, Default, Debug)]
+#[derive(Clone, PartialEq, Default)]
 pub struct AccountInfo {
     pub login_id: String,
-    pub password: String,
+    pub password: zeroize::Zeroizing<String>,
+}
+
+impl std::fmt::Debug for AccountInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountInfo")
+            .field("login_id", &self.login_id)
+            .field("password", &"***")
+            .finish()
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -96,6 +105,13 @@ pub struct AppState {
     /// P0-1 完整版：当前用户是否是 MLS group 的 host（op5）。
     /// host 收到 PeerJoined 会自动 host_add_peer(uid)。
     pub is_host: Signal<Option<bool>>,
+    /// 已尝试加载过历史的频道（`server::channel`）。
+    ///
+    /// MLS 历史解密有“一次性”限制（同一密文二次解密会被当重放拒绝），
+    /// 因此每个频道在一次会话内只拉取一次，避免空列表反复请求。
+    pub loaded_channels: Signal<std::collections::HashSet<String>>,
+    /// 自动重连是否正在进行（防重复任务）。
+    pub reconnecting: Signal<bool>,
     /// R3b: in-flight host_add_peer 去重。
     /// 防止同一 peer 的多个 PeerJoined 事件并发触发 add，导致 epoch 前进竞争。
     /// 内容 = 正在处理中的 uid 集合；task 完成/失败后移除（panic 除外，见 observer.rs 注释）。
@@ -115,6 +131,8 @@ impl AppState {
             dm_conversations: Signal::new(HashMap::new()),
             dm_messages: Signal::new(HashMap::new()),
             room: Signal::new(None),
+            loaded_channels: Signal::new(std::collections::HashSet::new()),
+            reconnecting: Signal::new(false),
             is_host: Signal::new(None),
             pending_adds: Signal::new(std::collections::HashSet::new()),
         }
@@ -247,6 +265,18 @@ impl Default for UiState {
 // Voice
 // ============================================================================
 
+/// UI 层屏幕共享统计快照（与 kaede_media_session::ScreenStats 解耦，
+/// 以便 wasm 目标也能持有该字段）。
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct ScreenStatsView {
+    pub width: u32,
+    pub height: u32,
+    pub fps_actual: f64,
+    pub fps_target: f64,
+    pub bitrate_kbps: u32,
+    pub bitrate_actual_kbps: u32,
+}
+
 #[derive(Clone, Copy)]
 pub struct VoiceState {
     pub active_channel: Signal<Option<VoiceChannel>>,
@@ -258,12 +288,23 @@ pub struct VoiceState {
     /// wasm 下不存在该字段（`kaede-media-session` 是 native-only 依赖）。
     #[cfg(not(target_arch = "wasm32"))]
     pub handle: Signal<Option<std::sync::Arc<kaede_media_session::NativeHandle>>>,
+    /// C16: 持有 attach_audio 返回的 ConsumerHandle。
+    /// 原实现直接 drop 会导致后台 task 泄漏，同时无法在离开频道/对方断开时主动停止。
+    #[cfg(not(target_arch = "wasm32"))]
+    pub media_consumers: Signal<
+        Vec<(
+            kaede_media_session::TrackId,
+            kaede_media_session::ConsumerHandle,
+        )>,
+    >,
     /// 当前选择的视频画质档位（Phase 3a：UI 状态，未接入 media 层）。
     pub current_profile: Signal<kaede_protocol::VideoProfile>,
     /// 屏幕共享实时统计（开启时才有值）。
-    pub screen_stats: Signal<Option<kaede_media_session::ScreenStats>>,
+    pub screen_stats: Signal<Option<ScreenStatsView>>,
     /// 码率档位（低 / 标准 / 无损）。
     pub current_bitrate: Signal<kaede_protocol::VideoBitrate>,
+    /// 主群 epoch 变化后，请求重建当前语音媒体会话（值为 channel_id）。
+    pub reconnect_request: Signal<Option<String>>,
 }
 
 impl VoiceState {
@@ -272,9 +313,12 @@ impl VoiceState {
             active_channel: Signal::new(None),
             #[cfg(not(target_arch = "wasm32"))]
             handle: Signal::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
+            media_consumers: Signal::new(Vec::new()),
             current_profile: Signal::new(kaede_protocol::DEFAULT_VIDEO_PROFILE),
             current_bitrate: Signal::new(kaede_protocol::DEFAULT_VIDEO_BITRATE),
             screen_stats: Signal::new(None),
+            reconnect_request: Signal::new(None),
         }
     }
 }

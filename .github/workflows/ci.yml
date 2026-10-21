@@ -8,6 +8,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # 保守值：webrtc-sys / tao 在多核并发编译时偶发元数据竞争
+  CARGO_BUILD_JOBS: "4"
 
 jobs:
   fmt:
@@ -98,6 +100,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run -p kaede-client --features native --test room_e2e --no-fail-fast
+
+  check-wasm:
+    name: check (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: check kaede-wasm (end-to-end wasm)
+        run: cargo check -p kaede-wasm --target wasm32-unknown-unknown
+      - name: check kaede-client (wasm feature)
+        run: cargo check -p kaede-client --features wasm --target wasm32-unknown-unknown
 
   deny:
     name: cargo-deny

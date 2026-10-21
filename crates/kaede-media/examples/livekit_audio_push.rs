@@ -53,7 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("    麦克风已启动");
 
         println!("\n[3] LiveKitAudioSession::start");
-        let lk_cfg = LiveKitConfig::new(LIVEKIT_WS, token.clone()).with_e2ee(&e2ee_passphrase);
+        let lk_cfg = LiveKitConfig::new(LIVEKIT_WS, token.clone())
+            .with_e2ee_key(e2ee_passphrase.as_bytes().to_vec());
 
         let session = LiveKitAudioSession::start(source, lk_cfg, SAMPLE_RATE, CHANNELS).await?;
         println!("    LiveKit 连接已建立");

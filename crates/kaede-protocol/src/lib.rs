@@ -41,10 +41,12 @@ use serde::{Deserialize, Serialize};
 // ============================================================================
 
 /// 协议版本。
-pub const PROTOCOL_VERSION: u16 = 2;
+///
+/// v3：新增 `ServerMessage::ChannelMessage`（私密频道实时消息）。
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// 服务器接受的最低协议版本。
-pub const MIN_SUPPORTED_VERSION: u16 = 2;
+pub const MIN_SUPPORTED_VERSION: u16 = 3;
 
 /// 单条线消息的硬上限。
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
@@ -133,6 +135,22 @@ pub enum ClientMessage {
     ChannelSync {
         to: UserId,
         channel_id: String,
+        #[serde(with = "serde_bytes")]
+        payload: Vec<u8>,
+    },
+
+    /// 频道级 MLS Commit 广播（0x05）。
+    ///
+    /// 由频道 group 的**权威成员**（最早加入者）在 Add 新成员后发送。
+    /// 服务端校验发送者属于该频道，然后仅转发给该频道的其他成员。
+    /// 客户端收到后调用 `channel_process_commit` 使 epoch 对齐。
+    ChannelCommit {
+        channel_id: String,
+        /// 不投递该用户（通常是刚通过 Welcome 入组的新成员：
+        /// 其 Welcome 已经包含该 Commit 的效果，重复处理会报 WrongEpoch）。
+        #[serde(default)]
+        exclude: Option<UserId>,
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
     },
 
@@ -169,21 +187,35 @@ pub enum ClientMessage {
     /// 定向 Welcome。发给刚被 Add 的新成员。
     MlsWelcome {
         to: UserId,
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
     },
 
     /// 广播 Commit。服务器转发给所有已 join 的其他 session。
     MlsCommit {
+        /// Commit 产生后的新 epoch。服务器用它实现离线成员 epoch 追赶。
+        #[serde(default)]
+        epoch: u64,
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
+    },
+
+    /// 客户端上报自己当前的主群 epoch。
+    ///
+    /// 服务器据此补投 `epoch > 上报值` 的最近 Commit（离线期间错过的）。
+    ReportEpoch {
+        epoch: u64,
     },
 
     /// 广播 Proposal。
     MlsProposal {
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
     },
 
     /// 广播 Application Message（聊天 / 数据）。
     MlsAppMessage {
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
     },
 
@@ -338,7 +370,31 @@ pub enum ServerMessage {
     ChannelSync {
         channel_id: String,
         /// 首字节 0x04 = Welcome, 0x05 = Commit
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
+    },
+
+    /// 某成员离开了私密频道。
+    ///
+    /// 只发给频道 group 的权威成员：它负责从 channel group 中移除该 leaf
+    /// 并广播 Commit，使频道密钥轮换（离开者无法再解密后续消息）。
+    ChannelMemberLeft {
+        channel_id: String,
+        member: UserId,
+    },
+
+    /// 私密频道实时消息（v3）。
+    ///
+    /// 客户端把 `0x03 || AES-GCM 密文` 写入 `POST /api/messages` 后，
+    /// 服务器用本消息实时推送除发送者外的频道成员。离线成员靠历史补齐。
+    ChannelMessage {
+        channel_id: String,
+        from: UserId,
+        /// 服务器权威时间戳。
+        ts: i64,
+        /// 与历史中完全相同的 `0x03` 封装密文。
+        #[serde(with = "serde_bytes")]
+        ciphertext: Vec<u8>,
     },
 
     /// 在线状态更新（单个或多个）。
@@ -387,27 +443,34 @@ pub enum ServerMessage {
     /// [`ClientMessage::FetchKeyPackage`] 的回应。
     KeyPackageFor {
         target: UserId,
+        #[serde(with = "serde_bytes")]
         package: Vec<u8>,
     },
 
     // ---- MLS 消息转发 ----
     MlsWelcome {
         from: UserId,
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
     },
 
     MlsCommit {
         from: UserId,
+        #[serde(default)]
+        epoch: u64,
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
     },
 
     MlsProposal {
         from: UserId,
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
     },
 
     MlsAppMessage {
         from: UserId,
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
     },
 
@@ -430,6 +493,7 @@ pub enum ServerMessage {
         conv_id: String,
         from: UserId,
         ts: i64,
+        #[serde(with = "serde_bytes")]
         ciphertext: Vec<u8>,
     },
 
@@ -520,12 +584,16 @@ impl ClientMessage {
                 Some(ForwardTarget::Broadcast)
             }
 
+            // 服务器自己处理（需要查 DB 补投）
+            Self::ReportEpoch { .. } => None,
+
             // 服务器自己处理
             Self::ClientHello { .. }
             | Self::Join
             | Self::Leave
             | Self::PublishKeyPackages { .. }
             | Self::FetchKeyPackage { .. }
+            | Self::ChannelCommit { .. }
             | Self::SfuTokenRequest
             | Self::SetPresence { .. }
             | Self::Ping { .. } => None,
@@ -625,6 +693,15 @@ mod tests {
     }
 
     #[test]
+    fn channel_commit_round_trip() {
+        round_trip_client(ClientMessage::ChannelCommit {
+            channel_id: "ch_abc".into(),
+            exclude: Some(UserId::new("bob")),
+            payload: vec![0x05, 1, 2, 3],
+        });
+    }
+
+    #[test]
     fn sdp_offer_round_trip() {
         round_trip_client(ClientMessage::SdpOffer {
             to: UserId::new("alice"),
@@ -649,8 +726,21 @@ mod tests {
     }
 
     #[test]
+    fn channel_message_round_trip() {
+        round_trip_server(ServerMessage::ChannelMessage {
+            channel_id: "ch_secret".into(),
+            from: UserId::new("alice"),
+            ts: 123456789,
+            ciphertext: vec![0x03, 9, 8, 7],
+        });
+    }
+
+    #[test]
     fn empty_payload_ok() {
-        round_trip_client(ClientMessage::MlsCommit { payload: vec![] });
+        round_trip_client(ClientMessage::MlsCommit {
+            epoch: 7,
+            payload: vec![],
+        });
     }
 
     #[test]
@@ -699,7 +789,10 @@ mod tests {
             Some(ForwardTarget::Direct(_))
         ));
 
-        let commit = ClientMessage::MlsCommit { payload: vec![] };
+        let commit = ClientMessage::MlsCommit {
+            epoch: 1,
+            payload: vec![],
+        };
         assert!(matches!(
             commit.forward_target(),
             Some(ForwardTarget::Broadcast)

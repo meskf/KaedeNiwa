@@ -30,7 +30,7 @@ pub use cipher::{
 };
 pub use error::MlsError;
 pub use group::MlsGroupHandle;
-pub use identity::MlsIdentity;
+pub use identity::{MlsIdentity, extract_credential_from_kp};
 pub use provider::{KaedeMlsProvider, ProviderError};
 pub use purpose::SframePurpose;
 

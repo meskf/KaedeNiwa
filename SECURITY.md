@@ -50,15 +50,21 @@
 - **密码学隔离**：非成员即使拿到 `messages` 表 ciphertext（首字节 `0x03` 标记），也没有 channel group key，**无法解密**
 - **准入泄露防护**：非成员读不存在频道返回 404 而非 401，避免频道存在性泄露
 - **已知限制**：
-  - 加入时需要至少一个已有成员在线（离线时 Welcome 无法送达，需下次登录补收）
-  - 频道成员移除会触发 MLS Remove proposal，下一 epoch 前进
+  - 加入时需要至少一个已有的**权威成员**在线执行 add；Welcome/Commit 本身由服务端
+    离线暂存并在对方下次 Join 时补投
+  - 成员离开时由权威成员执行 MLS Remove 并广播 Commit，频道密钥轮换
 - **验证**：`channel_b2_e2e.rs` 3 个用例全绿（完整流程 / 错密码 / 密码学隔离）
 
 ## 媒体 E2EE
 - **走 LiveKit 内建 E2EE**（AES-GCM，PBKDF2 从 MLS exporter 派生的 key）
-- **key 来源**：`RoomSession::begin_media_session`（MLS exporter + 强制 epoch 前进）
-  - 每次媒体会话前调用 `MlsSession::self_update` → epoch 前进 → key 变化
+- **key 来源**：`RoomSession::begin_media_session`（MLS exporter + 房间级 seed）
+  - **不再**每次进频道都 `self_update`（否则先进/后进的人 epoch 不同，多人语音必然
+    互相解不开）
+  - 同一次媒体会话内所有参与者共享 server seed → key 一致
+  - 跨会话 key 轮换由 server seed 生命周期保证：最后一个参与者调用
+    `/api/livekit/leave` 后 seed 被删除，下次进入生成新 seed
   - **保证**：即使应用重启、LiveKit SDK ratchet 归零，两次会话 key 也不同 → **无 nonce 复用**
+  - **已知限制**：通话中发生成员变更（epoch 前进）不会热更新已连接会话，需要离开重进
 - **server 可见**：谁在哪个语音房间、track 数量、码率
 - **server 不可见**：媒体明文、媒体明文加密 key
 - **⚠️ 历史遗留（E-3）**：`/api/livekit/e2ee-key` HTTP 端点**已返回 410 Gone**（2026-10-19
@@ -160,6 +166,14 @@ snapshot → 拿到签名私钥**。
 ## 多设备
 
 - **当前**：**单设备登录**（后登踢前登），已实现 `Kicked` 错误
+  - 2026-10-21 修复：`Join` 的幂等判断改为 session-aware；不同连接的 `Join`
+    会真正顶替旧连接（旧实现会让新连接变成无法发消息的僵尸）
+- **会话 token**：DB 只存 SHA-256(token)，泄漏 DB 不能直接登录
+- **MLS 状态持久化**：主群快照在每次发送/接收消息、处理 commit 后落盘
+  - 不落盘会导致重启后 sender ratchet 回退 → MLS 层 AES-GCM nonce 复用
+- **历史可读性**：`max_past_epochs = 64`（换取可回放历史，削弱前向保密）
+  - 仅对**当时在群里的成员**有效；后加入的成员无法解密旧 epoch（MLS 语义）
+  - 自己的消息由客户端本地明文缓存（MLS 不允许解密自己的 Application Message）
 - **不支持**：同一账号同时在线多设备（MLS state 同步、私钥共享未设计）
 - **升级路径（E-2）**：1-3 个月工作量
   - 需要 device pairing 协议（QR code / 6 位码 / 扫码）

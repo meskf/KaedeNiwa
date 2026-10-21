@@ -7,6 +7,7 @@ edition.workspace = true
 [dependencies]
 kaede-capture = { path = "../kaede-capture", version = "0.0.1" }
 kaede-crypto  = { workspace = true }
+crossbeam-channel = "0.5"
 thiserror     = { workspace = true }
 reqwest       = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 livekit       = "0.9.5"
@@ -16,6 +17,7 @@ async-channel = "2"
 gstreamer     = "0.25"
 gstreamer-app = "0.25"
 tokio         = { workspace = true }
+nnnoiseless   = "0.5"
 
 [dev-dependencies]
 futures-util = "0.3"

@@ -31,6 +31,7 @@ mod audio_gst;
 mod config;
 #[cfg(not(target_arch = "wasm32"))]
 mod decoder;
+mod denoise;
 mod error;
 mod event;
 mod livekit_sink;
@@ -48,6 +49,7 @@ pub use audio_gst::GstAudioSource;
 pub use config::{AudioShareConfig, ScreenShareConfig};
 #[cfg(not(target_arch = "wasm32"))]
 pub use decoder::VideoDecoder;
+pub use denoise::DenoisedSource;
 pub use error::MediaError;
 pub use event::{MediaEvent, StopReason};
 pub use livekit_sink::{

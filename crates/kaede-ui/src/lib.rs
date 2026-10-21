@@ -1,6 +1,7 @@
 //! KaedeNiwa Dioxus UI（重做版 v2）。
 
 mod app;
+mod attachment;
 mod content;
 mod css;
 mod dm_view;
@@ -17,6 +18,8 @@ mod settings_modal;
 mod shell;
 mod sidebar;
 mod state;
+#[cfg(target_arch = "wasm32")]
+mod voice_web;
 mod theme;
 mod video_picker;
 

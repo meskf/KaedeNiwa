@@ -71,6 +71,24 @@ pub enum ClientEvent {
         plaintext: Vec<u8>,
     },
 
+    /// 成功加入一个私密频道（首次或迟到 Welcome 后）。
+    ChannelJoined {
+        server_id: String,
+        channel_id: String,
+    },
+
+    /// 收到私密频道实时消息（已用频道 group key 解密）。
+    ///
+    /// 与 `AppMessage` 分开，避免把主群广播误当私密频道内容。
+    ChannelMessage {
+        server_id: String,
+        channel_id: String,
+        from: UserId,
+        /// 服务器权威时间戳。
+        ts: i64,
+        plaintext: Vec<u8>,
+    },
+
     /// 收到媒体会话信令（媒体格式元数据 / 开始 / 停止）。
     ///
     /// 由 `MlsAppMessage` 解密后经 `payload::decode` 识别为
@@ -120,6 +138,12 @@ pub enum ClientEvent {
 
         plaintext: Vec<u8>,
     },
+
+    /// 主群 MLS epoch 变化（成员变更 / self update / 收到 Commit）。
+    ///
+    /// 语音通话中的客户端应重新建立媒体会话，让 LiveKit E2EE key
+    /// 跟随新 epoch 轮换（否则通话中有人加入/离开后互相解不开）。
+    MlsEpochChanged { server_id: String, epoch: u64 },
 
     /// 服务器报告错误。
     ServerError {

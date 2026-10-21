@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 license.workspace = true
 name = "kaede-client"
 version.workspace = true
@@ -44,6 +44,8 @@ wasm-bindgen         = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 js-sys               = { workspace = true }
 rexie = "0.6"
+    getrandom            = { version = "0.2", features = ["js"] }
+    gloo-timers          = { version = "0.3", features = ["futures"] }
 web-sys = { version = "0.3", features = [
     "WebSocket", "MessageEvent", "BinaryType", "Event",
     "Crypto", "SubtleCrypto", "CryptoKey",
@@ -55,6 +57,7 @@ workspace = true
 features = ["js"]
 
 [dev-dependencies]
+base64 = "0.22"
 tokio = { workspace = true }
 kaede-server = { path = "../kaede-server", version = "0.0.1" }
 axum = "0.8"

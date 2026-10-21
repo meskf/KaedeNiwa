@@ -21,7 +21,11 @@ pub struct ConnectConfig {
     /// 服务端签发的 JWT。
     pub token: String,
     /// E2EE 共享密钥（32 字节 AES-256）。
-    pub e2ee_key: [u8; 32],
+    ///
+    /// H19: 用 Zeroizing 包装，drop 时自动清零栈/堆上的 key 副本。
+    /// 注：LiveKit SDK 内部会再 clone 一份进 KeyProvider，那份我们无法控制——
+    /// 但至少 ConnectConfig 自身的生命周期内 key 不会残留。
+    pub e2ee_key: Option<zeroize::Zeroizing<[u8; 32]>>,
     /// LiveKit room 名（一般 `kaede-{channel_id}`）。
     pub room_name: String,
 }
@@ -42,7 +46,13 @@ pub enum PublishSource {
     /// 屏幕 + NVENC。
     Screen { config: kaede_capture::VideoConfig },
     /// 麦克风。
-    Mic { sample_rate: u32, channels: u16 },
+    ///
+    /// `denoise`：是否启用 RNNoise 降噪（仅 48kHz 生效，约 10ms 延迟）。
+    Mic {
+        sample_rate: u32,
+        channels: u16,
+        denoise: bool,
+    },
     /// 系统 loopback（一起听歌 / 共享系统声音）。
     System { sample_rate: u32, channels: u16 },
 }

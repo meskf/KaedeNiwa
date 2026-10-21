@@ -66,7 +66,7 @@ impl MlsSession {
     }
 
     pub fn uid(&self) -> &str {
-        &self.identity.uid
+        self.identity.uid()
     }
 
     /// 当前 MLS 群组所有成员 uid（从 credential 解析）。
@@ -128,6 +128,18 @@ impl MlsSession {
         self.group_id = Some(g.group_id());
         self.group = Some(g);
         Ok(())
+    }
+
+    /// 丢弃当前主群，改用 Welcome 指向的新群。
+    ///
+    /// 用于“房主丢失快照后重建主群”的恢复路径：已有本地群的一方
+    /// 不能再简单忽略新 Welcome，否则双方永久分裂。
+    ///
+    /// **会丢失旧群的 epoch/历史密钥**；调用方必须提示用户。
+    pub fn reset_and_join(&mut self, welcome: &[u8]) -> Result<(), ClientError> {
+        self.group = None;
+        self.group_id = None;
+        self.join_with_welcome(welcome)
     }
 
     pub fn add_member(&mut self, key_package: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ClientError> {
@@ -298,21 +310,21 @@ impl MlsSession {
         buf.push(SNAPSHOT_VERSION);
 
         // uid
-        let uid = self.identity.uid.as_bytes();
+        let uid = self.identity.uid().as_bytes();
         buf.extend_from_slice(&(uid.len() as u16).to_be_bytes());
         buf.extend_from_slice(uid);
 
         // sig scheme
-        let scheme_u16: u16 = self.identity.signature_keys.scheme() as u16;
+        let scheme_u16: u16 = self.identity.signature_keys().scheme() as u16;
         buf.extend_from_slice(&scheme_u16.to_be_bytes());
 
         // sig priv
-        let priv_bytes = self.identity.signature_keys.private_bytes();
+        let priv_bytes = self.identity.signature_keys().private_bytes();
         buf.extend_from_slice(&(priv_bytes.len() as u32).to_be_bytes());
         buf.extend_from_slice(priv_bytes);
 
         // sig pub
-        let pub_bytes = self.identity.signature_keys.public_bytes();
+        let pub_bytes = self.identity.signature_keys().public_bytes();
         buf.extend_from_slice(&(pub_bytes.len() as u32).to_be_bytes());
         buf.extend_from_slice(pub_bytes);
 
@@ -328,12 +340,16 @@ impl MlsSession {
         }
 
         // storage
-        let storage_bytes = self
+        let mut storage_bytes = self
             .provider
             .snapshot()
             .map_err(|e| ClientError::Mls(format!("provider snapshot: {}", e)))?;
         buf.extend_from_slice(&(storage_bytes.len() as u32).to_be_bytes());
         buf.extend_from_slice(&storage_bytes);
+
+        // H7: storage_bytes 含 KeyPackage 私钥，中间缓冲必须显式清零
+        use zeroize::Zeroize;
+        storage_bytes.zeroize();
 
         Ok(buf)
     }
@@ -442,20 +458,19 @@ impl MlsSession {
             .map_err(|e| ClientError::Mls(format!("provider restore: {}", e)))?;
 
         // 尝试从 storage 加载 group
+        // C4: 若 snapshot 声明有 group 但 load 失败 → 直接 Err。
+        // 静默降级会诱导用户重建 group，导致群分裂（其他成员收不到 commit）。
         let group = match &group_id {
-            Some(gid) => {
-                match MlsGroupHandle::load_from_storage(identity.clone(), &provider, gid) {
-                    Ok(g) => Some(g),
-                    Err(e) => {
-                        tracing::warn!(
-                            uid = %uid,
-                            "snapshot declares group but load_from_storage failed: {}; session starts without a group",
-                            e
-                        );
-                        None
-                    }
-                }
-            }
+            Some(gid) => Some(
+                MlsGroupHandle::load_from_storage(identity.clone(), &provider, gid).map_err(
+                    |e| {
+                        ClientError::Mls(format!(
+                            "snapshot declares group {:?} but load_from_storage failed: {}",
+                            gid, e
+                        ))
+                    },
+                )?,
+            ),
             None => None,
         };
 
@@ -471,7 +486,7 @@ impl MlsSession {
 impl std::fmt::Debug for MlsSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MlsSession")
-            .field("uid", &self.identity.uid)
+            .field("uid", &self.identity.uid())
             .field("has_group", &self.group.is_some())
             .field("epoch", &self.epoch())
             .finish()

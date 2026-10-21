@@ -269,30 +269,31 @@ async fn remove_member(
         return Err(ApiError::BadRequest("cannot remove self".into()));
     }
 
-    // 先向被踢者发一条 Kicked 错误并断开其 WS。
-    // 这一步必须在 DB 删除之前做——之后 take_peer 拿不到 handle。
-    {
-        let target_uid = UserId::new(target.clone());
-        if let Some(peer) = state.take_peer(&target_uid) {
-            if peer
-                .tx
-                .try_send(ServerMessage::Error {
-                    code: ErrorCode::Kicked,
-                    message: "you have been removed from this server".into(),
-                })
-                .is_err()
-            {
-                tracing::warn!("[kick] failed to notify {}", target);
-            }
-            tracing::info!("[kick] notified and disconnected {}", target);
-            // peer 在这里被 drop，tx 随之失效；
-            // run_socket 的 writer task 会在 sink 关闭后退出。
-            // 被踢者的 run_event_loop 会先收到 fatal Error 主动 close。
+    // 必须严格高于目标 rank：op4 不能删 op5（服主）或其他 op4。
+    let rank = |s: &str| -> u8 {
+        match s {
+            "op1" => 1,
+            "op2" => 2,
+            "op3" => 3,
+            "op4" => 4,
+            "op5" => 5,
+            _ => 0,
         }
+    };
+    let exists: Option<(String,)> = sqlx::query_as("SELECT op FROM members WHERE login_id = ?")
+        .bind(&target)
+        .fetch_optional(&state.pool)
+        .await?;
+    let target_op = exists.ok_or_else(|| ApiError::NotFound("member".into()))?.0;
+    if rank(&my_op) <= rank(&target_op) {
+        return Err(ApiError::Unauthorized);
     }
 
-    // 一并删除账户（踢人 = 删号，旧项目语义）
-    // S-6: 事务包裹所有 DELETE，避免部分提交导致数据不一致
+    // H15: 顺序改为「先 DB 事务（必须成功），后踢 WS」。
+    //
+    // 原顺序「先 take_peer 后 DB」在 DB 失败时会导致：
+    //   用户被踢出内存（WS 断开）但账号仍然存在 → 重连成功 → 踢人失败。
+    // 新顺序保证：DB 成功后才踢 WS；DB 失败则整个操作失败，peer 仍在。
     let mut tx = state.pool.begin().await?;
     sqlx::query("DELETE FROM members WHERE login_id = ?")
         .bind(&target)
@@ -319,7 +320,43 @@ async fn remove_member(
         .execute(&mut *tx)
         .await?;
 
+    // R2-08：删除账号后不能继续留在频道成员表/离线信封/DM 索引里，
+    // 否则私密频道的“权威成员”选择会命中已删除用户。
+    sqlx::query("DELETE FROM channel_members WHERE login_id = ?")
+        .bind(&target)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM pending_envelopes WHERE to_uid = ? OR from_uid = ?")
+        .bind(&target)
+        .bind(&target)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM dm_conversations WHERE a = ? OR b = ?")
+        .bind(&target)
+        .bind(&target)
+        .execute(&mut *tx)
+        .await?;
+
     tx.commit().await?;
+
+    // DB 成功后再踢 WS。若 DB 已成功但踢 WS 失败，用户会短暂在线但
+    // 下次 API 调用会因 session 已删而 401，不影响安全语义。
+    {
+        let target_uid = UserId::new(target.clone());
+        if let Some(peer) = state.take_peer(&target_uid) {
+            if peer
+                .tx
+                .try_send(ServerMessage::Error {
+                    code: ErrorCode::Kicked,
+                    message: "you have been removed from this server".into(),
+                })
+                .is_err()
+            {
+                tracing::warn!("[kick] failed to notify {}", target);
+            }
+            tracing::info!("[kick] notified and disconnected {}", target);
+        }
+    }
 
     state.broadcast_all(ServerMessage::MemberRemoved { login_id: target });
 

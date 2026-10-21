@@ -21,6 +21,10 @@ use std::io::{Cursor, Read};
 
 /// snapshot 内层格式版本。与外层 `[0x02][alg][u32]` header 独立，
 /// 用于兼容内层结构变化。
+///
+/// **警告**：`from_snapshot_with` 用 `bytes[0] == 0x02` 判定新格式。
+/// `INNER_VERSION` 不能为 0x02，否则旧格式（直接是 inner）会与新格式
+/// 判型歧义。
 const INNER_VERSION: u8 = 1;
 
 // P0-C: hard caps on deserialization to prevent malicious snapshot DoS.
@@ -169,6 +173,8 @@ impl KaedeMlsProvider {
             map.insert(k, v);
         }
 
+        // MM5: 直接访问 openmls_memory_storage 的 pub `values` 字段。
+        // 升级 openmls_memory_storage 时必须人工核对字段类型是否兼容。
         let storage = MemoryStorage::default();
         *storage.values.write().unwrap() = map;
 
@@ -212,6 +218,12 @@ impl KaedeMlsProvider {
         let ct = cipher
             .encrypt(&inner)
             .map_err(|e| ProviderError::Serialize(e.to_string()))?;
+
+        // 中间缓冲里含 KeyPackage / 群组私钥材料，加密后立刻清零。
+        {
+            use zeroize::Zeroize;
+            inner.zeroize();
+        }
 
         let mut out = Vec::with_capacity(6 + ct.len());
         out.push(0x02); // outer version

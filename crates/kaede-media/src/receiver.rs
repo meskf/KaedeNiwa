@@ -152,20 +152,30 @@ impl ReceiverSession {
         };
 
         // 5. 重放 / 乱序检测（解密成功后才信任 counter）
+        // M12: 删除 u32 wrap 分支——发送端 Counter::checked_next 保证
+        // 不产生 MAX→0 回绕；攻击者伪造的 seq=0 帧会被 AAD 校验拒绝。
         {
-            let mut map = self.last_seq_by_sender.lock().unwrap();
-            if let Some(&last) = map.get(&sender_id) {
-                // 允许 u32 回绕：last=MAX 时接受 seq=0
-                let wrap = last == u32::MAX && seq == 0;
-                if !wrap && seq <= last {
-                    drop(map);
-                    self.rejected.fetch_add(1, Ordering::Relaxed);
-                    return Err(ReceiveError::Replay {
-                        sender: sender_id,
-                        last,
-                        got: seq,
-                    });
+            // M11: Mutex poison 恢复 —— 一次 decrypt panic 不应让整个
+            // 接收链永久死锁。取 into_inner 继续（replay 保护可能损失一次）。
+            let mut map = match self.last_seq_by_sender.lock() {
+                Ok(g) => g,
+                Err(p) => {
+                    tracing::warn!(
+                        "receiver mutex poisoned (prior panic); recovering — some replay protection may be lost"
+                    );
+                    p.into_inner()
                 }
+            };
+            if let Some(last) = map.get(&sender_id).copied()
+                && seq <= last
+            {
+                drop(map);
+                self.rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(ReceiveError::Replay {
+                    sender: sender_id,
+                    last,
+                    got: seq,
+                });
             }
             map.insert(sender_id, seq);
         }

@@ -33,11 +33,30 @@ Rust 原生的 E2EE 实时协作平台。
     cargo cf          # fmt
     cargo cc          # clippy
     cargo cwasm       # check wasm target
+    cargo cwd         # check wasm32 (whole workspace)
     cargo cbr         # build release-wasm
 
     # 开发
     dx serve --package kaede-wasm --platform web
     dx serve --package kaede-desktop --platform desktop
+
+## 已知限制
+
+- **协议版本 v3**：私密频道实时消息需要服务端与客户端同时升级；旧客户端会被拒绝。
+- **Web（wasm）语音/屏幕共享不可用**：语音按钮只切换 UI 状态，媒体层是 native-only；
+  Web 端目前只能聊天。
+- **SfuToken / SDP / ICE 信令未实现**：媒体统一走 LiveKit HTTP token；协议里的
+  WebRTC 点对点信令是遗留路径。
+- **画质档位（8K/4K/码率）未接入媒体层**：当前只影响 UI 显示与日志。
+- **好友请求无实时推送**：需要刷新好友列表才能看到新请求。
+- **私密频道暂不支持表情反应**（会经主群广播泄露频道 id，已显式禁用）。
+- **媒体 seed TTL 8 小时**：崩溃/关页不会调用 `/leave`，seed 最迟在 8 小时后轮换。
+- **Windows 并发编译**：`webrtc-sys` 和 `tao` 在多核并发编译时偶发元数据竞争失败。
+  解决：`$env:CARGO_BUILD_JOBS = "2"` 后重试，或直接重试一次。
+  CI 中已设 `CARGO_BUILD_JOBS: "4"` 作为保守值。
+- **`_webrtc/` 依赖**：`LK_CUSTOM_WEBRTC` 指向 `_webrtc/`（预编译 LiveKit C++ 库，约 430MB，`.gitignore` 忽略）。
+  首次 clone 后需要重新生成或从备份复制，否则 `kaede-media` 构建会失败。
+- **`tools/livekit/livekit-server.exe`**：55MB，`.gitignore` 忽略，用 `scripts/download-livekit.ps1` 下载。
 
 ## 文档
 

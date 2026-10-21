@@ -80,14 +80,35 @@ impl Signer for SignatureKeyPair {
 }
 
 /// MLS 身份。每个 (user, server) 一份，永不跨 server 使用。
+///
+/// HM1: 字段全部私有，只能通过 `generate` / `from_raw_with_ciphersuite` 构造，
+/// 避免外部构造出 uid != credential 或 signature_keys 与 credential 公钥
+/// 不一致的"畸形" identity（MLS 会下游校验失败，但错误时序难以诊断）。
 pub struct MlsIdentity {
-    pub uid: String,
-    pub ciphersuite: Ciphersuite,
-    pub signature_keys: SignatureKeyPair,
-    pub credential_with_key: CredentialWithKey,
+    uid: String,
+    ciphersuite: Ciphersuite,
+    signature_keys: SignatureKeyPair,
+    credential_with_key: CredentialWithKey,
 }
 
 impl MlsIdentity {
+    /// HM1: 只读访问器
+    pub fn uid(&self) -> &str {
+        &self.uid
+    }
+
+    pub fn ciphersuite(&self) -> Ciphersuite {
+        self.ciphersuite
+    }
+
+    pub fn signature_keys(&self) -> &SignatureKeyPair {
+        &self.signature_keys
+    }
+
+    pub fn credential_with_key(&self) -> &CredentialWithKey {
+        &self.credential_with_key
+    }
+
     /// 生成新身份。
     pub fn generate(uid: impl Into<String>) -> Result<Self, MlsError> {
         let uid = uid.into();
@@ -171,6 +192,38 @@ impl MlsIdentity {
     }
 }
 
+/// C8: 从 KeyPackage 原始字节中提取 credential（uid）。
+///
+/// **不做签名验证** —— 本函数只解析结构。用于：
+/// - server `/api/keypackages`：校验上传的 KP 是否属于 auth uid
+/// - client `fetch_key_package`：校验 server 返回的 KP 是否属于请求的 target
+///
+/// 真正的 MLS 签名验证由 `MlsGroupHandle::add_member` 里的
+/// `kp_in.validate(provider.crypto(), ...)` 负责。
+///
+/// # 安全说明
+///
+/// 返回的 credential 使用**严格 UTF-8** 校验（不用 `from_utf8_lossy`）。
+/// 非 UTF-8 的 credential 在 `add_member` 里也会被拒（MM3）——本函数
+/// 是"上游防呆"，让 server 在存储阶段就拒绝恶意 KP。
+pub fn extract_credential_from_kp(kp_bytes: &[u8]) -> Result<String, MlsError> {
+    use openmls::prelude::tls_codec::Deserialize;
+    use openmls::prelude::{KeyPackageIn, ProtocolVersion};
+    use openmls_rust_crypto::RustCrypto;
+
+    let kp_in = KeyPackageIn::tls_deserialize(&mut &kp_bytes[..])
+        .map_err(|e| MlsError::TlsCodec(e.to_string()))?;
+    // validate 会验证协议版本、ciphersuite、签名。对恶意 KP 是额外防线
+    // （attacker 上传非 Mls10 或签名无效的 KP 在 server 端就会被拒）。
+    let kp = kp_in
+        .validate(&RustCrypto::default(), ProtocolVersion::Mls10)
+        .map_err(crate::error::mls_err)?;
+    let cred_bytes = kp.leaf_node().credential().serialized_content();
+    std::str::from_utf8(cred_bytes)
+        .map_err(|e| MlsError::OpenMls(format!("credential not UTF-8: {}", e)))
+        .map(|s| s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,8 +231,8 @@ mod tests {
     #[test]
     fn generate_identity() {
         let id = MlsIdentity::generate("alice").unwrap();
-        assert_eq!(id.uid, "alice");
-        assert_eq!(id.ciphersuite, DEFAULT_CIPHERSUITE);
+        assert_eq!(id.uid(), "alice");
+        assert_eq!(id.ciphersuite(), DEFAULT_CIPHERSUITE);
     }
 
     #[test]
@@ -187,8 +240,8 @@ mod tests {
         let a = MlsIdentity::generate("alice").unwrap();
         let b = MlsIdentity::generate("bob").unwrap();
         assert_ne!(
-            a.signature_keys.to_public_vec(),
-            b.signature_keys.to_public_vec()
+            a.signature_keys().to_public_vec(),
+            b.signature_keys().to_public_vec()
         );
     }
 }

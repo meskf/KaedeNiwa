@@ -37,6 +37,51 @@ async fn load_messages(mut app: AppState, conv_id: String) {
     }
 }
 
+/// 加载更早的 DM 消息（按 ts 游标向前翻页）。
+async fn load_older_messages(mut app: AppState, conv_id: String) {
+    let before_ts = app
+        .dm_messages
+        .read()
+        .get(&conv_id)
+        .and_then(|list| list.first().map(|m| m.ts))
+        .unwrap_or(i64::MAX);
+    let room_opt = app.room.read().clone();
+    let Some(room) = room_opt else { return };
+    match room.dm_load_history(&conv_id, Some(before_ts), 100).await {
+        Ok(history) => {
+            let older: Vec<UiMessage> = history
+                .into_iter()
+                .map(|h| UiMessage {
+                    id: format!("dm-{}-{}", conv_id, h.ts),
+                    channel_id: conv_id.clone(),
+                    author: h.sender.clone(),
+                    author_initial: h
+                        .sender
+                        .chars()
+                        .next()
+                        .map(|c| c.to_string())
+                        .unwrap_or_default(),
+                    day: crate::observer::day_label(h.ts),
+                    time: crate::observer::format_hhmm(h.ts),
+                    ts: h.ts,
+                    text: h.plaintext,
+                    attachments: h.attachments,
+                    reply_to: h.reply_to,
+                    reactions: vec![],
+                })
+                .collect();
+            let mut map = app.dm_messages.write();
+            let list = map.entry(conv_id).or_default();
+            let mut combined = older;
+            combined.append(list);
+            combined.sort_by_key(|m| m.ts);
+            combined.dedup_by(|a, b| a.ts == b.ts && a.author == b.author && a.text == b.text);
+            *list = combined;
+        }
+        Err(e) => tracing::warn!("dm_load_history(before): {}", e),
+    }
+}
+
 async fn load_conversations(mut app: AppState) {
     let room_opt = app.room.read().clone();
     let Some(room) = room_opt else { return };
@@ -110,6 +155,19 @@ pub fn DmView() -> Element {
             }
             div {
                 style: "flex: 1; overflow-y: auto; padding: 16px 24px; display: flex; flex-direction: column; gap: 10px;",
+                button {
+                    class: "msg-load-earlier",
+                    onclick: {
+                        let cid = conv_id.clone();
+                        move |_| {
+                            let cid = cid.clone();
+                            spawn(async move {
+                                load_older_messages(app, cid).await;
+                            });
+                        }
+                    },
+                    "加载更早"
+                }
                 for m in messages {
                     div {
                         style: "display: flex; gap: 10px; align-items: flex-start;",
@@ -134,6 +192,18 @@ pub fn DmView() -> Element {
                                 style: "font-size: 14px; color: var(--fg); margin-top: 2px; white-space: pre-wrap; word-wrap: break-word;",
                                 "{m.text}"
                             }
+                            // M57: DM 附件渲染（复用 content.rs 的 URL 白名单）
+                            if !m.attachments.is_empty() {
+                                div {
+                                    style: "margin-top: 6px; display: flex; flex-direction: column; gap: 4px;",
+                                    for att in m.attachments.iter() {
+                                        crate::attachment::AttachmentView {
+                                            att: att.clone(),
+                                            target_id: m.channel_id.clone(),
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -150,6 +220,36 @@ pub fn DmView() -> Element {
                         style: "flex: 1; padding: 10px 14px; border-radius: 8px; border: 1px solid rgba(128,128,128,0.35); background: rgba(0,0,0,0.05); color: var(--fg); font-size: 14px; outline: none;",
                     }
                     button {
+                        class: "btn-secondary",
+                        title: "上传附件",
+                        style: "padding: 8px 12px;",
+                        onclick: move |_| {
+                            let _ = dioxus::document::eval(
+                                "document.getElementById('kaede-dm-file-input')?.click();",
+                            );
+                        },
+                        "📎"
+                    }
+                    input {
+                        id: "kaede-dm-file-input",
+                        r#type: "file",
+                        multiple: true,
+                        style: "display:none;",
+                        onchange: {
+                            let cid = conv_id.clone();
+                            move |e: dioxus::html::FormEvent| {
+                                let files = e.files();
+                                if files.is_empty() {
+                                    return;
+                                }
+                                let _ = dioxus::document::eval(
+                                    "document.getElementById('kaede-dm-file-input').value='';",
+                                );
+                                send_dm_attachments(ui, app, cid.clone(), files);
+                            }
+                        },
+                    }
+                    button {
                         class: "btn-primary",
                         onclick: {
                             let cid = conv_id.clone();
@@ -157,11 +257,16 @@ pub fn DmView() -> Element {
                                 let text = input.read().clone();
                                 if text.is_empty() { return; }
                                 let cid2 = cid.clone();
+                                let mut ui_for_err = ui;
                                 spawn(async move {
                                     let room_opt = app.room.read().clone();
                                     let Some(room) = room_opt else { return };
-                                    if let Err(e) = room.send_dm(&cid2, &text).await {
+                                    let result = room.send_dm(&cid2, &text).await;
+                                    if let Err(e) = &result {
                                         tracing::warn!("send_dm: {}", e);
+                                        ui_for_err
+                                            .toast
+                                            .set(Some((format!("发送失败: {}", e), true)));
                                     }
                                     input.set(String::new());
                                 });
@@ -173,6 +278,39 @@ pub fn DmView() -> Element {
             }
         }
     }
+}
+
+/// 上传 DM 附件并发送（本地回显由 ClientEvent::DmReceived 负责）。
+fn send_dm_attachments(
+    mut ui: UiState,
+    app: AppState,
+    conv_id: String,
+    files: Vec<dioxus::html::FileData>,
+) {
+    let room = app.room.read().clone();
+    spawn(async move {
+        let Some(room) = room else { return };
+        // 附件 key 来自 DM group 的 File purpose；先确保 group 存在。
+        if let Err(e) = room.ensure_dm_group(&conv_id).await {
+            ui.toast.set(Some((format!("初始化 DM 失败: {}", e), true)));
+            return;
+        }
+        let mut atts = Vec::new();
+        for f in files {
+            match crate::attachment::upload_file(room.clone(), &conv_id, f).await {
+                Ok(a) => atts.push(a),
+                Err(e) => {
+                    ui.toast.set(Some((format!("上传失败: {}", e), true)));
+                }
+            }
+        }
+        if atts.is_empty() {
+            return;
+        }
+        if let Err(e) = room.send_dm_with_attachments(&conv_id, "", &atts).await {
+            ui.toast.set(Some((format!("发送附件失败: {}", e), true)));
+        }
+    });
 }
 
 #[component]
@@ -215,11 +353,13 @@ pub fn DmSidebar() -> Element {
     let mut ui = use_context::<UiState>();
     let mut new_peer = use_signal(String::new);
 
-    use_future(move || {
+    // M58: use_effect + current_server.read() 订阅，切服务器时重拉
+    use_effect(move || {
+        let _sid = app.current_server.read();
         let app = app;
-        async move {
+        spawn(async move {
             load_conversations(app).await;
-        }
+        });
     });
 
     let server_id = app.current_server.read().clone();

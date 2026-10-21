@@ -6,5 +6,6 @@ edition.workspace = true
 
 [dependencies]
 serde     = { workspace = true }
+serde_bytes = { workspace = true }
 ciborium  = { workspace = true }
 thiserror = { workspace = true }

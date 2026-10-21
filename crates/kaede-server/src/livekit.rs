@@ -20,6 +20,7 @@ type HmacSha256 = Hmac<Sha256>;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/livekit/token", post(issue_token))
+        .route("/api/livekit/leave", post(leave_room))
         .route("/api/livekit/e2ee-key", post(issue_e2ee_key))
         .with_state(state)
 }
@@ -66,19 +67,30 @@ async fn issue_token(
     let room = format!("kaede-{}", req.channel_id);
     let identity = uid.as_str().to_string();
 
-    // P0-2: 房间级 e2ee seed（首次生成后复用）
+    // P0-2: 房间级 e2ee seed。
+    //
+    // seed 在“同一个媒体会话”内共享；最后一个参与者 leave 后条目被删除，
+    // 下一次进入会生成全新 seed。这保证：
+    // - 同一次通话内所有人 key 一致（只要 MLS epoch 也一致）；
+    // - 跨通话 key 不同 → LiveKit SDK ratchet 从 0 重启也不会 nonce 复用。
     let seed: [u8; 32] = {
         use rand::RngCore;
+        use std::collections::HashMap;
         let mut seeds = state.room_media_seeds.lock().unwrap();
-        if let Some(existing) = seeds.get(&room) {
-            *existing
-        } else {
+        let now = std::time::Instant::now();
+        let entry = seeds.entry(room.clone()).or_insert_with(|| {
             let mut s = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut s);
-            seeds.insert(room.clone(), s);
             tracing::info!("[livekit] generated fresh e2ee seed for room={}", room);
-            s
-        }
+            crate::state::RoomMedia {
+                seed: s,
+                participants: HashMap::new(),
+                last_used: now,
+            }
+        });
+        entry.participants.insert(uid.as_str().to_string(), now);
+        entry.last_used = now;
+        entry.seed
     };
     let e2ee_seed = URL_SAFE_NO_PAD.encode(seed);
 
@@ -138,6 +150,38 @@ pub fn make_jwt(
 // ============================================================
 // E2EE key（确定性派生）
 // ============================================================
+
+/// 离开媒体房间。
+///
+/// 最后一个参与者离开时删除 seed，下次进入重新生成（防 nonce 复用）。
+#[derive(Deserialize)]
+struct LeaveReq {
+    channel_id: String,
+}
+
+async fn leave_room(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<LeaveReq>,
+) -> Result<StatusCode, ApiError> {
+    let uid = authenticate(&state, &headers).await?;
+    if req.channel_id.is_empty() {
+        return Err(ApiError::BadRequest("channel_id required".into()));
+    }
+    let room = format!("kaede-{}", req.channel_id);
+    {
+        let mut seeds = state.room_media_seeds.lock().unwrap();
+        if let Some(entry) = seeds.get_mut(&room) {
+            entry.participants.remove(uid.as_str());
+            entry.last_used = std::time::Instant::now();
+            if entry.participants.is_empty() {
+                seeds.remove(&room);
+                tracing::info!("[livekit] media session ended, seed dropped room={}", room);
+            }
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
 
 #[derive(Deserialize)]
 struct E2eeKeyReq {

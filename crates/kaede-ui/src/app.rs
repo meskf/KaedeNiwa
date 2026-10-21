@@ -24,7 +24,7 @@ pub struct ObserverRef(pub Arc<UiObserver>);
 pub fn App() -> Element {
     let ui = use_context_provider(UiState::new);
     let app_state = use_context_provider(AppState::new);
-    let _voice_state = use_context_provider(VoiceState::new);
+    let voice_state = use_context_provider(VoiceState::new);
     let _voice_controls = use_context_provider(VoiceControls::new);
     let _i18n = use_context_provider(I18n::new);
 
@@ -34,11 +34,14 @@ pub fn App() -> Element {
     });
     use_context_provider(|| ObserverRef(observer.clone()));
 
+    let observer_for_events = observer.clone();
     use_future(move || {
         let rx = rx.clone();
+        let observer = observer_for_events.clone();
         async move {
             while let Ok(event) = rx.recv().await {
-                apply_event(app_state, ui, event);
+                // M55 扩展：把 VoiceState 也传进去，以便处理 Disconnected 清理
+                apply_event(app_state, ui, voice_state, observer.clone(), event);
             }
         }
     });
@@ -87,11 +90,12 @@ fn ToastContainer() -> Element {
     use_effect(move || {
         if ui.toast.read().is_some() {
             spawn(async move {
+                // M52: wasm 上 document::eval 是同步返回，必须 await 返回的 Promise
+                // 才能真等 3s。之前注入 setTimeout 但立即返回，toast 一闪而过。
                 #[cfg(target_arch = "wasm32")]
                 {
-                    let _ = dioxus::document::eval(
-                        "setTimeout(() => window.dispatchEvent(new Event('dummy')), 3000);",
-                    );
+                    let _ = dioxus::document::eval("return new Promise(r => setTimeout(r, 3000));")
+                        .await;
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {

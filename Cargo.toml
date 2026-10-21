@@ -11,8 +11,9 @@ members = [
     "crates/kaede-wasm",
     "crates/kaede-desktop",
     "crates/kaede-capture",
-    "crates/kaede-media", "crates/kaede-livekit-spike",
+    "crates/kaede-media",
     "crates/kaede-media-session",
+    "crates/kaede-livekit-web",
 ]
 
 [workspace.package]
@@ -29,9 +30,11 @@ kaede-mls      = { path = "crates/kaede-mls", version = "0.0.1" }
 kaede-storage  = { path = "crates/kaede-storage", version = "0.0.1" }
 kaede-client   = { path = "crates/kaede-client", version = "0.0.1" }
 kaede-ui       = { path = "crates/kaede-ui", version = "0.0.1" }
+kaede-livekit-web = { path = "crates/kaede-livekit-web", version = "0.0.1" }
 
 # serialization
 serde    = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
 ciborium = "0.2"
 
 # crypto

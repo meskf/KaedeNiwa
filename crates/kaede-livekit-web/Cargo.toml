@@ -1,0 +1,18 @@
+[package]
+license.workspace = true
+name = "kaede-livekit-web"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+thiserror = { workspace = true }
+tracing  = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen         = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys               = { workspace = true }
+web-sys              = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "Node"] }

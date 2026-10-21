@@ -259,21 +259,140 @@ async fn dm_b2_carol_cryptographic_isolation() {
     println!("[test] isolation verified: alice/bob have group, carol does not");
 }
 
-// `dm_b2_bob_offline_welcome_via_history` 已移除。
+// `dm_b2_bob_offline_welcome_via_history` 已移除（理由保留）。
 //
 // 原因：MLS Welcome 是一次性的（openmls 消费后删除 KeyPackageBundle 私钥），
 // 重放同一个 Welcome 会被协议层拒绝（NoMatchingKeyPackage）。
 //
 // 真实场景下 Bob 重启后恢复 DM 会话的正确做法是**把 group state 持久化到 storage**
-// （Signal / Wire 的做法），而不是重放 Welcome。
-//
-// 这是已知架构缺陷（TODO），下一轮实现 `dm_groups` 持久化：
-//   - dm_ensure_group / dm_join_group 成功后保存 snapshot 到 storage
-//     路径：dm_mls/{server_url}/{login_id}/{conv_id}
-//   - RoomSession::connect 时 load
-//
-// 未实现前：Bob 重启后 DM 会重建新 group（与 Alice 的 group 不匹配），
-// 只影响 Bob 重启后的恢复，不影响正常在线会话。
+// （Signal / Wire 的做法），而不是重放 Welcome。B3+ 已实现，见下方
+// `dm_b2_persists_snapshot_to_storage`。
+
+// ============================================================================
+// B3+：DM group 持久化 e2e 测试
+// ============================================================================
+
+/// B3+：`send_dm` / 收到 Welcome 之后，两侧 storage 都应出现 `dm/{server_url}/{conv_id}`。
+///
+/// 这是后续「Bob 重启能恢复 DM group」的必要前提。恢复路径由 `RoomSession::
+/// connect_with_storage` 在连接时自动执行（见 `load_aux_snapshots_from_storage`），
+/// 本测试只验证「写盘」这一半，读取路径由持久化 hook 的单元测试覆盖。
+#[tokio::test]
+async fn dm_b2_persists_snapshot_to_storage() {
+    let addr = kaede_server::spawn_test_server().await.unwrap();
+    let http = format!("http://{}", addr);
+    let ws = format!("ws://{}/ws", addr);
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let alice_db = std::env::temp_dir()
+        .join(format!("kaede_dm_alice_{}.db", unique))
+        .to_string_lossy()
+        .to_string();
+    let bob_db = std::env::temp_dir()
+        .join(format!("kaede_dm_bob_{}.db", unique))
+        .to_string_lossy()
+        .to_string();
+
+    let alice_store = kaede_client::open_default_store(&alice_db)
+        .await
+        .expect("alice store");
+    let bob_store = kaede_client::open_default_store(&bob_db)
+        .await
+        .expect("bob store");
+
+    let alice = RoomSession::connect_with_storage(
+        &http,
+        &ws,
+        "alice",
+        "alice1234",
+        Some(alice_store.clone()),
+        None,
+    )
+    .await
+    .expect("alice connect");
+    let bob = RoomSession::connect_with_storage(
+        &http,
+        &ws,
+        "bob",
+        "bob12345",
+        Some(bob_store.clone()),
+        None,
+    )
+    .await
+    .expect("bob connect");
+
+    alice.spawn_event_loop();
+    bob.spawn_event_loop();
+
+    alice.become_host().await.expect("alice host");
+    alice.join_room().await.expect("alice join");
+    bob.become_guest().await.expect("bob guest");
+    bob.join_room().await.expect("bob join");
+    sleep(Duration::from_millis(300)).await;
+    alice
+        .host_add_peer(&UserId::from("bob"))
+        .await
+        .expect("alice add bob");
+    for _ in 0..120 {
+        if alice.is_mls_ready() && bob.is_mls_ready() && alice.member_count() == 2 {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(alice.member_count(), 2);
+
+    // 建立 DM（Alice 首条消息 → Welcome → Bob 加入 → dm_join_group）
+    let conv = alice.open_dm("bob").await.expect("alice open_dm");
+    let conv_id = conv.conv_id.clone();
+    alice
+        .send_dm(&conv_id, "hello bob (persist test)")
+        .await
+        .expect("alice send_dm");
+
+    // 等 Bob 收到 Welcome 并处理
+    for _ in 0..120 {
+        if bob.connection().dm_has_group(&conv_id) {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        bob.connection().dm_has_group(&conv_id),
+        "bob should have dm group after welcome"
+    );
+
+    // 等 dirty flush 落地（event loop 每条消息后 flush 一次；dm_join_group 后也应如此）
+    sleep(Duration::from_millis(600)).await;
+
+    let alice_keys = alice_store.list_keys("dm").await.expect("list alice dm");
+    let bob_keys = bob_store.list_keys("dm").await.expect("list bob dm");
+
+    assert!(
+        alice_keys.iter().any(|k| k.ends_with(&conv_id)),
+        "alice storage missing dm snapshot for {}: {:?}",
+        conv_id,
+        alice_keys,
+    );
+    assert!(
+        bob_keys.iter().any(|k| k.ends_with(&conv_id)),
+        "bob storage missing dm snapshot for {}: {:?}",
+        conv_id,
+        bob_keys,
+    );
+
+    println!("[test] alice dm keys: {:?}", alice_keys);
+    println!("[test] bob   dm keys: {:?}", bob_keys);
+
+    drop(alice);
+    drop(bob);
+    drop(alice_store);
+    drop(bob_store);
+    let _ = std::fs::remove_file(&alice_db);
+    let _ = std::fs::remove_file(&bob_db);
+}
 
 #[tokio::test]
 async fn dm_b2_media_isolation() {
@@ -337,4 +456,165 @@ async fn dm_b2_media_isolation() {
         r.map(|(t, _)| t.room)
     );
     println!("[test] carol rejected from DM media");
+}
+
+// ============================================================================
+// B3+：DM 持久化 —— 重启恢复 e2e
+// ============================================================================
+
+/// B3+：Bob 断开 + 用同一个 storage 重连后，应自动从 snapshot 恢复 dm group，
+/// 且能解密 Alice 在重启后新发的消息（不依赖重放 Welcome）。
+///
+/// 这验证了持久化的**读取侧**：`RoomSession::connect_with_storage` →
+/// `load_aux_snapshots_from_storage` → `dm_restore_from_snapshot_with_cipher`。
+#[tokio::test]
+async fn dm_b2_bob_restart_recovers_from_snapshot() {
+    let addr = kaede_server::spawn_test_server().await.unwrap();
+    let http = format!("http://{}", addr);
+    let ws = format!("ws://{}/ws", addr);
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let alice_db = std::env::temp_dir()
+        .join(format!("kaede_dm_alice_restart_{}.db", unique))
+        .to_string_lossy()
+        .to_string();
+    let bob_db = std::env::temp_dir()
+        .join(format!("kaede_dm_bob_restart_{}.db", unique))
+        .to_string_lossy()
+        .to_string();
+
+    let alice_store = kaede_client::open_default_store(&alice_db)
+        .await
+        .expect("alice store");
+    let bob_store = kaede_client::open_default_store(&bob_db)
+        .await
+        .expect("bob store");
+
+    let alice = RoomSession::connect_with_storage(
+        &http,
+        &ws,
+        "alice",
+        "alice1234",
+        Some(alice_store.clone()),
+        None,
+    )
+    .await
+    .expect("alice connect");
+    let bob = RoomSession::connect_with_storage(
+        &http,
+        &ws,
+        "bob",
+        "bob12345",
+        Some(bob_store.clone()),
+        None,
+    )
+    .await
+    .expect("bob connect");
+
+    alice.spawn_event_loop();
+    bob.spawn_event_loop();
+
+    alice.become_host().await.expect("alice host");
+    alice.join_room().await.expect("alice join");
+    bob.become_guest().await.expect("bob guest");
+    bob.join_room().await.expect("bob join");
+    sleep(Duration::from_millis(300)).await;
+    alice
+        .host_add_peer(&UserId::from("bob"))
+        .await
+        .expect("alice add bob");
+    for _ in 0..120 {
+        if alice.is_mls_ready() && bob.is_mls_ready() && alice.member_count() == 2 {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(alice.member_count(), 2);
+
+    // 建立 DM
+    let conv = alice.open_dm("bob").await.expect("alice open_dm");
+    let conv_id = conv.conv_id.clone();
+    alice
+        .send_dm(&conv_id, "hello bob (restart test)")
+        .await
+        .expect("alice send_dm");
+    for _ in 0..120 {
+        if bob.connection().dm_has_group(&conv_id) {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        bob.connection().dm_has_group(&conv_id),
+        "bob should have dm group after welcome"
+    );
+
+    // 等 snapshot 写盘
+    sleep(Duration::from_millis(600)).await;
+    let bob_keys = bob_store.list_keys("dm").await.expect("list bob dm");
+    assert!(
+        bob_keys.iter().any(|k| k.ends_with(&conv_id)),
+        "bob storage missing dm snapshot: {:?}",
+        bob_keys,
+    );
+
+    // === 模拟 Bob 重启 ===
+    bob.connection().close().await.ok();
+    drop(bob);
+    // 等旧 event loop 退出 + 服务端清理 peer
+    sleep(Duration::from_millis(300)).await;
+
+    // 用同一个 db 重连
+    let bob_restored = RoomSession::connect_with_storage(
+        &http,
+        &ws,
+        "bob",
+        "bob12345",
+        Some(bob_store.clone()),
+        None,
+    )
+    .await
+    .expect("bob restore connect");
+    bob_restored.spawn_event_loop();
+
+    // 核心断言：dm group 从 snapshot 恢复
+    assert!(
+        bob_restored.connection().dm_has_group(&conv_id),
+        "bob should recover dm group from storage after restart"
+    );
+
+    // Alice 发新消息 → Bob 恢复后能解密
+    alice
+        .send_dm(&conv_id, "after bob restart")
+        .await
+        .expect("alice send after restart");
+    sleep(Duration::from_millis(500)).await;
+
+    let history = bob_restored
+        .dm_load_history(&conv_id, None, 20)
+        .await
+        .expect("bob load history after restart");
+    let texts: Vec<String> = history.iter().map(|h| h.plaintext.clone()).collect();
+    assert!(
+        texts.iter().any(|s| s == "after bob restart"),
+        "bob should decrypt post-restart message; got: {:?}",
+        texts
+    );
+    assert!(
+        texts.iter().any(|s| s == "hello bob (restart test)"),
+        "bob should recover pre-restart message from history; got: {:?}",
+        texts
+    );
+
+    println!("[test] restart recovery ok; history: {:?}", texts);
+
+    drop(bob_restored);
+    drop(alice);
+    drop(alice_store);
+    drop(bob_store);
+    let _ = std::fs::remove_file(&alice_db);
+    let _ = std::fs::remove_file(&bob_db);
 }

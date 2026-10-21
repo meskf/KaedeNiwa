@@ -10,6 +10,16 @@ use crate::error::{MlsError, mls_err};
 use crate::identity::MlsIdentity;
 use crate::{SFRAME_EXPORT_LABEL, SFRAME_KEY_LEN, SframePurpose};
 
+/// 保留多少个 past epoch 的消息密钥。
+///
+/// 默认 0 会导致“任何成员变更后，旧 epoch 的聊天历史全部解不开”。
+/// 产品需要可回放历史，因此这里显式保留 64 个 epoch。
+///
+/// **安全权衡**：past epoch secrets 会被持久化，削弱前向保密
+/// （拿到当前 state 的攻击者可解密最近 64 个 epoch 的消息）。
+/// 这是为了历史可读性做的明确取舍；不要在同一 epoch 内无限累积。
+pub const MAX_PAST_EPOCHS: usize = 64;
+
 /// MLS 群组句柄。
 pub struct MlsGroupHandle {
     group: MlsGroup,
@@ -23,15 +33,16 @@ impl MlsGroupHandle {
         provider: &KaedeMlsProvider,
     ) -> Result<Self, MlsError> {
         let config = MlsGroupCreateConfig::builder()
-            .ciphersuite(identity.ciphersuite)
+            .ciphersuite(identity.ciphersuite())
             .use_ratchet_tree_extension(true)
+            .max_past_epochs(MAX_PAST_EPOCHS)
             .build();
 
         let group = MlsGroup::new(
             provider,
-            &identity.signature_keys,
+            identity.signature_keys(),
             &config,
-            identity.credential_with_key.clone(),
+            identity.credential_with_key().clone(),
         )
         .map_err(mls_err)?;
 
@@ -53,6 +64,7 @@ impl MlsGroupHandle {
 
         let join_config = MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
+            .max_past_epochs(MAX_PAST_EPOCHS)
             .build();
 
         let staged = StagedWelcome::new_from_welcome(provider, &join_config, welcome, None)
@@ -79,8 +91,15 @@ impl MlsGroupHandle {
         // P0-A: reject members whose sender_id collides with an existing one.
         // SFrame uses SHA256(uid)[0..4] as the high 32 bits of the counter,
         // so collision means shared nonce space => AES-GCM catastrophic failure.
-        let candidate_uid =
-            String::from_utf8_lossy(kp.leaf_node().credential().serialized_content()).to_string();
+        //
+        // MM3: 严格 UTF-8（不再用 from_utf8_lossy）。恶意 KP 用非 UTF-8
+        // credential 会导致:
+        //   - candidate_uid 变成 "alice�"，不与 "alice" 碰撞
+        //   - 但 member_uids() 里也有 mangling → remove_member_by_uid("alice") 找不到
+        let cred_bytes = kp.leaf_node().credential().serialized_content();
+        let candidate_uid = std::str::from_utf8(cred_bytes)
+            .map_err(|e| MlsError::OpenMls(format!("credential not UTF-8: {}", e)))?
+            .to_string();
         let existing: Vec<String> = self.member_uids();
         if let Some(other) = kaede_crypto::find_sender_id_collision(
             &candidate_uid,
@@ -94,7 +113,7 @@ impl MlsGroupHandle {
 
         let (commit, welcome, _group_info) = self
             .group
-            .add_members(provider, &self.identity.signature_keys, &[kp])
+            .add_members(provider, self.identity.signature_keys(), &[kp])
             .map_err(mls_err)?;
         self.group.merge_pending_commit(provider).map_err(mls_err)?;
 
@@ -139,7 +158,7 @@ impl MlsGroupHandle {
     ) -> Result<Vec<u8>, MlsError> {
         let (commit, _, _) = self
             .group
-            .remove_members(provider, &self.identity.signature_keys, &[leaf])
+            .remove_members(provider, self.identity.signature_keys(), &[leaf])
             .map_err(mls_err)?;
         self.group.merge_pending_commit(provider).map_err(mls_err)?;
         commit
@@ -154,7 +173,7 @@ impl MlsGroupHandle {
         let leaf_node_params = LeafNodeParameters::default();
         let bundle = self
             .group
-            .self_update(provider, &self.identity.signature_keys, leaf_node_params)
+            .self_update(provider, self.identity.signature_keys(), leaf_node_params)
             .map_err(mls_err)?;
         self.group.merge_pending_commit(provider).map_err(mls_err)?;
 
@@ -183,9 +202,17 @@ impl MlsGroupHandle {
     ) -> Result<Self, MlsError> {
         use openmls::prelude::GroupId;
         let gid = GroupId::from_slice(group_id);
-        let group = MlsGroup::load(provider.storage(), &gid)
+        let mut group = MlsGroup::load(provider.storage(), &gid)
             .map_err(mls_err)?
             .ok_or_else(|| MlsError::GroupNotFound(format!("{:?}", group_id)))?;
+        // 旧 snapshot 里的 join config 可能是 max_past_epochs=0（历史解不开）。
+        // 恢复时显式升级，让历史可读。
+        group
+            .set_past_epoch_deletion_policy(
+                provider,
+                PastEpochDeletionPolicy::MaxEpochs(MAX_PAST_EPOCHS),
+            )
+            .map_err(|e| MlsError::OpenMls(format!("set past epoch policy: {:?}", e)))?;
         Ok(Self { group, identity })
     }
 
@@ -197,7 +224,7 @@ impl MlsGroupHandle {
     ) -> Result<Vec<u8>, MlsError> {
         let out = self
             .group
-            .create_message(provider, &self.identity.signature_keys, plaintext)
+            .create_message(provider, self.identity.signature_keys(), plaintext)
             .map_err(mls_err)?;
         out.tls_serialize_detached()
             .map_err(|e| MlsError::TlsCodec(e.to_string()))
@@ -370,11 +397,38 @@ impl MlsGroupHandle {
     }
 
     /// 当前群组所有成员 uid（从 credential 解析），用于 sender_id 碰撞检查。
+    ///
+    /// MM3: 使用 `from_utf8_lossy` —— 这里的 credential 已经通过 `add_member`
+    /// 的严格 UTF-8 校验，非 UTF-8 成员不可能进群。保留 lossy 作为兜底，
+    /// 避免 group state 异常时整个函数 panic。
     pub fn member_uids(&self) -> Vec<String> {
         self.group
             .members()
             .map(|m| String::from_utf8_lossy(m.credential.serialized_content()).to_string())
             .collect()
+    }
+
+    /// HM2: 添加成员并**校验 KeyPackage 的 credential 与 `expected_uid` 一致**。
+    ///
+    /// `add_member` 不校验 credential —— 恶意 KeyPackage 可让 attacker
+    /// 冒充任意 uid 加入群（C8/H8）。本方法在 `add_member` 之前先验证
+    /// credential，是防御"KP 与身份脱钩"的第一道防线。
+    ///
+    /// **新代码应优先使用本方法。**
+    pub fn add_member_for(
+        &mut self,
+        provider: &KaedeMlsProvider,
+        key_package_bytes: &[u8],
+        expected_uid: &str,
+    ) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
+        let cred = crate::identity::extract_credential_from_kp(key_package_bytes)?;
+        if cred != expected_uid {
+            return Err(MlsError::CredentialMismatch {
+                expected: expected_uid.to_string(),
+                got: cred,
+            });
+        }
+        self.add_member(provider, key_package_bytes)
     }
 }
 
@@ -421,10 +475,10 @@ mod tests {
         let bob_id = Arc::new(MlsIdentity::generate("bob").unwrap());
         let bob_kp_bundle = KeyPackage::builder()
             .build(
-                bob_id.ciphersuite,
+                bob_id.ciphersuite(),
                 &bob_provider,
-                &bob_id.signature_keys,
-                bob_id.credential_with_key.clone(),
+                bob_id.signature_keys(),
+                bob_id.credential_with_key().clone(),
             )
             .expect("build kp");
         let bob_kp_bytes = bob_kp_bundle
@@ -466,10 +520,10 @@ mod tests {
         let bob_id = Arc::new(MlsIdentity::generate("bob").unwrap());
         let bob_kp_bundle = KeyPackage::builder()
             .build(
-                bob_id.ciphersuite,
+                bob_id.ciphersuite(),
                 &bob_provider,
-                &bob_id.signature_keys,
-                bob_id.credential_with_key.clone(),
+                bob_id.signature_keys(),
+                bob_id.credential_with_key().clone(),
             )
             .unwrap();
         let bob_kp_bytes = bob_kp_bundle
@@ -524,10 +578,10 @@ mod tests {
         let id_b = Arc::new(MlsIdentity::generate(&b).unwrap());
         let kp_bundle = KeyPackage::builder()
             .build(
-                id_b.ciphersuite,
+                id_b.ciphersuite(),
                 &provider_b,
-                &id_b.signature_keys,
-                id_b.credential_with_key.clone(),
+                id_b.signature_keys(),
+                id_b.credential_with_key().clone(),
             )
             .unwrap();
         let kp_bytes = kp_bundle.key_package().tls_serialize_detached().unwrap();
@@ -540,6 +594,62 @@ mod tests {
         assert_eq!(group.member_count(), 1, "group must not change");
     }
 
+    /// P0-2 回归：成员在 epoch 前进后仍能解密上一个 epoch 的聊天历史。
+    ///
+    /// `max_past_epochs(64)` 之前默认是 0，导致任何成员变更后旧历史全部丢失。
+    #[test]
+    fn past_epoch_message_still_decrypts_for_existing_member() {
+        let ap = new_provider();
+        let ai = Arc::new(MlsIdentity::generate("alice").unwrap());
+        let mut alice = MlsGroupHandle::create(ai.clone(), &ap).unwrap();
+
+        let bp = new_provider();
+        let bi = Arc::new(MlsIdentity::generate("bob").unwrap());
+        let bob_kp = KeyPackage::builder()
+            .build(
+                bi.ciphersuite(),
+                &bp,
+                bi.signature_keys(),
+                bi.credential_with_key().clone(),
+            )
+            .unwrap()
+            .key_package()
+            .tls_serialize_detached()
+            .unwrap();
+        let (_c1, w1) = alice.add_member(&ap, &bob_kp).unwrap();
+        let mut bob = MlsGroupHandle::join(bi.clone(), &bp, &w1).unwrap();
+
+        // epoch 1 的消息
+        let ct = alice.encrypt_app(&ap, b"history").unwrap();
+
+        // 加入 carol → epoch 2
+        let cp = new_provider();
+        let ci = Arc::new(MlsIdentity::generate("carol").unwrap());
+        let carol_kp = KeyPackage::builder()
+            .build(
+                ci.ciphersuite(),
+                &cp,
+                ci.signature_keys(),
+                ci.credential_with_key().clone(),
+            )
+            .unwrap()
+            .key_package()
+            .tls_serialize_detached()
+            .unwrap();
+        let (commit2, w2) = alice.add_member(&ap, &carol_kp).unwrap();
+        bob.process_handshake(&bp, &commit2).unwrap();
+        let carol = MlsGroupHandle::join(ci, &cp, &w2).unwrap();
+        assert_eq!(bob.epoch(), alice.epoch());
+        assert_eq!(carol.epoch(), alice.epoch());
+
+        // Bob 是 epoch 1 的成员 → 仍可解密 epoch 1 的历史
+        let pt = bob.decrypt_app(&bp, &ct).unwrap();
+        assert_eq!(pt, b"history");
+
+        // Carol 是 epoch 2 才加入的 → 没有 epoch 1 的密钥，不能解密（符合 MLS 语义）
+        assert!(carol.epoch() >= 2 && bob.epoch() >= 2);
+    }
+
     #[test]
     fn alice_bob_agree_on_sframe_key() {
         let alice_provider = new_provider();
@@ -550,10 +660,10 @@ mod tests {
         let bob_id = Arc::new(MlsIdentity::generate("bob").unwrap());
         let bob_kp_bundle = KeyPackage::builder()
             .build(
-                bob_id.ciphersuite,
+                bob_id.ciphersuite(),
                 &bob_provider,
-                &bob_id.signature_keys,
-                bob_id.credential_with_key.clone(),
+                bob_id.signature_keys(),
+                bob_id.credential_with_key().clone(),
             )
             .unwrap();
         let bob_kp_bytes = bob_kp_bundle
@@ -638,10 +748,10 @@ mod purpose_tests {
         let bob_id = Arc::new(MlsIdentity::generate("bob").unwrap());
         let bob_kp_bundle = KeyPackage::builder()
             .build(
-                bob_id.ciphersuite,
+                bob_id.ciphersuite(),
                 &bob_provider,
-                &bob_id.signature_keys,
-                bob_id.credential_with_key.clone(),
+                bob_id.signature_keys(),
+                bob_id.credential_with_key().clone(),
             )
             .unwrap();
         let bob_kp_bytes = bob_kp_bundle
@@ -707,10 +817,10 @@ mod with_extra_tests {
         let bob_id = Arc::new(MlsIdentity::generate("bob").unwrap());
         let bob_kp_bundle = KeyPackage::builder()
             .build(
-                bob_id.ciphersuite,
+                bob_id.ciphersuite(),
                 &bob_provider,
-                &bob_id.signature_keys,
-                bob_id.credential_with_key.clone(),
+                bob_id.signature_keys(),
+                bob_id.credential_with_key().clone(),
             )
             .unwrap();
         let bob_kp_bytes = bob_kp_bundle

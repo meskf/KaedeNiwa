@@ -11,6 +11,9 @@ dioxus         = { workspace = true }
 dioxus-i18n-json = "0.0.5"
 tracing        = { workspace = true }
 async-channel  = "2"
+zeroize        = { workspace = true }
+chrono         = "0.4"
+base64         = "0.22"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 dioxus = { workspace = true, features = ["desktop"] }
@@ -22,4 +25,6 @@ kaede-crypto  = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = ["Window", "Storage"] }
+kaede-livekit-web = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
+gloo-timers = { version = "0.3", features = ["futures"] }

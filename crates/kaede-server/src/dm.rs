@@ -78,18 +78,18 @@ async fn list_conversations(
     let uid = authenticate(&state, &headers).await?;
     let me = uid.as_str();
 
-    // 从 messages 表里找所有 dm: 前缀且包含我的 channel_id
-    // 简化做法：查所有包含 `dm:` 的 channel_id（去重），过滤成员
-    let rows: Vec<(String,)> =
-        sqlx::query_as("SELECT DISTINCT channel_id FROM messages WHERE channel_id LIKE 'dm:%'")
-            .fetch_all(&state.pool)
-            .await?;
+    // 从 dm_conversations 索引表查（有 a/b 索引），不再全表扫描 messages。
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT conv_id FROM dm_conversations WHERE a = ? OR b = ? \
+         ORDER BY last_ts DESC",
+    )
+    .bind(me)
+    .bind(me)
+    .fetch_all(&state.pool)
+    .await?;
 
     let mut conversations = Vec::new();
     for (cid,) in rows {
-        if !is_member(&cid, me) {
-            continue;
-        }
         let peer: String = match parse_conv_id(&cid) {
             Some((a, b)) => (if a == me { b } else { a }).to_string(),
             None => continue,
@@ -189,6 +189,11 @@ async fn post_message(
     // C3：用 auth uid 覆盖客户端自报的 sender，防止 DM 冒充
     let uid = authenticate(&state, &headers).await?;
 
+    // C11: per-uid 限流，防 DM flood
+    if !state.check_rate(&uid, 10.0, 30.0) {
+        return Err(ApiError::BadRequest("dm message rate limited".into()));
+    }
+
     if !is_member(&conv_id, uid.as_str()) {
         return Err(ApiError::Unauthorized);
     }
@@ -198,16 +203,39 @@ async fn post_message(
         return Err(ApiError::BadRequest("message too large".into()));
     }
 
-    // S-3: 忽略客户端 ts，用服务器时间
-    let ts = crate::db::now_ms();
+    // S-3: 忽略客户端 ts，用服务器时间。
+    //
+    // 同时保证同一会话内 ts **严格递增**：否则同毫秒的多条消息会让
+    // `ts < before_ts` 分页丢消息。用单条 INSERT ... SELECT 原子计算。
+    let now = crate::db::now_ms();
+    let (ts,): (i64,) = sqlx::query_as(
+        "INSERT INTO messages (channel_id, ts, sender, ciphertext) \
+         SELECT ?, CASE WHEN ? > COALESCE(MAX(ts), 0) THEN ? ELSE COALESCE(MAX(ts), 0) + 1 END, ?, ? \
+         FROM messages WHERE channel_id = ? \
+         RETURNING ts",
+    )
+    .bind(&conv_id)
+    .bind(now)
+    .bind(now)
+    .bind(uid.as_str()) // ← 服务器权威
+    .bind(&ct)
+    .bind(&conv_id)
+    .fetch_one(&state.pool)
+    .await?;
 
-    sqlx::query("INSERT INTO messages (channel_id, ts, sender, ciphertext) VALUES (?, ?, ?, ?)")
+    // 更新会话索引（供 list_conversations 使用）。
+    if let Some((a, b)) = parse_conv_id(&conv_id) {
+        sqlx::query(
+            "INSERT INTO dm_conversations (conv_id, a, b, last_ts) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(conv_id) DO UPDATE SET last_ts = excluded.last_ts",
+        )
         .bind(&conv_id)
+        .bind(a)
+        .bind(b)
         .bind(ts)
-        .bind(uid.as_str()) // ← 服务器权威
-        .bind(&ct)
         .execute(&state.pool)
         .await?;
+    }
     // B3：WS 推送给对端（sender 靠本地回显，server 不推回 sender）
     if let Some((a, b)) = parse_conv_id(&conv_id) {
         let peer = if a == uid.as_str() { b } else { a };

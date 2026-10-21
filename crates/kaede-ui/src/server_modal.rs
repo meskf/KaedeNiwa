@@ -61,8 +61,20 @@ pub fn ServerModal() -> Element {
                     button {
                         class: "server-modal-add",
                         onclick: move |_| {
-                            let n = app.servers.read().len() + 1;
-                            let id = format!("srv-{}", n);
+                            // H30: 循环找未占用的 id（原 len+1 会与已删除位置冲突）
+                            let mut srvs = app.servers.write();
+                            let mut chosen = None;
+                            for i in 1..=u32::MAX {
+                                let candidate = format!("srv-{}", i);
+                                if !srvs.contains_key(&candidate) {
+                                    chosen = Some((i, candidate));
+                                    break;
+                                }
+                            }
+                            let Some((n, id)) = chosen else {
+                                drop(srvs);
+                                return;
+                            };
                             let new = UiServer {
                                 id: id.clone(),
                                 name: format!("服务器 {}", n),
@@ -70,7 +82,8 @@ pub fn ServerModal() -> Element {
                                 ws_url: "ws://localhost:8080".into(),
                                 ..Default::default()
                             };
-                            app.servers.write().insert(id.clone(), new);
+                            srvs.insert(id.clone(), new);
+                            drop(srvs);
                             selected.set(Some(id));
                         },
                         IconPlus { size: 12 }
@@ -82,7 +95,7 @@ pub fn ServerModal() -> Element {
                     class: "server-modal-content",
                     match selected.read().clone() {
                         Some(id) if servers.read().iter().any(|s| s.id == id) => {
-                            rsx! { ServerForm { server_id: id } }
+                            rsx! { ServerForm { key: "{id}", server_id: id } }
                         }
                         _ => rsx! { EmptyForm {} },
                     }
@@ -125,7 +138,7 @@ fn ServerForm(server_id: String) -> Element {
                 ws.set(srv.ws_url.clone());
                 mode.set(srv.account_mode);
                 login.set(srv.per_server_account.login_id.clone());
-                password.set(srv.per_server_account.password.clone());
+                password.set(srv.per_server_account.password.as_str().to_string());
             }
         }
     });
@@ -141,7 +154,7 @@ fn ServerForm(server_id: String) -> Element {
                 srv.account_mode = *mode.read();
                 srv.per_server_account = AccountInfo {
                     login_id: login.read().clone(),
-                    password: password.read().clone(),
+                    password: zeroize::Zeroizing::new(password.read().clone()),
                 };
             }
         }
@@ -150,6 +163,18 @@ fn ServerForm(server_id: String) -> Element {
 
     let sid_del = server_id.clone();
     let remove = move |_| {
+        // H31: 若是当前 server，先断开连接再删（防 task/WS 泄漏）
+        let is_current = app.current_server.read().as_deref() == Some(sid_del.as_str());
+        if is_current {
+            if let Some(room) = app.room.read().clone() {
+                let conn = room.connection().clone();
+                spawn(async move {
+                    let _ = conn.close().await;
+                });
+            }
+            app.room.set(None);
+            app.current_server.set(None);
+        }
         app.servers.write().remove(&sid_del);
         let srvs = app.servers.read();
         let mut ids: Vec<_> = srvs.keys().cloned().collect();

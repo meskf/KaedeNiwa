@@ -113,12 +113,17 @@ fn MessageList() -> Element {
             return;
         };
         let key = AppState::channel_key(&sid, &ch);
+        if app.loaded_channels.read().contains(&key) {
+            return;
+        }
         let is_empty = app
             .messages
             .read()
             .get(&key)
             .map(|v| v.is_empty())
             .unwrap_or(true);
+        // 本次会话内只尝试一次：解密失败/为空也不再重复请求。
+        app.loaded_channels.write().insert(key.clone());
         if !is_empty {
             return;
         }
@@ -227,7 +232,20 @@ fn MessageList() -> Element {
 #[component]
 fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
     let mut ui = use_context::<UiState>();
+    let app = use_context::<AppState>();
     let mut hovered = use_signal(|| false);
+
+    let is_private = {
+        let sid = app.current_server.read().clone();
+        sid.and_then(|sid| {
+            app.channels
+                .read()
+                .get(&sid)
+                .and_then(|list| list.iter().find(|c| c.id == msg.channel_id))
+                .map(|c| c.is_private)
+        })
+        .unwrap_or(false)
+    };
 
     let mid = msg.id.clone();
     let mid_dbl = mid.clone();
@@ -288,25 +306,16 @@ fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
                     class: "msg-attachments",
                     style: "margin-top: 8px; display: flex; flex-direction: column; gap: 6px;",
                     for att in msg.attachments.iter() {
-                        if att.mime.starts_with("image/") {
-                            img {
-                                src: "{att.url}",
-                                alt: "{att.name}",
-                                style: "max-width: 400px; max-height: 300px; border-radius: 8px; object-fit: contain;",
-                            }
-                        } else {
-                            a {
-                                href: "{att.url}",
-                                download: "{att.name}",
-                                style: "display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; background: rgba(0,0,0,0.06); color: var(--fg); font-size: 13px; text-decoration: none; max-width: 320px; overflow: hidden; text-overflow: ellipsis;",
-                                "📎 {att.name}"
-                            }
+                        // 认证下载 + 解密后渲染（直接 URL 会 401 / 显示密文）。
+                        crate::attachment::AttachmentView {
+                            att: att.clone(),
+                            target_id: msg.channel_id.clone(),
                         }
                     }
                 }
             }
 
-            if !msg.reactions.is_empty() {
+            if !is_private && !msg.reactions.is_empty() {
                 div {
                     class: "msg-reactions",
                     for r in msg.reactions.iter() {
@@ -335,13 +344,15 @@ fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
                         },
                         "↩"
                     }
-                    button {
-                        class: "msg-hover-btn",
-                        title: "添加反应",
-                        onclick: move |_| {
-                            ui.emoji_picker.set(Some((ch_id.clone(), target_ts)));
-                        },
-                        "😀"
+                    if !is_private {
+                        button {
+                            class: "msg-hover-btn",
+                            title: "添加反应",
+                            onclick: move |_| {
+                                ui.emoji_picker.set(Some((ch_id.clone(), target_ts)));
+                            },
+                            "😀"
+                        }
                     }
                 }
             }
@@ -412,8 +423,14 @@ fn ReactionPill(channel_id: String, target_ts: i64, reaction: kaede_protocol::Re
                 // 后台发送
                 if let Some(room) = app.room.read().clone() {
                     let act = action.to_string();
+                    let mut ui_for_err = ui;
                     spawn(async move {
-                        let _ = room.send_reaction(&ch, target_ts, &em, &act).await;
+                        if let Err(e) = room.send_reaction(&ch, target_ts, &em, &act).await {
+                            tracing::warn!("send_reaction: {}", e);
+                            ui_for_err
+                                .toast
+                                .set(Some((format!("表情发送失败: {}", e), true)));
+                        }
                     });
                 }
             },
@@ -469,6 +486,39 @@ fn Composer() -> Element {
                 }
                 button {
                     class: "composer-send",
+                    title: "上传附件",
+                    onclick: move |_| {
+                        let _ = dioxus::document::eval(
+                            "document.getElementById('kaede-file-input')?.click();",
+                        );
+                    },
+                    "📎"
+                }
+                input {
+                    id: "kaede-file-input",
+                    r#type: "file",
+                    multiple: true,
+                    style: "display:none;",
+                    onchange: move |e: dioxus::html::FormEvent| {
+                        let files = e.files();
+                        if files.is_empty() {
+                            return;
+                        }
+                        let Some(ch) = ui.selected_channel.read().clone() else {
+                            return;
+                        };
+                        let Some(sid) = app.current_server.read().clone() else {
+                            return;
+                        };
+                        // 允许连续两次选择同一个文件。
+                        let _ = dioxus::document::eval(
+                            "document.getElementById('kaede-file-input').value='';",
+                        );
+                        send_attachments(ui, app, ch, sid, files);
+                    },
+                }
+                button {
+                    class: "composer-send",
                     disabled: is_empty,
                     onclick: move |_| {
                         let t = draft.read().trim().to_string();
@@ -481,6 +531,69 @@ fn Composer() -> Element {
             }
         }
     }
+}
+
+/// 上传一批文件 → 发送一条带附件元数据的消息 → 本地回显。
+fn send_attachments(
+    mut ui: UiState,
+    mut app: AppState,
+    ch: String,
+    sid: String,
+    files: Vec<dioxus::html::FileData>,
+) {
+    let room = app.room.read().clone();
+    spawn(async move {
+        let Some(room) = room else { return };
+        let mut atts = Vec::new();
+        for f in files {
+            match crate::attachment::upload_file(room.clone(), &ch, f).await {
+                Ok(a) => atts.push(a),
+                Err(e) => {
+                    ui.toast.set(Some((format!("上传失败: {}", e), true)));
+                }
+            }
+        }
+        if atts.is_empty() {
+            return;
+        }
+        if let Err(e) = room.send_text_with_attachments(&ch, "", &atts).await {
+            ui.toast.set(Some((format!("发送附件失败: {}", e), true)));
+            return;
+        }
+
+        // 服务器不会把消息回声给发送者 → 本地插入。
+        let ts = crate::observer::now_ms();
+        let acc = ui.common_account.read();
+        let author = if acc.login_id.is_empty() {
+            "me".to_string()
+        } else {
+            acc.login_id.clone()
+        };
+        drop(acc);
+        let initial = author
+            .chars()
+            .next()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let msg = UiMessage {
+            id: format!("local-file-{}-{}", ts, atts.len()),
+            channel_id: ch.clone(),
+            author,
+            author_initial: initial,
+            day: crate::observer::day_label(ts),
+            time: crate::observer::format_hhmm(ts),
+            ts,
+            text: String::new(),
+            attachments: atts,
+            reply_to: None,
+            reactions: Vec::new(),
+        };
+        app.messages
+            .write()
+            .entry(AppState::channel_key(&sid, &ch))
+            .or_default()
+            .push(msg);
+    });
 }
 
 fn send_message(mut ui: UiState, mut app: AppState, text: &str) {
@@ -533,18 +646,18 @@ fn send_message(mut ui: UiState, mut app: AppState, text: &str) {
     if let Some(room) = app.room.read().clone() {
         let ch = ch.clone();
         let t = text.to_string();
+        let mut ui_for_err = ui;
         spawn(async move {
-            match reply_ref {
-                Some(r) => {
-                    if let Err(e) = room.send_text_with_reply(&ch, &t, r).await {
-                        tracing::warn!("send_text_with_reply failed: {}", e);
-                    }
-                }
-                None => {
-                    if let Err(e) = room.send_text_to(&ch, &t).await {
-                        tracing::warn!("send_text_to failed: {}", e);
-                    }
-                }
+            let result = match reply_ref {
+                Some(r) => room.send_text_with_reply(&ch, &t, r).await,
+                None => room.send_text_to(&ch, &t).await,
+            };
+            if let Err(e) = result {
+                tracing::warn!("send failed: {}", e);
+                // 本地乐观消息仍在，必须让用户知道没有真正发出。
+                ui_for_err
+                    .toast
+                    .set(Some((format!("发送失败: {}", e), true)));
             }
         });
     }
@@ -614,8 +727,18 @@ pub fn EmojiPicker() -> Element {
                                     if let Some(room) = app.room.read().clone() {
                                         let ch_s = ch.clone();
                                         let em_s = em_clone.clone();
+                                        let mut ui_for_err = ui;
                                         spawn(async move {
-                                            let _ = room.send_reaction(&ch_s, target_ts, &em_s, "add").await;
+                                            if let Err(e) = room
+                                                .send_reaction(&ch_s, target_ts, &em_s, "add")
+                                                .await
+                                            {
+                                                tracing::warn!("send_reaction: {}", e);
+                                                ui_for_err.toast.set(Some((
+                                                    format!("表情发送失败: {}", e),
+                                                    true,
+                                                )));
+                                            }
                                         });
                                     }
                                     ui.emoji_picker.set(None);

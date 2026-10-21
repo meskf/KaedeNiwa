@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use kaede_protocol::UserId;
+use kaede_protocol::{ServerMessage, UserId};
 
 use crate::db::{self, base64_url};
 use crate::error::ApiError;
@@ -72,6 +72,17 @@ async fn register(
         .hash_password(req.password.as_bytes(), &salt)?
         .to_string();
 
+    // H16: nickname 长度 + 控制字符校验（对齐 members::update_member）
+    if req.nickname.chars().count() > 32 {
+        return Err(ApiError::BadRequest(
+            "nickname too long (max 32 chars)".into(),
+        ));
+    }
+    if req.nickname.chars().any(|c| c.is_control()) {
+        return Err(ApiError::BadRequest(
+            "nickname contains control chars".into(),
+        ));
+    }
     let nickname = if req.nickname.trim().is_empty() {
         req.login_id.clone()
     } else {
@@ -245,6 +256,18 @@ async fn publish_keypackages(
         if bytes.len() > 8192 {
             return Err(ApiError::BadRequest("keypackage too large".into()));
         }
+        // C8: 校验 KP 内部 credential 与 auth uid 一致。
+        // 没有这一步，attacker 可上传 credential="victim" 的 KP，
+        // 任何人 fetch 后被 server 返回，加入群时冒充 victim（MLS 层无防护）。
+        let cred = kaede_mls::extract_credential_from_kp(&bytes)
+            .map_err(|e| ApiError::BadRequest(format!("invalid keypackage: {}", e)))?;
+        if cred != uid.as_str() {
+            return Err(ApiError::BadRequest(format!(
+                "keypackage credential mismatch: expected {}, got {}",
+                uid.as_str(),
+                cred
+            )));
+        }
         sqlx::query("INSERT INTO key_packages (login_id, package, created_at) VALUES (?, ?, ?)")
             .bind(uid.as_str())
             .bind(bytes)
@@ -252,6 +275,17 @@ async fn publish_keypackages(
             .execute(&state.pool)
             .await?;
     }
+
+    // 每个用户只保留最新 100 个 KP，避免长期登录导致队列无限增长。
+    sqlx::query(
+        "DELETE FROM key_packages WHERE login_id = ? AND id NOT IN \
+         (SELECT id FROM key_packages WHERE login_id = ? ORDER BY id DESC LIMIT 100)",
+    )
+    .bind(uid.as_str())
+    .bind(uid.as_str())
+    .execute(&state.pool)
+    .await?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -272,6 +306,15 @@ async fn fetch_keypackage(
     // C-7: per-uid 限流，防恶意用户消耗他人 KeyPackage 队列
     if !state.check_rate(&uid, 1.0, 10.0) {
         return Err(ApiError::BadRequest("keypackage fetch rate limited".into()));
+    }
+    // per-target 限流：即使攻击者换账号，也不能无限抽干同一个人的 KP 队列。
+    if !state.check_kp_fetch(&login_id) {
+        tracing::warn!(
+            "keypackage fetch throttled: target={} requester={}",
+            login_id,
+            uid
+        );
+        return Err(ApiError::BadRequest("keypackage fetch throttled".into()));
     }
 
     // P1-4：DELETE ... RETURNING 原子取走 + 删除，无 TOCTOU（SQLite >= 3.35）。
@@ -299,8 +342,9 @@ async fn fetch_keypackage(
 async fn issue_session(state: &AppState, login_id: &str) -> Result<String, ApiError> {
     let token = db::random_token();
     let expires_at = db::now_ms() + state.cfg.session_ttl_hours * 3600 * 1000;
+    // 只存 token 的 SHA-256。DB 泄漏时无法直接拿去登录。
     sqlx::query("INSERT INTO sessions (token, login_id, expires_at) VALUES (?, ?, ?)")
-        .bind(&token)
+        .bind(db::hash_token(&token))
         .bind(login_id)
         .bind(expires_at)
         .execute(&state.pool)
@@ -318,8 +362,11 @@ pub(crate) async fn authenticate(
         .and_then(|s| s.strip_prefix("Bearer "))
         .ok_or(ApiError::Unauthorized)?;
 
+    // 兼容升级前落库的明文 token（只保留到其 expires_at 为止）；
+    // 新 token 只存 hash。
     let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT login_id, expires_at FROM sessions WHERE token = ?")
+        sqlx::query_as("SELECT login_id, expires_at FROM sessions WHERE token = ? OR token = ?")
+            .bind(db::hash_token(token))
             .bind(token)
             .fetch_optional(&state.pool)
             .await?;
@@ -406,6 +453,11 @@ async fn post_message(
     // C1：用 auth uid 覆盖客户端自报的 sender，防止冒充
     let uid = authenticate(&state, &headers).await?;
 
+    // C11: per-uid 限流，防 DB flood
+    if !state.check_rate(&uid, 10.0, 30.0) {
+        return Err(ApiError::BadRequest("message rate limited".into()));
+    }
+
     if req.channel_id.is_empty() || req.ciphertext.is_empty() {
         return Err(ApiError::BadRequest(
             "channel_id / ciphertext required".into(),
@@ -435,17 +487,58 @@ async fn post_message(
         if member.is_none() {
             return Err(ApiError::Unauthorized);
         }
+        // 私密频道只接受频道 group 的密文（首字节 0x03）。
+        // 若客户端本地群丢失后退回主群 MLS 加密，会让全服主群成员都能解密，
+        // 私密性被静默破坏 —— 必须拒绝。
+        if ct.first() != Some(&0x03) {
+            return Err(ApiError::BadRequest(
+                "private channel messages must use the channel group key (0x03 prefix)".into(),
+            ));
+        }
     }
 
     // P1-5：忽略客户端 ts，用服务器时间，防时间线污染。
+    //
+    // 同一频道内 ts 严格递增（原子 SQL 计算），否则同毫秒消息会在
+    // `ts < before_ts` 分页时被跳过。
     let now = db::now_ms();
-    sqlx::query("INSERT INTO messages (channel_id, ts, sender, ciphertext) VALUES (?, ?, ?, ?)")
+    let (ts,): (i64,) = sqlx::query_as(
+        "INSERT INTO messages (channel_id, ts, sender, ciphertext) \
+         SELECT ?, CASE WHEN ? > COALESCE(MAX(ts), 0) THEN ? ELSE COALESCE(MAX(ts), 0) + 1 END, ?, ? \
+         FROM messages WHERE channel_id = ? \
+         RETURNING ts",
+    )
+    .bind(&req.channel_id)
+    .bind(now)
+    .bind(now)
+    .bind(uid.as_str()) // ← 服务器权威
+    .bind(&ct)
+    .bind(&req.channel_id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    // 私密频道：只把密文实时推给频道成员（公开频道由客户端 MLS 广播）。
+    // 这里使用服务器权威 ts，客户端落 UI 时据此排序/去重。
+    if is_private_raw != 0 {
+        let members: Vec<(String,)> = sqlx::query_as(
+            "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ?",
+        )
         .bind(&req.channel_id)
-        .bind(now)
-        .bind(uid.as_str()) // ← 服务器权威
-        .bind(ct)
-        .execute(&state.pool)
+        .bind(uid.as_str())
+        .fetch_all(&state.pool)
         .await?;
+        for (member,) in members {
+            state.send_to(
+                &UserId::new(member),
+                ServerMessage::ChannelMessage {
+                    channel_id: req.channel_id.clone(),
+                    from: uid.clone(),
+                    ts,
+                    ciphertext: ct.clone(),
+                },
+            );
+        }
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -481,13 +574,18 @@ async fn get_messages(
     let before = q.before_ts.unwrap_or(i64::MAX);
     let limit = q.limit.unwrap_or(200).clamp(1, 500); // C-8: clamp 防 limit=-1 全表扫描
 
+    // 私密频道隐藏“历史遗留”的主群密文（非 0x03 前缀）：
+    // 那是旧版本 bug 造成的，所有主群成员都能解；虽然服务端无法重新加密，
+    // 至少不再继续下发。
     let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
         "SELECT ts, sender, ciphertext FROM messages \
          WHERE channel_id = ? AND ts < ? \
+           AND (? = 0 OR substr(ciphertext, 1, 1) = X'03') \
          ORDER BY ts DESC LIMIT ?",
     )
     .bind(&channel_id)
     .bind(before)
+    .bind(is_private_raw)
     .bind(limit)
     .fetch_all(&state.pool)
     .await?;

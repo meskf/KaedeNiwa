@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n[3] LiveKitSession::start（采集 → LiveKit E2EE）");
         let lk_cfg = LiveKitConfig::new(LIVEKIT_WS, token.clone())
             .with_resolution(1920, 1080)
-            .with_e2ee(&e2ee_passphrase);
+            .with_e2ee_key(e2ee_passphrase.as_bytes().to_vec());
 
         let session = LiveKitSession::start(source, lk_cfg).await?;
         println!("    LiveKit 连接已建立");

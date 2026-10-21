@@ -19,7 +19,7 @@
 //! 传 `pid: Some(_)` 会返回 [`MediaError::Capture`]，UI 应回退到
 //! 「共享全系统声音」模式。
 
-use std::sync::mpsc::Receiver;
+use crossbeam_channel::{Receiver, TrySendError, bounded};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -80,7 +80,11 @@ impl GstAudioSource {
             .downcast::<AppSink>()
             .map_err(|_| MediaError::Capture("not an appsink".into()))?;
 
-        let (tx, rx) = std::sync::mpsc::channel::<AudioFrame>();
+        // H20: bounded + try_send 而非 unbounded + blocking send。
+        // 原 std::sync::mpsc::Sender::send 在下游阻塞时会让 GStreamer
+        // streaming thread 卡死 → 整个 pipeline 停摆。
+        // 队列容量 8 ≈ 160ms @20ms/frame。
+        let (tx, rx) = bounded::<AudioFrame>(8);
         let stopped = Arc::new(AtomicBool::new(false));
         let sample_rate = config.sample_rate;
         let channels = config.channels;
@@ -109,10 +113,12 @@ impl GstAudioSource {
                         sample_rate,
                         channels,
                     };
-                    if tx.send(frame).is_err() {
-                        return Err(gst::FlowError::Eos);
+                    // H20: try_send —— 队列满时静默丢帧，绝不阻塞 streaming thread
+                    match tx.try_send(frame) {
+                        Ok(()) => Ok(gst::FlowSuccess::Ok),
+                        Err(TrySendError::Full(_)) => Ok(gst::FlowSuccess::Ok),
+                        Err(TrySendError::Disconnected(_)) => Err(gst::FlowError::Eos),
                     }
-                    Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
         );
@@ -153,8 +159,8 @@ impl AudioSource for GstAudioSource {
     ) -> Result<Option<AudioFrame>, MediaError> {
         match self.rx.recv_timeout(timeout) {
             Ok(f) => Ok(Some(f)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(MediaError::Timeout),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => Err(MediaError::Timeout),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Ok(None),
         }
     }
 

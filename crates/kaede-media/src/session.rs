@@ -296,19 +296,22 @@ impl MediaSession {
         self.state
             .store(MediaState::Stopping.as_u8(), Ordering::Relaxed);
 
+        // H21: detached std::thread join —— collector 是 std::thread::spawn 出来的
+        // OS 线程；用 tokio::task::spawn_blocking 会占用 tokio blocking pool，
+        // 且 timeout 不取消 blocking task → collector 卡死时永久占一个 blocking slot。
+        // 改成 std::thread::spawn（OS 管理，不占 tokio pool），stop() 立即返回。
         let collector_task = self.collector.lock().unwrap().take();
         if let Some(h) = collector_task {
-            // 采集线程最多 200ms 检查一次 stop_flag，正常 <300ms 退出。
-            // 给 2s 上限防止异常卡死（GStreamer pipeline 崩溃、设备占用等）。
-            let join = tokio::task::spawn_blocking(move || {
+            std::thread::spawn(move || {
                 let _ = h.join();
             });
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), join).await;
         }
+        // H22: abort 而非 timeout —— timeout 返回后 sink_task 仍在后台跑，
+        // 若它卡在 channel recv 上会永久占用一个 tokio worker。abort 立即取消。
         let sink_task = self.sink_task.lock().unwrap().take();
         if let Some(h) = sink_task {
-            // sink_task 是 tokio task，帧队列耗尽后自动结束。给 1s 上限。
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), h).await;
+            h.abort();
+            let _ = h.await;
         }
 
         self.state
@@ -687,19 +690,18 @@ impl AudioSession {
         self.stop_flag.store(true, Ordering::Relaxed);
         self.state
             .store(MediaState::Stopping.as_u8(), Ordering::Relaxed);
+        // H21: detached std::thread join（同 MediaSession::stop）
         let collector_task = self.collector.lock().unwrap().take();
         if let Some(h) = collector_task {
-            // 采集线程最多 200ms 检查一次 stop_flag，正常 <300ms 退出。
-            // 给 2s 上限防止异常卡死（GStreamer pipeline 崩溃、设备占用等）。
-            let join = tokio::task::spawn_blocking(move || {
+            std::thread::spawn(move || {
                 let _ = h.join();
             });
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), join).await;
         }
+        // H22: abort 而非 timeout
         let sink_task = self.sink_task.lock().unwrap().take();
         if let Some(h) = sink_task {
-            // sink_task 是 tokio task，帧队列耗尽后自动结束。给 1s 上限。
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), h).await;
+            h.abort();
+            let _ = h.await;
         }
         self.state
             .store(MediaState::Stopped.as_u8(), Ordering::Relaxed);
