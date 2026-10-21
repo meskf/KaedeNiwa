@@ -771,7 +771,8 @@ fn do_create(
 pub fn JoinChannelModal() -> Element {
     let mut ui = use_context::<UiState>();
     let mut app = use_context::<AppState>();
-    let voice = use_context::<VoiceState>();
+    #[allow(unused_mut)] // native 分支需要 mut（active_channel.set），wasm 分支不需要
+    let mut voice = use_context::<VoiceState>();
     let controls = use_context::<VoiceControls>();
     let mut channel_id = use_signal(String::new);
     let mut password = use_signal(String::new);
@@ -845,7 +846,7 @@ pub fn JoinChannelModal() -> Element {
                         {
                             voice.active_channel.set(Some(VoiceChannel {
                                 id: ch_id_v.clone(),
-                                name: ch_name_v,
+                                name: _ch_name_v,
                                 members: vec![VoiceMember {
                                     uid: "me".into(),
                                     name: "我".into(),

@@ -311,7 +311,11 @@ cargo check -p kaede-client --features wasm --target wasm32-unknown-unknown
 - 私密频道旧历史中已经用主群密钥加密的 0x03 之前的消息无法重新加密，只能继续隐藏。
 - 自动重连依赖内存中的 session token 或登录时保存的密码；两者都不可用时仍需手动登录。
 - `provider` 整包快照的 O(n²) 体积问题（R2-23）需要后续存储改造。
-- 私密频道/DM 语音 E2EE 仍关闭（C14）。
+- 私密频道/DM 语音 E2EE 已于 **v0.0.1-alpha.2 开启**（C14 落地）。
+  三条路径（DM / 私密频道 / 主群）各自从本地 group state 派生 key，
+  room-level seed 统一注入，同一媒体会话内所有参与者 key 一致。
+  残余限制：通话期间若发生 group epoch 变化（成员加/减），当前不触发
+  UI 自动重连（块 B，计划 alpha.3 补），需手动离开重进。
 
 ---
 

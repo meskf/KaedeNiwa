@@ -1622,7 +1622,12 @@ impl RoomSession {
     ///
     /// - 通话过程中如果有成员变更（epoch 前进），新 key 不会热更新到已连接
     ///   的 LiveKit 会话；需要离开重进。
-    /// - DM / 私密频道仍然走 C14：关闭 E2EE。
+    ///   - **主群**：由 `ClientEvent::MlsEpochChanged` 触发 UI 自动重连
+    ///   - **DM / 私密频道**：group epoch 变化暂不触发自动重连（块 B，
+    ///     计划 alpha.3 补上）。通话中若发生成员变更，需手动离开重进。
+    /// - DM / 私密频道 **已开启 E2EE**（v0.0.1-alpha.2）：三条路径分别从
+    ///   `dm_groups` / `channel_groups` / 主群派生 key，统一注入 room-level seed。
+    /// - group 缺失时（如刚加入尚未同步）降级到 E2EE-disabled 并 warn。
     pub async fn begin_media_session(
         &self,
         channel_id: &str,
@@ -1650,15 +1655,59 @@ impl RoomSession {
             )));
         }
 
-        // C14: 私密频道 / DM 暂时关闭 E2EE。
-        if self.conn.dm_has_group(channel_id) || self.conn.channel_has_group(channel_id) {
-            tracing::warn!(
-                "[begin_media_session] C14: DM/private channel {} -> E2EE disabled for safety",
-                channel_id
-            );
-            return Ok((token, None));
+        // C14 已开启（v0.0.1-alpha.2）：DM / 私密频道 / 主群三条路径
+        // 各自从本地 group state 派生 LiveKit E2EE key。三方均注入
+        // room-level seed，保证同一媒体会话内所有参与者拿到同一个 key。
+        //
+        // 优先级：DM → 私密频道 → 主群。三者 channel_id 语义独立：
+        // - DM：conv_id 形如 "dm:a:b"
+        // - 私密频道：channel_id 与公开频道共享 namespace，由 channel_has_group 区分
+        // - 主群：以上两者都不命中时的默认路径
+        //
+        // 降级路径（保留 C14 语义）：group 缺失时返回 None —— 这是**显式**降级，
+        // 调用方 UI 会根据 None 提示"E2EE 未启用"，不是静默失败。
+
+        if self.conn.dm_has_group(channel_id) {
+            match self.conn.dm_export_media_key(channel_id, &seed) {
+                Ok(k) => {
+                    tracing::info!(
+                        "[begin_media_session] DM {} -> E2EE enabled (dm group)",
+                        channel_id
+                    );
+                    return Ok((token, Some(zeroize::Zeroizing::new(k))));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[begin_media_session] DM {} group present but export failed: {};                          falling back to E2EE-disabled",
+                        channel_id,
+                        e
+                    );
+                    return Ok((token, None));
+                }
+            }
         }
 
+        if self.conn.channel_has_group(channel_id) {
+            match self.conn.channel_export_media_key(channel_id, &seed) {
+                Ok(k) => {
+                    tracing::info!(
+                        "[begin_media_session] private channel {} -> E2EE enabled (channel group)",
+                        channel_id
+                    );
+                    return Ok((token, Some(zeroize::Zeroizing::new(k))));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[begin_media_session] channel {} group present but export failed: {};                          falling back to E2EE-disabled",
+                        channel_id,
+                        e
+                    );
+                    return Ok((token, None));
+                }
+            }
+        }
+
+        // 主群路径（默认）
         let key = self.conn.mls_export_sframe_key_for_with_extra(
             channel_id,
             kaede_mls::SframePurpose::LivekitE2ee,
