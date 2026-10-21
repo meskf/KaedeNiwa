@@ -201,6 +201,40 @@ fn MessageList() -> Element {
         }
     });
 
+    // 1.2 滚到顶自动加载：监听 #msg-list 滚动，靠近顶部时自动触发"加载更早"按钮。
+    //     按钮保留作为 fallback；用 data-loading + 元素属性 + 重试做三重保护。
+    use_effect(move || {
+        let _ = dioxus::document::eval(r#"
+            (function(){
+                function tryBind(attemptsLeft){
+                    const list = document.getElementById('msg-list');
+                    if (!list) {
+                        if (attemptsLeft > 0) setTimeout(function(){ tryBind(attemptsLeft - 1); }, 100);
+                        return;
+                    }
+                    if (list.__kaedeScrollBound) return;
+                    list.__kaedeScrollBound = true;
+                    let cooling = false;
+                    list.addEventListener('scroll', function(){
+                        if (cooling) return;
+                        if (list.scrollTop > 120) return;
+                        const btn = list.querySelector('.msg-load-earlier');
+                        if (!btn) return;
+                        if (btn.getAttribute('data-loading') === '1') return;
+                        btn.setAttribute('data-loading', '1');
+                        btn.click();
+                        cooling = true;
+                        setTimeout(function(){
+                            cooling = false;
+                            btn.removeAttribute('data-loading');
+                        }, 800);
+                    });
+                }
+                tryBind(10);
+            })();
+        "#);
+    });
+
     rsx! {
         div {
             id: "msg-list",
