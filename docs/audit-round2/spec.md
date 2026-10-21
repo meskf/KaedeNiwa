@@ -314,8 +314,11 @@ cargo check -p kaede-client --features wasm --target wasm32-unknown-unknown
 - 私密频道/DM 语音 E2EE 已于 **v0.0.1-alpha.2 开启**（C14 落地）。
   三条路径（DM / 私密频道 / 主群）各自从本地 group state 派生 key，
   room-level seed 统一注入，同一媒体会话内所有参与者 key 一致。
-  残余限制：通话期间若发生 group epoch 变化（成员加/减），当前不触发
-  UI 自动重连（块 B，计划 alpha.3 补），需手动离开重进。
+  残余限制（块 B 已收口，v0.0.1-alpha.2 后续 commit）：
+  - 主群：`ClientEvent::MlsEpochChanged` → observer 自动重连 ✅
+  - 私密频道：`ClientEvent::ChannelEpochChanged` → observer 自动重连 ✅
+  - DM：无 epoch 变化路径（2 人固定 group，无 add/remove/self_update），
+    只有"一方删群重建"会改变 key —— 属换 group 语义，用户手动重进。
 
 ---
 

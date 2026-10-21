@@ -67,3 +67,7 @@ _audit_out/
 _dump/
 _regression_core.log
 _dev-all.ps1
+
+# ---- 临时脚本 / 提交消息（_commit.tmp / _tag.tmp / _*.cjs 等）----
+_*.tmp
+_*.cjs
