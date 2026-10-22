@@ -724,7 +724,7 @@ impl MediaSession {
     pub fn remote_tracks(&self) -> Vec<(TrackId, RemoteKind)> {
         self.remote_tracks
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|(id, t)| {
                 let kind = match &**t {
@@ -806,7 +806,7 @@ async fn forward_room_events(
                 let id = TrackId::new(uid, sid);
                 remote_tracks
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|e| e.into_inner())
                     .insert(id.clone(), Arc::new(track));
                 let _ = events_tx.send(MediaEvent::TrackAvailable { track: id, kind });
             }

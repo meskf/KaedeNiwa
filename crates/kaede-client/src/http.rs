@@ -1209,7 +1209,7 @@ impl HttpApi {
     fn bearer(&self) -> Result<String, ClientError> {
         self.token
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or(ClientError::NotAuthenticated)
     }

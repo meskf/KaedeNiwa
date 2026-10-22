@@ -590,7 +590,7 @@ impl ServerConnection {
     pub fn dm_has_group(&self, conv_id: &str) -> bool {
         self.dm_groups
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .contains_key(&canonical_conv_id(conv_id))
     }
 
@@ -611,7 +611,7 @@ impl ServerConnection {
     pub fn dm_remove_group(&self, conv_id: &str) {
         self.dm_groups
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .remove(&canonical_conv_id(conv_id));
     }
 
@@ -680,7 +680,7 @@ impl ServerConnection {
         drop(main_guard);
         self.channel_groups
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(channel_id.to_string(), ch_session);
         self.mark_channel_dirty(channel_id);
         Ok(())
@@ -694,7 +694,7 @@ impl ServerConnection {
         let (tx, rx) = async_channel::bounded(1);
         self.channel_pending_welcomes
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(channel_id.to_string(), tx);
         rx
     }
@@ -703,7 +703,7 @@ impl ServerConnection {
     pub fn clear_pending_welcome(&self, channel_id: &str) {
         self.channel_pending_welcomes
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .remove(channel_id);
     }
 
@@ -786,7 +786,7 @@ impl ServerConnection {
         let existing_group_id = self
             .channel_groups
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(channel_id)
             .and_then(|s| s.group_id().map(|g| g.to_vec()));
         if existing_group_id == new_group_id {
@@ -795,7 +795,7 @@ impl ServerConnection {
         // 不同（或本地没有）→ 采纳新群。
         self.channel_groups
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(channel_id.to_string(), probe);
         self.mark_channel_dirty(channel_id);
         Ok(())
@@ -976,7 +976,7 @@ impl ServerConnection {
         let conv_id = canonical_conv_id(conv_id);
         self.dm_generations
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(conv_id.clone(), generation);
         if self
             .aux_storage
@@ -1084,7 +1084,7 @@ impl ServerConnection {
         {
             self.dirty_dm_groups
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(conv_id.to_string());
         }
     }
@@ -1098,7 +1098,7 @@ impl ServerConnection {
         {
             self.dirty_channel_groups
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(channel_id.to_string());
         }
     }
@@ -1128,7 +1128,7 @@ impl ServerConnection {
         let session = MlsSession::from_snapshot_with(snapshot, cipher)?;
         self.dm_groups
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(conv_id.to_string(), session);
         Ok(())
     }
@@ -1159,7 +1159,7 @@ impl ServerConnection {
         let session = MlsSession::from_snapshot_with(snapshot, cipher)?;
         self.channel_groups
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(channel_id.to_string(), session);
         Ok(())
     }
@@ -1203,7 +1203,7 @@ impl ServerConnection {
         let dm_ids: Vec<String> = self
             .dirty_dm_groups
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .cloned()
             .collect();
@@ -1244,7 +1244,7 @@ impl ServerConnection {
         let ch_ids: Vec<String> = self
             .dirty_channel_groups
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .cloned()
             .collect();
@@ -1256,7 +1256,7 @@ impl ServerConnection {
                         Ok(()) => {
                             self.dirty_channel_groups
                                 .lock()
-                                .unwrap()
+                                .unwrap_or_else(|e| e.into_inner())
                                 .remove(&channel_id);
                         }
                         Err(e) => {
@@ -1276,7 +1276,7 @@ impl ServerConnection {
                     );
                     self.dirty_channel_groups
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|e| e.into_inner())
                         .remove(&channel_id);
                 }
             }
@@ -1337,7 +1337,7 @@ impl ServerConnection {
                     let generation = u64::from_be_bytes(buf);
                     self.dm_generations
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|e| e.into_inner())
                         .insert(conv_id.to_string(), generation);
                 }
             }
@@ -1666,7 +1666,7 @@ impl ServerConnection {
     pub fn mls_epoch(&self) -> u64 {
         self.mls
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|s| s.epoch())
             .unwrap_or(0)
@@ -1676,7 +1676,7 @@ impl ServerConnection {
     pub fn mls_group_id(&self) -> Option<Vec<u8>> {
         self.mls
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .and_then(|s| s.group_id().map(|g| g.to_vec()))
     }
@@ -1685,7 +1685,7 @@ impl ServerConnection {
     pub fn mls_member_count(&self) -> usize {
         self.mls
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|s| s.member_count())
             .unwrap_or(0)
@@ -1748,7 +1748,7 @@ impl ServerConnection {
     pub fn mls_is_ready(&self) -> bool {
         self.mls
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|s| s.is_ready())
             .unwrap_or(false)
@@ -2124,7 +2124,7 @@ impl ServerConnection {
                                 let sender = self
                                     .channel_pending_welcomes
                                     .lock()
-                                    .unwrap()
+                                    .unwrap_or_else(|e| e.into_inner())
                                     .remove(&channel_id);
                                 if let Some(tx) = sender {
                                     let _ = tx.try_send(Ok(welcome.to_vec()));
@@ -2990,7 +2990,7 @@ mod tests {
         let ct = conn
             .mls
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_mut()
             .unwrap()
             .encrypt(&payload)
