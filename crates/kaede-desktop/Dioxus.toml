@@ -3,3 +3,7 @@ name = "kaedeniwa"
 
 [web.app]
 title = "KaedeNiwa"
+[bundle]
+version = "0.0.2"
+publisher = "KaedeNiwa"
+identifier = "com.kaede.niwa"
