@@ -22,6 +22,8 @@ const FILES = [
   'manifest.json',
   'sw.js',
   'icon.svg',
+  'favicon.svg',
+  'icon-512.png',
   'boot.js',
   'livekit-client.umd.min.js',
   'livekit-client.e2ee.worker.js',
