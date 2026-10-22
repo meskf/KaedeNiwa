@@ -75,7 +75,7 @@ Rust 原生的 E2EE 实时协作平台。
 启动时校验配置，非法值直接退出。结构化日志：`KAEDE_LOG_FORMAT=json`。
 
 ```powershell
-pwsh -File scripts/bundle.ps1 web        # dist/web
+pwsh -File scripts/bundle.ps1 web        # dist/web/public
 cargo build --release -p kaede-server    # target/release/kaede-server
 ```
 

@@ -4,29 +4,54 @@
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 // wasm 单线程：RoomSession 内部 Rc<RefCell> 非 Send/Sync，Arc 仅为与 native 签名统一
 
-use async_channel::{Receiver, Sender, unbounded};
+use async_channel::{Receiver, Sender, bounded};
 #[allow(unused_imports)]
 use dioxus::prelude::*;
 use kaede_client::{ClientEvent, ClientObserver, DecodedPayload};
 use kaede_protocol::UserId;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
-use crate::state::{AccountInfo, AppState, MainTab, UiMessage, UiState, View, VoiceState};
+use crate::state::{
+    AccountInfo, AppState, MainTab, UiMessage, UiState, View, VoiceState, trim_cached_messages,
+};
+
+/// UI 事件队列硬上限。
+///
+/// 无界队列在「网络洪峰 + 渲染慢」时会无限增长。这里给硬上限，
+/// 溢出时丢弃事件并告警：状态可由随后的重连/刷新事件补齐。
+const UI_EVENT_QUEUE_CAP: usize = 8192;
 
 pub struct UiObserver {
     tx: Sender<ClientEvent>,
+    /// 是否已就本次溢出告警过（避免洪峰期刷屏）。
+    overflowed: AtomicBool,
 }
 
 impl UiObserver {
     pub fn new() -> (Self, Receiver<ClientEvent>) {
-        let (tx, rx) = unbounded();
-        (Self { tx }, rx)
+        let (tx, rx) = bounded(UI_EVENT_QUEUE_CAP);
+        (
+            Self {
+                tx,
+                overflowed: AtomicBool::new(false),
+            },
+            rx,
+        )
     }
 }
 
 impl ClientObserver for UiObserver {
     fn on_event(&self, event: ClientEvent) {
-        let _ = self.tx.try_send(event);
+        if self.tx.try_send(event).is_ok() {
+            if self.overflowed.swap(false, AtomicOrdering::Relaxed) {
+                tracing::warn!("UI event queue recovered after overflow");
+            }
+        } else if !self.overflowed.swap(true, AtomicOrdering::Relaxed) {
+            tracing::warn!(
+                "UI event queue full ({} events); dropping until consumer catches up",
+                UI_EVENT_QUEUE_CAP
+            );
+        }
     }
 }
 
@@ -197,7 +222,9 @@ pub fn apply_event(
                         }
                         let mut s = app.messages.write();
                         let key = AppState::channel_key(&server_id, &msg.channel_id);
-                        s.entry(key).or_default().push(msg);
+                        let list = s.entry(key).or_default();
+                        list.push(msg);
+                        trim_cached_messages(list);
                     }
                 }
                 DecodedPayload::Reaction(r) => {
@@ -264,6 +291,7 @@ pub fn apply_event(
                 if !list.iter().any(|m| m.ts == ts && m.author == msg.author) {
                     list.push(msg);
                     list.sort_by_key(|m| m.ts);
+                    trim_cached_messages(list);
                 }
             }
         }
@@ -341,6 +369,7 @@ pub fn apply_event(
                 if !list.iter().any(|m| m.ts == actual_ts) {
                     list.push(msg);
                     list.sort_by_key(|m| m.ts);
+                    trim_cached_messages(list);
                 }
             }
         }

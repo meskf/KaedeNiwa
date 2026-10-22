@@ -262,7 +262,7 @@ impl AppState {
     pub fn peer_session_id(&self, uid: &UserId) -> Option<u64> {
         self.room
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .peers
             .get(uid)
             .map(|p| p.session_id)
@@ -352,7 +352,7 @@ impl AppState {
     pub fn set_presence(&self, uid: &UserId, status: String) {
         self.room
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .presence
             .insert(uid.clone(), status);
     }
@@ -361,7 +361,7 @@ impl AppState {
     pub fn snapshot_presence(&self) -> Vec<kaede_protocol::Presence> {
         self.room
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .presence
             .iter()
             .map(|(uid, s)| kaede_protocol::Presence {
@@ -448,7 +448,7 @@ impl AppState {
         let prefix = format!("{}:", uid.as_str());
         self.rate_buckets
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .retain(|k, _| !k.starts_with(&prefix));
     }
 

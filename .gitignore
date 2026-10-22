@@ -52,6 +52,8 @@ fix_*.cjs
 
 # ---- 临时 Node 脚本（fix_*.cjs / scan_*.cjs 等）----
 *.cjs
+# 例外：PWA 打包的必需步骤，bundle.ps1 会调用它
+!scripts/postbuild.cjs
 
 # ---- LiveKit 二进制（55MB，用 scripts/download-livekit.ps1 下载）----
 tools/livekit/*.exe

@@ -51,6 +51,12 @@ const MAX_MLS_APP_BYTES: usize = 4 * 1024 * 1024;
 /// 私密频道表情反应上限。reaction payload 只有几十字节，8 KiB 足够。
 const MAX_CHANNEL_REACTION_BYTES: usize = 8 * 1024;
 
+/// 单次 `ReportEpoch` 最多回补的 Commit 总字节数。
+///
+/// 不设上限时，一次请求可读取最多 256 条 × 2 MiB（≈512 MiB）并全部塞进
+/// 本连接 1024 容量的出站缓冲，属于可反复触发的内存放大。
+const MAX_REPORT_EPOCH_BYTES: usize = 512 * 1024;
+
 /// `recv_with_idle_timeout` 的返回值。
 #[derive(Debug)]
 pub(crate) enum RecvOutcome {
@@ -480,6 +486,20 @@ async fn deliver_pending(state: &AppState, uid: &UserId, tx: &mpsc::Sender<Serve
                         delivered.push(id);
                         continue;
                     }
+                }
+            }
+            // 私密频道实时消息在对方离线/缓冲满时暂存；payload 前 8 字节是服务端 ts。
+            "channel_message" => {
+                if payload.len() <= 8 {
+                    delivered.push(id);
+                    continue;
+                }
+                let ts = i64::from_be_bytes(payload[..8].try_into().expect("8-byte ts prefix"));
+                ServerMessage::ChannelMessage {
+                    channel_id: channel_id.unwrap_or_default(),
+                    from: UserId::new(from),
+                    ts,
+                    ciphertext: payload[8..].to_vec(),
                 }
             }
             _ => ServerMessage::ChannelSync {
@@ -1010,19 +1030,8 @@ async fn handle_message(
                 });
                 return Ok(());
             }
-            // P1-7：关键消息用有背压的广播，避免 try_send 静默丢弃。
-            state
-                .broadcast_except_important(
-                    &from,
-                    ServerMessage::MlsCommit {
-                        from: from.clone(),
-                        epoch,
-                        payload: payload.clone(),
-                    },
-                )
-                .await;
-
-            // 持久化最近 Commit，供离线成员重连后追赶。
+            // 持久化必须先于广播：否则落库失败时在线成员已经前进，
+            // 离线成员却永远追不上这个 epoch（DB 里没有记录）。
             if epoch > 0 {
                 // 同一 epoch 只保留第一份 Commit：后到的同 epoch commit
                 // 属于并发分支，覆盖会让已跟随前一份的客户端更混乱。
@@ -1059,11 +1068,33 @@ async fn handle_message(
                 .execute(&state.pool)
                 .await;
             }
+
+            // P1-7：关键消息用有背压的广播，避免 try_send 静默丢弃。
+            state
+                .broadcast_except_important(
+                    &from,
+                    ServerMessage::MlsCommit {
+                        from: from.clone(),
+                        epoch,
+                        payload: payload.clone(),
+                    },
+                )
+                .await;
         }
 
         ClientMessage::ReportEpoch { epoch } => {
-            let _uid = ensure_joined(state, my_uid, my_session_id)?;
+            let uid = ensure_joined(state, my_uid, my_session_id)?;
             if epoch > u32::MAX as u64 {
+                return Ok(());
+            }
+            // 该请求会读 DB 并把最多 256 条 Commit 写回自己的出站队列，
+            // 必须限流，否则可被反复触发做内存/DB 放大。
+            if !state.check_rate_scoped(&uid, "report_epoch", 1.0, 5.0) {
+                state.metrics.rate_limited();
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::RateLimited,
+                    message: "epoch report rate limited".into(),
+                });
                 return Ok(());
             }
             let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
@@ -1074,12 +1105,23 @@ async fn handle_message(
             .fetch_all(&state.pool)
             .await?;
 
+            let mut budget = MAX_REPORT_EPOCH_BYTES;
             for (commit_epoch, from_uid, payload) in rows {
-                let _ = tx.try_send(ServerMessage::MlsCommit {
-                    from: UserId::new(from_uid),
-                    epoch: commit_epoch as u64,
-                    payload,
-                });
+                // 超出本次预算就停：客户端可稍后再次 ReportEpoch 续拉。
+                if payload.len() > budget {
+                    break;
+                }
+                budget -= payload.len();
+                if tx
+                    .try_send(ServerMessage::MlsCommit {
+                        from: UserId::new(from_uid),
+                        epoch: commit_epoch as u64,
+                        payload,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         }
 

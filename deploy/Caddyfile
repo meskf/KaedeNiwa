@@ -30,8 +30,9 @@
 	}
 
 	# SPA：未知路径回退 index.html
+	# dx bundle 的产物在 dist/web/public（compose 挂载 dist/web → /srv/kaede）。
 	handle {
-		root * /srv/kaede
+		root * /srv/kaede/public
 		try_files {path} /index.html
 		file_server
 	}

@@ -74,6 +74,20 @@ async fn main() -> Result<()> {
     let pool = db::init(&cfg.database_url).await?;
     // 全新数据库必须补齐默认频道，否则客户端默认的 `general` 会 404。
     kaede_server::ensure_default_channels(&pool).await;
+
+    // 引导预警：注册接口是公开的，且第一个注册者会自动成为 op5（房主）。
+    // 若先暴露端口再注册，房主身份可能被他人抢注。
+    match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM members")
+        .fetch_one(&pool)
+        .await
+    {
+        Ok(0) => tracing::warn!(
+            "no accounts yet: the FIRST registration becomes op5 (room owner). \
+             Register the owner before exposing this port to the internet."
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("bootstrap owner check failed: {}", e),
+    }
     let state = AppState::new_with_log(pool, cfg, log_buffer);
 
     let app = kaede_server::with_middleware(

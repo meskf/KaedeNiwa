@@ -21,9 +21,13 @@ switch ($Platform) {
     "web" {
         Write-Host "打包 Web (release-wasm)..." -ForegroundColor Cyan
         Push-Location crates\kaede-wasm
-        dx bundle --platform web --release --out-dir ..\..\dist\web
+        # 必须显式用 release-wasm：--release 会走标准 release profile，
+        # 其中的 strip=true 会移除 __wasm_bindgen_unstable 段，导致 wasm-bindgen 失败。
+        dx bundle --platform web --profile release-wasm --out-dir ..\..\dist\web
         Pop-Location
-        Write-Host "`n输出: dist\web" -ForegroundColor Green
+        # dx 只复制编译产物（index.html + wasm + js），PWA / LiveKit 资产需要单独补齐。
+        node scripts\postbuild.cjs dist\web\public
+        Write-Host "`n输出: dist\web\public" -ForegroundColor Green
     }
     "desktop" {
         Write-Host "打包 Desktop (Wry)..." -ForegroundColor Cyan

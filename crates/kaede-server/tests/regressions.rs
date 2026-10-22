@@ -1376,3 +1376,54 @@ async fn empty_keypackage_queue_returns_not_found() {
         reqwest::StatusCode::NOT_FOUND
     );
 }
+
+/// BUG-FIX 回归：登录失败计数必须按真实客户端 IP 清除。
+///
+/// 反向代理部署下 peer 是 127.0.0.1，真实 IP 来自 X-Forwarded-For。
+/// 修复前成功登录用 `peer.ip()` 删计数，导致计数永不清零、用户被误锁。
+#[tokio::test]
+async fn login_failure_counter_clears_for_proxy_client_ip() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    register(&base, "alice").await;
+
+    let client = reqwest::Client::new();
+    let login = |password: &'static str| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .post(format!("{}/api/login", base))
+                .header("x-forwarded-for", "203.0.113.9")
+                .json(&serde_json::json!({
+                    "login_id": "alice",
+                    "password": password,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    for _ in 0..4 {
+        assert_eq!(
+            login("wrong-password").await,
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(login("password1234").await, reqwest::StatusCode::OK);
+
+    // 成功登录必须清零：再错 4 次后仍未被锁定（阈值是 5）。
+    for _ in 0..4 {
+        assert_eq!(
+            login("wrong-password").await,
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        login("password1234").await,
+        reqwest::StatusCode::OK,
+        "successful login must clear the failure counter for the proxy client IP"
+    );
+}

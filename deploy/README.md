@@ -17,13 +17,14 @@
 LiveKit: 独立进程 / 独立端口，LIVEKIT_WS_URL 必须指向它
 ```
 
-Web 静态站由 Caddy/Nginx 直接提供（`dist/web`），服务端**不托管静态文件**。
+Web 静态站由 Caddy/Nginx 直接提供（`dist/web/public`，compose 挂载 `dist/web` →
+`/srv/kaede`，站点 root 指向 `/srv/kaede/public`），服务端**不托管静态文件**。
 
 ## 2. 构建产物
 
 ```powershell
 # Web（PWA）
-pwsh -File scripts/bundle.ps1 web          # → dist/web
+pwsh -File scripts/bundle.ps1 web          # → dist/web/public
 
 # 服务端（本机）
 cargo build --release -p kaede-server      # → target/release/kaede-server

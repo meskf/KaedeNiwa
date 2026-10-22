@@ -3,16 +3,16 @@
 //! # 格式
 //!
 //! ```text
-//! sealed = ver(1) || nonce(12) || ciphertext_with_tag(N + 16)
+//! sealed = ver(1) || msg_id(16) || nonce(12) || ciphertext_with_tag(N + 16)
 //! ```
 //!
-//! - `ver = 0x01`，未来不兼容时升高
+//! - `ver = 0x05`（当前格式）；`0x01` 是历史格式，仅用于读取升级前历史
 //! - `nonce` 每条消息随机生成（12 字节），不依赖计数器
 //! - `ciphertext_with_tag` 是 AES-256-GCM 输出
 //!
 //! # AAD
 //!
-//! v2 AAD = `len(conv_id) || conv_id || len(from) || from || len(to) || to || msg_id`
+//! 当前格式 AAD = `len(conv_id) || conv_id || len(from) || from || len(to) || to || msg_id`
 //!
 //! 理由：
 //! 1. **绑定会话**：key 已由 exporter context 绑定 conv_id，AAD 是第二道防线

@@ -933,30 +933,13 @@ impl RoomSession {
         let Some(store) = &self.storage else {
             return Vec::new();
         };
-        let prefix = self.history_cache_prefix(target);
-        let keys = match store.list_keys(ns).await {
-            Ok(k) => k,
-            Err(_) => return Vec::new(),
-        };
-        let mut out = Vec::new();
-        for key in keys {
-            let Some(rest) = key.strip_prefix(&prefix) else {
-                continue;
-            };
-            // rest = "{ts:013}|{sender}"
-            let Some((ts_str, sender)) = rest.split_once('|') else {
-                continue;
-            };
-            let Ok(ts) = ts_str.parse::<i64>() else {
-                continue;
-            };
-            if let Ok(Some(raw)) = store.get(Self::HISTORY_CACHE_NS, &key).await
-                && let Some(bytes) = self.decrypt_cache(&raw)
-            {
-                out.push((ts, sender.to_string(), bytes));
-            }
-        }
-        out
+        load_cached_raw(store, &self.history_cache_prefix(target), ns)
+            .await
+            .into_iter()
+            .filter_map(|(ts, sender, raw)| {
+                self.decrypt_cache(&raw).map(|bytes| (ts, sender, bytes))
+            })
+            .collect()
     }
 
     async fn persist_cached_history(&self, channel_id: &str, ts: i64, sender: &str, bytes: &[u8]) {
@@ -2400,6 +2383,33 @@ fn sanitize_attachment_name(s: &str) -> String {
     }
 }
 
+/// 按命名空间列出某个缓存目标（频道 / DM）的原始记录。
+///
+/// 与写入共用调用方传入的 `ns`：写进哪个命名空间就必须从哪个读。
+async fn load_cached_raw(store: &Store, prefix: &str, ns: &str) -> Vec<(i64, String, Vec<u8>)> {
+    let keys = match store.list_keys(ns).await {
+        Ok(k) => k,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for key in keys {
+        let Some(rest) = key.strip_prefix(prefix) else {
+            continue;
+        };
+        // rest = "{ts:013}|{sender}"
+        let Some((ts_str, sender)) = rest.split_once('|') else {
+            continue;
+        };
+        let Ok(ts) = ts_str.parse::<i64>() else {
+            continue;
+        };
+        if let Ok(Some(raw)) = store.get(ns, &key).await {
+            out.push((ts, sender.to_string(), raw));
+        }
+    }
+    out
+}
+
 /// 计算 SHA-256 的小写 hex（64 字符）。
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -2561,5 +2571,47 @@ mod attachment_integrity_tests {
         let raw = wrapped(b"secret");
         let upper = sha256_hex(&raw).to_ascii_uppercase();
         assert!(verify_attachment_blob(&raw, Some(&upper)).is_ok());
+    }
+}
+
+/// 回归：DM 历史缓存写入 `dm_history_cache`，读取必须来自同一命名空间。
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod history_cache_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cached_history_reads_from_requested_namespace() {
+        let store = Store::memory();
+        let prefix = "alice|http://x|dm:alice:bob|";
+
+        store
+            .put(
+                "dm_history_cache",
+                &format!("{prefix}0000000000100|bob"),
+                b"hi",
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                "history_cache",
+                &format!("{prefix}0000000000200|carol"),
+                b"other",
+            )
+            .await
+            .unwrap();
+
+        let dm = load_cached_raw(&store, prefix, "dm_history_cache").await;
+        assert_eq!(
+            dm.len(),
+            1,
+            "dm cache must be readable from its own namespace"
+        );
+        assert_eq!(dm[0].1, "bob");
+        assert_eq!(dm[0].2, b"hi");
+
+        let ch = load_cached_raw(&store, prefix, "history_cache").await;
+        assert_eq!(ch.len(), 1);
+        assert_eq!(ch[0].1, "carol");
     }
 }

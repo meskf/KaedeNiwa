@@ -29,6 +29,24 @@ pub struct UiMessage {
     pub mentions: Vec<String>,
 }
 
+/// 每个频道 / DM 会话的消息缓存上限。
+///
+/// 只约束实时消息与本地发送造成的增长（避免 DOM / 内存无限膨胀）；
+/// 用户主动“加载更早”的分页不受限制——那是显式操作，且服务端保存了完整密文历史。
+pub const MAX_CACHED_MESSAGES: usize = 1000;
+/// 超过上限后一次性裁到的条数（避免每条消息都裁一次）。
+pub const TRIM_CACHED_MESSAGES_TO: usize = 500;
+
+/// 维持消息窗口：超出上限时从最旧的一端丢弃，保留最近的对话。
+///
+/// 所有实时追加 / 本地回显路径都必须调用它；历史分页反向前插不调用。
+pub fn trim_cached_messages(list: &mut Vec<UiMessage>) {
+    if list.len() > MAX_CACHED_MESSAGES {
+        let drop_n = list.len() - TRIM_CACHED_MESSAGES_TO;
+        list.drain(0..drop_n);
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum AccountMode {
     #[default]
@@ -626,4 +644,37 @@ pub struct UploadFile {
     pub name: String,
     pub mime: String,
     pub data: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(ts: i64) -> UiMessage {
+        UiMessage {
+            ts,
+            text: format!("m{ts}"),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn trims_oldest_when_over_cap() {
+        let mut list: Vec<UiMessage> = (0..=MAX_CACHED_MESSAGES as i64).map(msg).collect();
+        trim_cached_messages(&mut list);
+        assert_eq!(list.len(), TRIM_CACHED_MESSAGES_TO);
+        // 保留的是最近的对话：最旧一条被丢弃。
+        assert_eq!(
+            list.first().map(|m| m.ts),
+            Some((MAX_CACHED_MESSAGES - TRIM_CACHED_MESSAGES_TO) as i64 + 1)
+        );
+    }
+
+    #[test]
+    fn keeps_window_at_or_below_cap() {
+        let mut list: Vec<UiMessage> = (0..MAX_CACHED_MESSAGES as i64).map(msg).collect();
+        trim_cached_messages(&mut list);
+        assert_eq!(list.len(), MAX_CACHED_MESSAGES);
+        assert_eq!(list.first().map(|m| m.ts), Some(0));
+    }
 }

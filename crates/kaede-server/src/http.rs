@@ -295,11 +295,13 @@ async fn login(
         return Err(ApiError::Unauthorized);
     }
 
+    // BUG-FIX: 失败计数按 `client_ip()` 记录，清除必须用同一个来源 IP。
+    // 之前用 `peer.ip()`，反向代理部署下（peer 是代理地址）计数永远清不掉。
     state
         .login_failures
         .lock()
-        .unwrap()
-        .remove(&(req.login_id.clone(), peer.ip()));
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(req.login_id.clone(), ip));
 
     let token = issue_session(&state, &req.login_id, &req.device_name).await?;
 
@@ -799,8 +801,9 @@ async fn post_message(
         .fetch_all(&state.pool)
         .await?;
         for (member,) in members {
-            state.send_to(
-                &UserId::new(member),
+            let target = UserId::new(member);
+            let delivered = state.send_to(
+                &target,
                 ServerMessage::ChannelMessage {
                     channel_id: req.channel_id.clone(),
                     from: uid.clone(),
@@ -808,6 +811,25 @@ async fn post_message(
                     ciphertext: ct.clone(),
                 },
             );
+            if !delivered {
+                // 在线但发送缓冲满 / 已离线：暂存，等下次 Join 补投。
+                // payload = [ts: i64 BE][ciphertext]，与 ws::deliver_pending 约定一致。
+                let mut pending = Vec::with_capacity(8 + ct.len());
+                pending.extend_from_slice(&ts.to_be_bytes());
+                pending.extend_from_slice(&ct);
+                if let Err(e) = db::enqueue_envelope(
+                    &state.pool,
+                    target.as_str(),
+                    uid.as_str(),
+                    "channel_message",
+                    Some(&req.channel_id),
+                    &pending,
+                )
+                .await
+                {
+                    tracing::warn!("enqueue channel_message failed: {}", e);
+                }
+            }
         }
     }
 
