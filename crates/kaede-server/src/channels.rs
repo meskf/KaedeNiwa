@@ -67,6 +67,7 @@ struct ChannelsResp {
     channels: Vec<Channel>,
 }
 
+#[allow(clippy::type_complexity)]
 async fn list_channels(
     State(state): State<AppState>,
     headers: HeaderMap,

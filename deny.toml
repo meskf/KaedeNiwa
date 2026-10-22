@@ -4,8 +4,8 @@
 
 [advisories]
 yanked = "warn"
-unmaintained = "workspace"
-unsound = "workspace"
+unmaintained = "warn"
+unsound = "warn"
 ignore = [
     # zip 0.6.6：webrtc-sys-build 的 build-only 依赖，输入是 GitHub 官方 release，
     # 3 条 advisory 都需要解压 attacker-controlled ZIP 才能触发，本项目不成立。
