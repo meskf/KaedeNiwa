@@ -5,6 +5,7 @@
 //!
 //! **服务器永不解析 MLS payload。**
 
+pub mod admin;
 pub mod attachments;
 pub mod channels;
 pub mod config;
@@ -15,6 +16,7 @@ pub mod friends;
 pub mod http;
 pub mod livekit;
 pub mod members;
+pub mod metrics;
 pub mod reads;
 pub mod sessions_api;
 pub mod state;
@@ -79,8 +81,10 @@ async fn require_auth_header(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let path = req.uri().path();
-    let public = matches!(path, "/health" | "/api/login" | "/api/register")
-        || path == "/ws"
+    let public = matches!(
+        path,
+        "/health" | "/ready" | "/metrics" | "/api/login" | "/api/register"
+    ) || path == "/ws"
         || req.method() == Method::OPTIONS;
     if public || req.headers().get(AUTHORIZATION).is_some() {
         return next.run(req).await;
@@ -109,6 +113,9 @@ pub async fn spawn_test_server() -> std::io::Result<SocketAddr> {
         livekit_api_key: "testkey".into(),
         livekit_api_secret: "testsecret".into(),
         livekit_ws_url: "ws://localhost:7880".into(),
+        admin_enabled: false,
+        admin_bind: "127.0.0.1:3001".into(),
+        admin_token: String::new(),
     };
     let pool = db::init(&cfg.database_url).await.expect("db init");
     ensure_default_channels(&pool).await;

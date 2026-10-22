@@ -1,0 +1,49 @@
+# KaedeNiwa Caddy 配置
+#
+# 环境变量：
+#   KAEDE_DOMAIN=kaede.example.com
+#
+# Caddy 自动申请/续期 TLS 证书，并原生转发 WebSocket（/ws）。
+# 静态站来自 dist/web（compose 中挂载到 /srv/kaede）。
+{$KAEDE_DOMAIN} {
+	encode zstd gzip
+
+	# 指标只给本机 Prometheus；公网不暴露。
+	handle /metrics {
+		respond "not found" 404
+	}
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle /ws {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle /health {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle /ready {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# SPA：未知路径回退 index.html
+	handle {
+		root * /srv/kaede
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		# Web 快照密钥有公开信息回退方案；CSP 是抵御 XSS/浏览器扩展读取
+		# IndexedDB 的重要纵深防御。Blob/Same-origin 用于 LiveKit E2EE worker。
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; object-src 'none'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self' wss: https:; base-uri 'self'; frame-ancestors 'none'"
+		Permissions-Policy "camera=(self), microphone=(self), display-capture=(self), geolocation=(), notifications=()"
+		-Server
+	}
+}

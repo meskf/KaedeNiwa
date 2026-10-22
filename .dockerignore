@@ -1,0 +1,23 @@
+# 构建上下文排除项：减小 Docker 上下文并避免把本机运行时数据带进镜像。
+target/
+**/target/
+dist/
+**/dist/
+node_modules/
+_webrtc/
+tools/
+_archive/
+_screens/
+.audit/
+.git/
+.github/
+*.db
+*.db-shm
+*.db-wal
+*.log
+_*.log
+_*.txt
+_docs_backup_*.zip
+review_bundle_*/
+data/
+crates/*/data/

@@ -1,0 +1,42 @@
+# KaedeNiwa systemd unit
+#
+# 安装：
+#   sudo useradd --system --home /var/lib/kaede --shell /usr/sbin/nologin kaede
+#   sudo install -m 0644 deploy/kaede-server.service /etc/systemd/system/
+#   sudo install -d -o kaede -g kaede /var/lib/kaede
+#   sudo install -d -m 0750 /etc/kaede
+#   sudo install -m 0600 deploy/.env.example /etc/kaede/kaede.env  # 填好后 chmod 600
+#   sudo systemctl daemon-reload && sudo systemctl enable --now kaede-server
+[Unit]
+Description=KaedeNiwa signaling server
+Documentation=https://github.com/kaede-niwa/kaede
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kaede
+Group=kaede
+WorkingDirectory=/var/lib/kaede
+EnvironmentFile=/etc/kaede/kaede.env
+ExecStart=/usr/local/bin/kaede-server
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGTERM
+StateDirectory=kaede
+StateDirectoryMode=0750
+LimitNOFILE=65536
+
+# 基础加固（不依赖额外 sandbox 工具）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kaede
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

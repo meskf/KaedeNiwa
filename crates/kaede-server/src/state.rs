@@ -17,6 +17,10 @@ pub struct PeerHandle {
     pub uid: UserId,
     pub tx: mpsc::Sender<ServerMessage>,
     pub session_id: u64,
+    /// 该 WS 连接对应的 HTTP session_id（`sessions.session_id`）。
+    ///
+    /// 用于“撤销其他设备”时精确断开被撤销的连接，而不是误伤当前设备。
+    pub http_session_id: String,
 }
 
 #[derive(Default)]
@@ -60,6 +64,23 @@ impl RateBucket {
 ///
 /// 这防止 HashMap 无限增长（恶意客户端可尝试注册无数 uid 填满 map）。
 const RATE_BUCKET_TTL: Duration = Duration::from_secs(600);
+
+/// 单个账号的 WS 字节预算：8 MiB/s，突发 16 MiB。
+///
+/// 只按条数限流时，30 条/s × 4 MiB 可以打出 120 MiB/s 的单连接上行；
+/// 这里给字节数单独一个桶，文本聊天（几百字节）完全不受影响。
+pub(crate) const WS_BYTES_PER_SEC: f64 = 8.0 * 1024.0 * 1024.0;
+pub(crate) const WS_BYTES_BURST: f64 = 16.0 * 1024.0 * 1024.0;
+
+/// 全房间广播预算：32 MiB/s，突发 64 MiB。
+///
+/// 成本 = 单条 payload 字节数 × 收件人数，防止“一个大包 × 很多在线用户”
+/// 的扇出放大拖垮服务器出口带宽。
+pub(crate) const BROADCAST_BYTES_PER_SEC: f64 = 32.0 * 1024.0 * 1024.0;
+pub(crate) const BROADCAST_BYTES_BURST: f64 = 64.0 * 1024.0 * 1024.0;
+
+/// 并发 WebSocket 连接上限（同时是 semaphore 与 /metrics 的容量来源）。
+pub const MAX_WS_CONNECTIONS: usize = 5000;
 
 /// `broadcast_except_important` 对**单个** peer 的发送超时。
 ///
@@ -107,6 +128,8 @@ pub struct AppState {
     pub room: Arc<Mutex<Room>>,
     /// 限流桶：Key = `"{uid}:{scope}"`，见 `check_rate_scoped`。
     pub rate_buckets: Arc<Mutex<HashMap<String, RateBucket>>>,
+    /// 房间级广播字节预算（所有用户共享）。
+    pub broadcast_budget: Arc<Mutex<RateBucket>>,
     /// P0-1：连接 session id 生成器。
     pub next_session_id: Arc<std::sync::atomic::AtomicU64>,
     /// P1-10：WS 连接并发上限。
@@ -129,10 +152,29 @@ pub struct AppState {
     pub room_media_seeds: Arc<Mutex<HashMap<String, RoomMedia>>>,
     /// KeyPackage 拉取的 per-target 限流（target -> (次数, 窗口起点)）。
     pub kp_fetch_budget: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
+    /// 管理面板 token。空字符串表示 admin 未启用或未设置。
+    pub admin_token: String,
+    /// Prometheus 计数器。
+    pub metrics: Arc<crate::metrics::Metrics>,
+    /// 进程启动时间，用于 admin dashboard 的 uptime。
+    pub started_at: Instant,
+    /// 内存日志环形缓冲，admin /api/logs 从这里读。
+    pub log_buffer: crate::admin::logs::LogBuffer,
 }
 
 impl AppState {
     pub fn new(pool: SqlitePool, cfg: Config) -> Self {
+        Self::new_with_log(pool, cfg, crate::admin::logs::LogBuffer::new())
+    }
+
+    /// 带共享 log buffer 的构造器（main.rs 用：subscriber layer 与 AppState 共享同一 buffer）。
+    pub fn new_with_log(
+        pool: SqlitePool,
+        cfg: Config,
+        log_buffer: crate::admin::logs::LogBuffer,
+    ) -> Self {
+        // 提前提取：cfg 会在结构体构造时被 move 进 Self
+        let admin_token_for_state = cfg.admin_token.clone();
         let rate_buckets = Arc::new(Mutex::new(HashMap::<String, RateBucket>::new()));
         // P1-6：后台清理任务，防恶意注册 uid 撑爆 rate_buckets。
         let buckets_clone = rate_buckets.clone();
@@ -180,12 +222,17 @@ impl AppState {
             cfg,
             room: Arc::new(Mutex::new(Room::default())),
             rate_buckets,
+            broadcast_budget: Arc::new(Mutex::new(RateBucket::new(BROADCAST_BYTES_BURST))),
             next_session_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            ws_semaphore: Arc::new(tokio::sync::Semaphore::new(5000)),
+            ws_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_WS_CONNECTIONS)),
             login_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
             login_failures,
             room_media_seeds,
             kp_fetch_budget: kp_budget,
+            admin_token: admin_token_for_state,
+            metrics: Arc::new(crate::metrics::Metrics::default()),
+            started_at: Instant::now(),
+            log_buffer,
         }
     }
 
@@ -242,6 +289,44 @@ impl AppState {
         let mut room = self.room.lock().unwrap_or_else(|e| e.into_inner());
         room.presence.remove(uid);
         room.peers.remove(uid)
+    }
+
+    /// 仅当在线连接属于指定 HTTP session 时才移除（撤销单个会话用）。
+    pub fn take_peer_if_http_session(
+        &self,
+        uid: &UserId,
+        http_session_id: &str,
+    ) -> Option<PeerHandle> {
+        let mut room = self.room.lock().unwrap_or_else(|e| e.into_inner());
+        let matches = room
+            .peers
+            .get(uid)
+            .is_some_and(|p| p.http_session_id == http_session_id);
+        if matches {
+            room.presence.remove(uid);
+            room.peers.remove(uid)
+        } else {
+            None
+        }
+    }
+
+    /// 仅当在线连接不属于当前 HTTP session 时才移除（撤销其他设备用）。
+    pub fn take_peer_if_other_http_session(
+        &self,
+        uid: &UserId,
+        current_http_session: &str,
+    ) -> Option<PeerHandle> {
+        let mut room = self.room.lock().unwrap_or_else(|e| e.into_inner());
+        let is_other = room
+            .peers
+            .get(uid)
+            .is_some_and(|p| p.http_session_id != current_http_session);
+        if is_other {
+            room.presence.remove(uid);
+            room.peers.remove(uid)
+        } else {
+            None
+        }
     }
 
     pub fn remove_peer(&self, uid: &UserId) {
@@ -309,13 +394,53 @@ impl AppState {
     /// 不同端点（发言 / 拉 KP / 语音 token / 上传）的速率和容量差异很大，
     /// 共用一个桶会让聊天把 KeyPackage 拉取额度挤掉。scope 用于隔离它们。
     pub fn check_rate_scoped(&self, uid: &UserId, scope: &str, rate: f64, capacity: f64) -> bool {
+        self.check_rate_scoped_cost(uid, scope, rate, capacity, 1.0)
+    }
+
+    /// 按权重消耗 token。`cost` 可以是字节数（字节预算）或消息条数。
+    pub fn check_rate_scoped_cost(
+        &self,
+        uid: &UserId,
+        scope: &str,
+        rate: f64,
+        capacity: f64,
+        cost: f64,
+    ) -> bool {
         let key = format!("{}:{}", uid.as_str(), scope);
+        self.check_rate_key_cost(&key, rate, capacity, cost)
+    }
+
+    /// 按任意 key 限流（用于未登录请求，例如按来源 IP 限制注册）。
+    pub fn check_rate_key(&self, key: &str, rate: f64, capacity: f64) -> bool {
+        self.check_rate_key_cost(key, rate, capacity, 1.0)
+    }
+
+    pub fn check_rate_key_cost(&self, key: &str, rate: f64, capacity: f64, cost: f64) -> bool {
         let mut map = self.rate_buckets.lock().unwrap_or_else(|e| e.into_inner());
-        let bucket = map.entry(key).or_insert_with(|| RateBucket::new(capacity));
+        let bucket = map
+            .entry(key.to_string())
+            .or_insert_with(|| RateBucket::new(capacity));
         if bucket.last.elapsed() > RATE_BUCKET_TTL {
             *bucket = RateBucket::new(capacity);
         }
-        bucket.try_consume(1.0, rate, capacity)
+        bucket.try_consume(cost, rate, capacity)
+    }
+
+    /// 预留全房间广播带宽（成本 = payload 字节 × 收件人数）。
+    pub fn try_reserve_broadcast(&self, payload_bytes: usize, recipients: usize) -> bool {
+        let cost = payload_bytes as f64 * recipients.max(1) as f64;
+        self.broadcast_budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .try_consume(cost, BROADCAST_BYTES_PER_SEC, BROADCAST_BYTES_BURST)
+    }
+
+    pub fn peer_count(&self) -> usize {
+        self.room
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .peers
+            .len()
     }
 
     /// 主动清除某个 uid 的所有限流桶（如踢人时）。
@@ -359,11 +484,15 @@ impl AppState {
         };
         let sends = targets.into_iter().map(|tx| {
             let msg = msg.clone();
+            let metrics = self.metrics.clone();
             async move {
                 match tokio::time::timeout(BROADCAST_SEND_TIMEOUT, tx.send(msg)).await {
                     Ok(Ok(())) => {}
                     Ok(Err(_)) => tracing::warn!("broadcast_important: target closed"),
-                    Err(_) => tracing::warn!("broadcast_important: target slow (2s), dropped"),
+                    Err(_) => {
+                        metrics.slow_peer_dropped();
+                        tracing::warn!("broadcast_important: target slow (2s), dropped");
+                    }
                 }
             }
         });
@@ -413,6 +542,9 @@ mod tests {
             livekit_api_key: "testkey".into(),
             livekit_api_secret: "testsecret".into(),
             livekit_ws_url: "ws://localhost:7880".into(),
+            admin_enabled: false,
+            admin_bind: "127.0.0.1:3001".into(),
+            admin_token: String::new(),
         };
         AppState::new(pool, cfg)
     }
@@ -426,11 +558,13 @@ mod tests {
             uid: UserId::new("a"),
             tx: tx1,
             session_id: 0,
+            http_session_id: String::new(),
         });
         state.add_peer(PeerHandle {
             uid: UserId::new("b"),
             tx: tx2,
             session_id: 0,
+            http_session_id: String::new(),
         });
 
         state.broadcast_all(ServerMessage::PeerLeft {
@@ -451,11 +585,13 @@ mod tests {
             uid: uid_a.clone(),
             tx: tx_a,
             session_id: 0,
+            http_session_id: String::new(),
         });
         state.add_peer(PeerHandle {
             uid: UserId::new("b"),
             tx: tx_b,
             session_id: 0,
+            http_session_id: String::new(),
         });
 
         state.broadcast_except(
@@ -490,6 +626,7 @@ mod tests {
             uid: uid.clone(),
             tx,
             session_id: 0,
+            http_session_id: String::new(),
         });
         let ok = state.send_to(&uid, ServerMessage::Pong { nonce: 42 });
         assert!(ok);
@@ -568,6 +705,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn byte_budget_limits_large_messages() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let state = rt.block_on(mk_state());
+        let alice = UserId::new("alice");
+        let mib = 1024.0 * 1024.0;
+
+        // 16 MiB 突发正好允许 4 个 4 MiB 包。
+        for i in 0..4 {
+            assert!(
+                state.check_rate_scoped_cost(
+                    &alice,
+                    "ws-bytes",
+                    WS_BYTES_PER_SEC,
+                    WS_BYTES_BURST,
+                    4.0 * mib
+                ),
+                "4 MiB packet {} should pass",
+                i
+            );
+        }
+        assert!(
+            !state.check_rate_scoped_cost(
+                &alice,
+                "ws-bytes",
+                WS_BYTES_PER_SEC,
+                WS_BYTES_BURST,
+                4.0 * mib
+            ),
+            "5th 4 MiB packet must be limited"
+        );
+    }
+
+    #[test]
+    fn broadcast_budget_accounts_for_fanout() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let state = rt.block_on(mk_state());
+        let mib = 1024 * 1024;
+
+        // 4 MiB × 32 收件人 = 128 MiB，超过 64 MiB 突发。
+        assert!(
+            !state.try_reserve_broadcast(4 * mib, 32),
+            "large fanout must be rejected"
+        );
+        // 普通文本 × 100 人完全在预算内。
+        assert!(
+            state.try_reserve_broadcast(1024, 100),
+            "small broadcast should pass"
+        );
+    }
+
     #[tokio::test]
     async fn remove_peer_if_session_rejects_stale_session() {
         let state = mk_state().await;
@@ -579,11 +767,13 @@ mod tests {
             uid: alice.clone(),
             tx: tx1,
             session_id: 1,
+            http_session_id: String::new(),
         });
         state.add_peer(PeerHandle {
             uid: alice.clone(),
             tx: tx2,
             session_id: 2,
+            http_session_id: String::new(),
         });
 
         // 旧 session 退出，不应删除新 session 的 handle
@@ -668,6 +858,7 @@ mod tests {
             uid: UserId::new("slow"),
             tx: tx_slow,
             session_id: 1,
+            http_session_id: String::new(),
         });
 
         let sender = UserId::new("sender");
@@ -717,6 +908,7 @@ mod tests {
             uid: UserId::new("slow"),
             tx: tx_slow,
             session_id: 1,
+            http_session_id: String::new(),
         });
 
         // healthy peer
@@ -725,6 +917,7 @@ mod tests {
             uid: UserId::new("healthy"),
             tx: tx_healthy,
             session_id: 2,
+            http_session_id: String::new(),
         });
 
         let sender = UserId::new("sender");
@@ -768,6 +961,7 @@ mod tests {
                 uid: UserId::new(format!("peer-{}", i)),
                 tx,
                 session_id: i + 1,
+                http_session_id: String::new(),
             });
             rxs.push(rx);
         }

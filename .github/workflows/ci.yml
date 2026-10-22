@@ -33,6 +33,8 @@ jobs:
           toolchain: "1.99.0"
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: install keyring deps (Linux Secret Service)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
       - name: clippy core
         run: >-
           cargo clippy
@@ -63,7 +65,8 @@ jobs:
             pkg-config cmake clang libclang-dev \
             libssl-dev libx11-dev libxext-dev libxfixes-dev \
             libgl1-mesa-dev libgbm-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libdbus-1-dev
       - name: clippy full
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -87,6 +90,8 @@ jobs:
           toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
+      - name: install keyring deps (Linux Secret Service)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
       - run: cargo nextest run -p ${{ matrix.crate }} --no-fail-fast
 
   e2e-client:
@@ -99,6 +104,8 @@ jobs:
           toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
+      - name: install keyring deps (Linux Secret Service)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
       - run: cargo nextest run -p kaede-client --features native --test room_e2e --no-fail-fast
 
   check-wasm:
