@@ -19,12 +19,14 @@ Rust 原生的 E2EE 实时协作平台。
       kaede-storage/        存储抽象（memory / SQLite / IndexedDB）
       kaede-client/         客户端状态机 + HTTP + WS + RoomSession
       kaede-server/         signaling server（axum + WS + SQLite）
-      kaede-ui/             Dioxus 组件（占位，重做中）
-      kaede-wasm/           Web 入口
+      kaede-ui/             Dioxus 组件（Web / Desktop / 移动端响应式）
+      kaede-wasm/           Web 入口（PWA）
       kaede-desktop/        Desktop 入口（Wry）
+      kaede-admin/          管理后台桌面端（Dioxus）
       kaede-capture/        屏幕采集 + NVENC + 音频（GStreamer）
-      kaede-media/          媒体会话层（SFrame / LiveKit E2EE）
-      kaede-livekit-spike/  LiveKit API 验证（实验）
+      kaede-media/          媒体层（SFrame / LiveKit E2EE）
+      kaede-media-session/  LiveKit 原生媒体会话
+      kaede-livekit-web/    Web 端 LiveKit JS 绑定
 
 ## 常用命令
 
@@ -42,13 +44,16 @@ Rust 原生的 E2EE 实时协作平台。
 
 ## 已知限制
 
-- **协议版本 v5**：新增好友变更实时事件；私密频道实时消息 + DM/私密频道密文 v2
-  （发送者/接收者绑定与重放保护）。需要服务端与客户端同时升级；旧客户端会被拒绝。
+- **协议版本 v6**：v5 新增好友变更实时事件；v6 新增私密频道表情反应
+  （频道 group key 加密 + 服务端定向 fanout）。需要服务端与客户端同时升级；旧客户端会被拒绝。
 - **Web 语音 E2EE** 依赖 `livekit-client@2.14.0` 的 e2ee worker；离线 PWA 需缓存该 worker 脚本。
 - **媒体统一走 LiveKit HTTP token**；旧版 SDP/ICE/SfuToken 协议变体已移除。
 - **画质档位（8K/4K/码率）**：native 传入编码器，Web 通过 `getDisplayMedia` 分辨率约束生效；
   共享中切换档位会自动重建共享。
-- **私密频道暂不支持表情反应**（会经主群广播泄露频道 id，已显式禁用）。
+- **快照加密**：Windows 用 DPAPI；macOS/Linux Desktop 用系统钥匙串（Keychain / Secret Service）
+  保存随机 key；钥匙串不可用时拒绝持久化并暂停发送，不再退回公开信息派生 key。
+  Linux 构建需要 `libdbus-1-dev` + `pkg-config`。
+- **本地搜索**：只搜索本地已解密的频道历史与 DM 历史；服务端只有密文，无法全文搜索。
 - **媒体 seed TTL 8 小时**：崩溃/关页不会调用 `/leave`，seed 最迟在 8 小时后轮换。
 - **Windows 并发编译**：`webrtc-sys` 和 `tao` 在多核并发编译时偶发元数据竞争失败。
   解决：`$env:CARGO_BUILD_JOBS = "2"` 后重试，或直接重试一次。
@@ -57,7 +62,51 @@ Rust 原生的 E2EE 实时协作平台。
   首次 clone 后需要重新生成或从备份复制，否则 `kaede-media` 构建会失败。
 - **`tools/livekit/livekit-server.exe`**：55MB，`.gitignore` 忽略，用 `scripts/download-livekit.ps1` 下载。
 
+## 部署与运维
+
+生产 / Beta 部署使用单二进制 + SQLite，TLS 由 Caddy 或 Nginx 终结：
+
+- [deploy/README.md](deploy/README.md) — 部署、可观测性、备份恢复、升级与回滚 runbook
+- [deploy/Dockerfile](deploy/Dockerfile) · [deploy/docker-compose.yml](deploy/docker-compose.yml)
+- [deploy/kaede-server.service](deploy/kaede-server.service)（systemd）
+- [deploy/Caddyfile](deploy/Caddyfile) · [deploy/nginx.conf](deploy/nginx.conf)
+
+运行时端点：`/health`（存活）、`/ready`（DB 就绪）、`/metrics`（Prometheus）。
+启动时校验配置，非法值直接退出。结构化日志：`KAEDE_LOG_FORMAT=json`。
+
+```powershell
+pwsh -File scripts/bundle.ps1 web        # dist/web
+cargo build --release -p kaede-server    # target/release/kaede-server
+```
+
+数据库备份（SQLite WAL 必须用在线备份，不能直接复制文件）：
+
+```powershell
+pwsh -File scripts/backup-db.ps1 -Db C:\kaede\kaede.db
+```
+
+## 管理后台
+
+独立 listener（默认 `127.0.0.1:3001`），通过 `X-Admin-Token` 认证，只管理元数据，
+看不到任何消息明文。
+
+    # 启动服务端时启用
+    KAEDE_ADMIN_ENABLED=1 \
+    KAEDE_ADMIN_TOKEN=<随机长 token> \
+    KAEDE_ADMIN_BIND=127.0.0.1:3001 \
+    cargo run -p kaede-server
+
+    # 启动桌面端后台
+    cargo run -p kaede-admin
+
+- 未设置 `KAEDE_ADMIN_TOKEN` 时会生成一次性 token 并打印到服务端 stdout（不会进入
+  `/api/logs`）。
+- 远程运维建议保持 `127.0.0.1` 绑定 + SSH 隧道，或在前方加 HTTPS 反向代理；
+  后台登录页会提示明文 HTTP 风险。
+- 后台支持：仪表盘、用户封禁/解封（含原因）、频道删除、日志查看、systemd 服务模式命令生成。
+
 ## 文档
 
-- [docs/README.md](docs/README.md) — 文档索引（审计 / 产品方案 / 测试清单）
-- [SECURITY.md](SECURITY.md) — 安全策略
+- [SECURITY.md](SECURITY.md) — 安全策略与威胁模型
+- [deploy/README.md](deploy/README.md) — 部署、可观测性、备份恢复与升级 runbook
+- 审计报告与产品方案按版本归档在本机 `_docs_backup_*.zip`，不随仓库发布。

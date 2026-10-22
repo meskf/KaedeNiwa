@@ -79,3 +79,12 @@ _screens/
 
 # ---- 临时文档备份（本机保留，不入库） ----
 _docs_backup_*.zip
+
+# ---- 运行时附件存储（测试 / 本地运行生成）----
+/data/
+crates/*/data/
+
+# ---- 部署密钥与本地备份（绝不入库）----
+deploy/.env
+backups/
+*.db.sha256
