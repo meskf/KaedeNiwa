@@ -123,6 +123,29 @@ jobs:
       - name: check kaede-client (wasm feature)
         run: cargo check -p kaede-client --features wasm --target wasm32-unknown-unknown
 
+  check-windows:
+    name: check (windows, core crates)
+    runs-on: windows-latest
+    env:
+      # webrtc-sys 在 Windows 多核并发编译时偶发 MSVC C1060（编译器堆空间不足）
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: check core crates
+        run: >-
+          cargo check
+          -p kaede-protocol
+          -p kaede-crypto
+          -p kaede-storage
+          -p kaede-mls
+          -p kaede-client
+          -p kaede-server
+          --all-targets
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
