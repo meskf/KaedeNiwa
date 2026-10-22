@@ -252,6 +252,21 @@ async fn remove_friend(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 是否为已接受的好友关系（双向关系里任一方向 accepted 即可）。
+///
+/// 用于 KeyPackage 拉取的信任判定：好友不受目标队列保留量限制。
+pub async fn is_friend(pool: &sqlx::SqlitePool, a: &str, b: &str) -> Result<bool, sqlx::Error> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM friends \
+         WHERE login_id = ? AND friend_login_id = ? AND status = 'accepted'",
+    )
+    .bind(a)
+    .bind(b)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
 /// 通知在线的相关用户重新拉取好友列表；离线用户忽略（DB 已持久化）。
 fn notify_friends_changed(state: &AppState, uids: &[&String]) {
     for uid in uids {

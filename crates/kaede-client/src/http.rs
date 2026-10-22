@@ -98,6 +98,11 @@ pub struct FetchKeyPackageResp {
     pub package: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct KpCountResp {
+    remaining: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PostMessageReq {
     pub channel_id: String,
@@ -453,6 +458,21 @@ impl HttpApi {
             )));
         }
         Ok(kp_bytes)
+    }
+
+    /// 当前账号在服务端剩余的可被他人消费的 KeyPackage 数量。
+    ///
+    /// 每个 KP 只能消费一次，登录时据此判断是否需要补货。
+    pub async fn key_package_count(&self) -> Result<usize, ClientError> {
+        let resp = self
+            .http
+            .get(format!("{}/api/keypackages/self/count", self.base_url))
+            .bearer_auth(self.bearer()?)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        let body = parse_json::<KpCountResp>(resp).await?;
+        Ok(body.remaining.max(0) as usize)
     }
 
     /// 保存一条消息（服务端只存密文，不解密）。

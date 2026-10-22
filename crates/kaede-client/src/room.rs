@@ -457,6 +457,26 @@ impl RoomSession {
         self.conn.join().await?;
         if self.conn.mls_is_ready() {
             self.conn.report_epoch(self.conn.mls_epoch()).await?;
+            // 每个 KeyPackage 只能被消费一次，队列会随使用自然耗尽。
+            // 每次登录/重连检查一次，低于水位时补货，避免“再也没人能邀请我”。
+            if let Err(e) = self.replenish_key_packages_if_low().await {
+                tracing::warn!(
+                    "[join_room] key package replenish failed (non-fatal): {}",
+                    e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// 队列低于水位线时上传一批新的 KeyPackage。
+    ///
+    /// 首次登录时 `become_host` / `become_guest` 已发布一批，因此水位线
+    /// 取默认批次大小，避免重复发布。
+    async fn replenish_key_packages_if_low(&self) -> Result<(), ClientError> {
+        const LOW_WATERMARK: usize = DEFAULT_KP_BATCH_SIZE;
+        if self.http.key_package_count().await? < LOW_WATERMARK {
+            self.publish_key_packages().await?;
         }
         Ok(())
     }

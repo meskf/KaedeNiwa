@@ -1234,3 +1234,145 @@ async fn remove_channel_member_notifies() {
             .all(|c| c["id"] != ch.as_str())
     );
 }
+
+// ---------------------------------------------------------------------------
+// KeyPackage 防抽干
+// ---------------------------------------------------------------------------
+
+/// 为 `login_id` 生成 `n` 个合法 KeyPackage（base64 URL-safe）。
+fn make_key_packages(login_id: &str, n: usize) -> Vec<String> {
+    let provider = kaede_mls::KaedeMlsProvider::new();
+    let identity = kaede_mls::MlsIdentity::generate(login_id).unwrap();
+    (0..n)
+        .map(|_| URL_SAFE_NO_PAD.encode(identity.generate_key_package(&provider).unwrap()))
+        .collect()
+}
+
+/// 发布 KeyPackage 队列。
+async fn publish_kps(base: &str, token: &str, kps: &[String]) {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/keypackages", base))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "packages": kps }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let text = resp.text().await.unwrap();
+    assert!(
+        status.is_success(),
+        "publish kp failed: {} {}",
+        status,
+        text
+    );
+}
+
+async fn fetch_kp_status(base: &str, token: &str, target: &str) -> reqwest::StatusCode {
+    reqwest::Client::new()
+        .get(format!("{}/api/keypackages/{}", base, target))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+/// KP-DRAIN-1：非好友只能消费到保留线；好友可以继续消费。
+#[tokio::test]
+async fn keypackage_queue_reserved_for_friends() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let alice = register(&base, "alice").await;
+    let bob = register(&base, "bob").await;
+
+    // 只发布 5 个（低于保留线 8）。
+    publish_kps(&base, &bob, &make_key_packages("bob", 5)).await;
+
+    // 自己的剩余量可查。
+    let count: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/api/keypackages/self/count", base))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(count["remaining"].as_i64(), Some(5));
+
+    // 非好友：拒绝，且不消耗队列。
+    let status = fetch_kp_status(&base, &alice, "bob").await;
+    assert_eq!(status, reqwest::StatusCode::TOO_MANY_REQUESTS);
+    let count: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/api/keypackages/self/count", base))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        count["remaining"].as_i64(),
+        Some(5),
+        "rejected fetch must not consume a key package"
+    );
+
+    // 建立好友关系后可以继续消费。
+    let client = reqwest::Client::new();
+    assert!(
+        client
+            .post(format!("{}/api/friends/bob", base))
+            .bearer_auth(&alice)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    assert!(
+        client
+            .post(format!("{}/api/friends/alice/accept", base))
+            .bearer_auth(&bob)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+
+    let status = fetch_kp_status(&base, &alice, "bob").await;
+    assert!(status.is_success(), "friend fetch failed: {}", status);
+}
+
+/// KP-DRAIN-2：单个请求者对同一目标的消费速率受限（突发 2）。
+#[tokio::test]
+async fn keypackage_fetch_is_rate_limited_per_requester() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let alice = register(&base, "alice").await;
+    let bob = register(&base, "bob").await;
+
+    publish_kps(&base, &bob, &make_key_packages("bob", 20)).await;
+
+    assert!(fetch_kp_status(&base, &alice, "bob").await.is_success());
+    assert!(fetch_kp_status(&base, &alice, "bob").await.is_success());
+    assert_eq!(
+        fetch_kp_status(&base, &alice, "bob").await,
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+/// KP-DRAIN-3：队列为空时返回 404（而不是 429），客户端可区分“需要补货”。
+#[tokio::test]
+async fn empty_keypackage_queue_returns_not_found() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let alice = register(&base, "alice").await;
+    register(&base, "bob").await;
+
+    assert_eq!(
+        fetch_kp_status(&base, &alice, "bob").await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+}

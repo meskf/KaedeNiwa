@@ -27,6 +27,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/login", post(login))
         .route("/api/me", get(me))
         .route("/api/keypackages", post(publish_keypackages))
+        .route("/api/keypackages/self/count", get(key_package_count))
         .route("/api/keypackages/{login_id}", get(fetch_keypackage))
         .route("/api/messages", post(post_message))
         .route("/api/messages/{channel_id}", get(get_messages))
@@ -399,6 +400,33 @@ struct FetchKpResp {
     package: String,
 }
 
+#[derive(Serialize)]
+struct KpCountResp {
+    remaining: i64,
+}
+
+/// 非好友请求者能消费到的最低剩余量。
+///
+/// 队列低于该值时只允许好友继续取，攻击者无法把受害者的队列抽干到
+/// “任何人都无法邀请”的地步；受害者在下次登录时由客户端自动补货。
+const KP_RESERVE: i64 = 8;
+
+/// 当前账号自己的 KeyPackage 队列剩余量。
+///
+/// 客户端登录时据此决定是否补货：每个 KP 只能消费一次，长期使用后队列会自然耗尽。
+async fn key_package_count(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<KpCountResp>, ApiError> {
+    let uid = authenticate(&state, &headers).await?;
+    let (remaining,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM key_packages WHERE login_id = ?")
+            .bind(uid.as_str())
+            .fetch_one(&state.pool)
+            .await?;
+    Ok(Json(KpCountResp { remaining }))
+}
+
 async fn fetch_keypackage(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -406,18 +434,66 @@ async fn fetch_keypackage(
 ) -> Result<Json<FetchKpResp>, ApiError> {
     let uid = authenticate(&state, &headers).await?;
 
-    // C-7: per-uid 限流，防恶意用户消耗他人 KeyPackage 队列
+    // 防抽干第一层：单个请求者全局限流（不能同时扫很多人的队列）。
     if !state.check_rate_scoped(&uid, "kp_fetch", 1.0, 10.0) {
-        return Err(ApiError::BadRequest("keypackage fetch rate limited".into()));
+        state.metrics.rate_limited();
+        return Err(ApiError::TooManyRequests(
+            "keypackage fetch rate limited".into(),
+        ));
     }
-    // per-target 限流：即使攻击者换账号，也不能无限抽干同一个人的 KP 队列。
-    if !state.check_kp_fetch(&login_id) {
-        tracing::warn!(
-            "keypackage fetch throttled: target={} requester={}",
-            login_id,
-            uid
-        );
-        return Err(ApiError::BadRequest("keypackage fetch throttled".into()));
+
+    // 防抽干第一层（补充）：单个请求者对同一 target 的消费速率上限
+    // （约 1 次 / 10s，突发 2）。即使攻击者换账号，单账号也无法快速清空队列。
+    let pair_key = format!("kp_pair:{}:{}", uid.as_str(), login_id);
+    if !state.check_rate_key(&pair_key, 0.1, 2.0) {
+        state.metrics.rate_limited();
+        return Err(ApiError::TooManyRequests(
+            "keypackage fetch rate limited".into(),
+        ));
+    }
+
+    // 好友（双向 accepted）不受目标预算与保留量限制。
+    // 好友关系必须对方接受才能建立，攻击者无法单方面获取该豁免。
+    let is_friend = crate::friends::is_friend(&state.pool, uid.as_str(), &login_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("db: {}", e)))?;
+
+    if !is_friend {
+        // 防抽干第二层：per-target 全局限流（防多账号轮换）。
+        if !state.check_kp_fetch(&login_id) {
+            state.metrics.rate_limited();
+            tracing::warn!(
+                "keypackage fetch throttled: target={} requester={}",
+                login_id,
+                uid
+            );
+            return Err(ApiError::TooManyRequests(
+                "keypackage fetch throttled".into(),
+            ));
+        }
+
+        // 防抽干第三层：保留量。队列被消耗到只剩少量时，只有好友还能继续取。
+        // 这样攻击者最多把队列压到保留线，无法彻底抽干到“无法被任何人邀请”。
+        let (remaining,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM key_packages WHERE login_id = ?")
+                .bind(&login_id)
+                .fetch_one(&state.pool)
+                .await?;
+        if remaining == 0 {
+            return Err(ApiError::NotFound("key_package".into()));
+        }
+        if remaining <= KP_RESERVE {
+            state.metrics.rate_limited();
+            tracing::warn!(
+                "keypackage queue reserved: target={} requester={} remaining={}",
+                login_id,
+                uid,
+                remaining
+            );
+            return Err(ApiError::TooManyRequests(
+                "keypackage queue reserved".into(),
+            ));
+        }
     }
 
     // P1-4：DELETE ... RETURNING 原子取走 + 删除，无 TOCTOU（SQLite >= 3.35）。
