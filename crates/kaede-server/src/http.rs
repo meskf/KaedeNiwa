@@ -21,6 +21,8 @@ use crate::state::AppState;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/ready", get(ready))
+        .route("/metrics", get(metrics))
         .route("/api/register", post(register))
         .route("/api/login", post(login))
         .route("/api/me", get(me))
@@ -31,6 +33,36 @@ pub fn router(state: AppState) -> Router {
         // B2: 消息密文上限 4 MiB（附件在 attachments router 里单独 32 MiB）
         .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
         .with_state(state)
+}
+
+// ---------------------------------------------------------------------------
+// 健康检查 / 指标
+// ---------------------------------------------------------------------------
+
+/// 就绪探针：DB 可查询才算 ready。进程活着但 DB 不可用时返回 503，
+/// 让负载均衡器把流量摘走，而不是继续把请求打到坏实例上。
+async fn ready(State(state): State<AppState>) -> (StatusCode, &'static str) {
+    match sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(_) => (StatusCode::OK, "ready"),
+        Err(e) => {
+            tracing::warn!("readiness check failed: {}", e);
+            (StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
+        }
+    }
+}
+
+/// Prometheus text exposition。只含计数与容量，不含账号/频道/消息内容。
+async fn metrics(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        crate::metrics::render(&state),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -57,10 +89,20 @@ struct RegisterResp {
 
 async fn register(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<RegisterReq>,
 ) -> Result<Json<RegisterResp>, ApiError> {
     validate_login_id(&req.login_id)?;
     validate_password(&req.password)?;
+
+    // 注册是未认证入口：按来源 IP 限流，防批量注册灌水/占满连接池。
+    // 反向代理部署时 peer 是代理地址，优先取代理透传的客户端 IP。
+    let ip = client_ip(&headers, peer);
+    if !state.check_rate_key(&format!("ip:{ip}:register"), 0.2, 10.0) {
+        state.metrics.rate_limited();
+        return Err(ApiError::BadRequest("registration rate limited".into()));
+    }
 
     // P0-C：注册也要限制并发 Argon2（否则并发注册可耗尽 19GB 内存）。
     // 复用 login_semaphore（8）——register 频次远低于 login。
@@ -95,6 +137,20 @@ async fn register(
     };
 
     let now = db::now_ms();
+
+    // 被管理员删除的 login_id 永久退役，不能被自动注册/重新注册重建。
+    // 返回 409 与“已占用”一致，不额外暴露删除历史。
+    //
+    // 在事务外读取：若先 SELECT 再在事务内 INSERT，SQLite 会把读锁
+    // 升级为写锁，并发注册时容易出现 SQLITE_BUSY。退役表与 accounts
+    // 的竞态窗口极窄，且不会让已退役账号获得任何特权。
+    let retired: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM retired_logins WHERE login_id = ?")
+        .bind(&req.login_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if retired.is_some() {
+        return Err(ApiError::Conflict("login_id_taken".into()));
+    }
 
     let mut tx = state.pool.begin().await?;
 
@@ -172,6 +228,7 @@ fn dummy_password_hash() -> &'static str {
 async fn login(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<LoginReq>,
 ) -> Result<Json<LoginResp>, ApiError> {
     // P0-2：并发 Argon2 限制（每请求 19MiB，8 并发 = 152MiB 上限）。
@@ -185,7 +242,8 @@ async fn login(
     // 全部通过检查才排队，semaphore 出来后不再复查 → 5 次锁完全失效。
     // 失败计数按 (login_id, 来源 IP) 隔离：否则任意人连发 5 次错误密码
     // 就能把已知账号锁死 15 分钟。
-    let failure_key = (req.login_id.clone(), peer.ip());
+    let ip = client_ip(&headers, peer);
+    let failure_key = (req.login_id.clone(), ip);
     {
         let mut failures = state
             .login_failures
@@ -201,18 +259,23 @@ async fn login(
         }
     }
 
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT password_hash, nickname FROM accounts WHERE login_id = ?")
+    let row: Option<(String, String, i64)> =
+        sqlx::query_as("SELECT password_hash, nickname, banned FROM accounts WHERE login_id = ?")
             .bind(&req.login_id)
             .fetch_optional(&state.pool)
             .await?;
-    let Some((hash, nickname)) = row else {
+    let Some((hash, nickname, banned)) = row else {
         // 账号不存在：跑一次等价的 Argon2 验证，抹平与“密码错误”的时序差异。
         if let Ok(parsed) = PasswordHash::new(dummy_password_hash()) {
             let _ = Argon2::default().verify_password(req.password.as_bytes(), &parsed);
         }
         return Err(ApiError::Unauthorized);
     };
+
+    // 封禁账号：与不存在账号同样返回 401，避免枚举
+    if banned != 0 {
+        return Err(ApiError::Unauthorized);
+    }
 
     let parsed =
         PasswordHash::new(&hash).map_err(|_| ApiError::Internal("bad stored hash".into()))?;
@@ -423,11 +486,17 @@ pub(crate) async fn authenticate_session(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(UserId, String), ApiError> {
-    let token = headers
+    let token = match headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or(ApiError::Unauthorized)?;
+    {
+        Some(t) => t,
+        None => {
+            state.metrics.auth_failure();
+            return Err(ApiError::Unauthorized);
+        }
+    };
 
     // 只接受 hash(token) 匹配。不能再兼容明文 token：否则 DB 泄漏时
     // 库里保存的 hash 本身就能直接当 Bearer 使用。
@@ -436,11 +505,44 @@ pub(crate) async fn authenticate_session(
             .bind(db::hash_token(token))
             .fetch_optional(&state.pool)
             .await?;
-    let (login_id, expires_at, session_id) = row.ok_or(ApiError::Unauthorized)?;
+    let (login_id, expires_at, session_id) = match row {
+        Some(r) => r,
+        None => {
+            state.metrics.auth_failure();
+            return Err(ApiError::Unauthorized);
+        }
+    };
     if expires_at < db::now_ms() {
+        state.metrics.auth_failure();
         return Err(ApiError::Unauthorized);
     }
     Ok((UserId::new(login_id), session_id))
+}
+
+/// 取客户端 IP。
+///
+/// 反向代理部署时 `ConnectInfo` 是代理地址；只有在 peer 本身是回环/私网
+/// （即预期的本机或容器内代理）时才信任 `X-Forwarded-For`，避免公网直连
+/// 时伪造 header 绕过注册限流/登录失败计数。
+fn client_ip(headers: &HeaderMap, peer: std::net::SocketAddr) -> std::net::IpAddr {
+    let peer_ip = peer.ip();
+    let trusted_proxy = match peer_ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback(),
+    };
+    if !trusted_proxy {
+        return peer_ip;
+    }
+    let forwarded = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.trim().parse().ok());
+    let real_ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse().ok());
+    forwarded.or(real_ip).unwrap_or(peer_ip)
 }
 
 fn validate_login_id(s: &str) -> Result<(), ApiError> {
@@ -521,6 +623,7 @@ async fn post_message(
 
     // C11: per-uid 限流，防 DB flood
     if !state.check_rate_scoped(&uid, "messages", 10.0, 30.0) {
+        state.metrics.rate_limited();
         return Err(ApiError::BadRequest("message rate limited".into()));
     }
 
@@ -532,6 +635,17 @@ async fn post_message(
     let ct = base64_decode(&req.ciphertext)?;
     if ct.len() > 4 * 1024 * 1024 {
         return Err(ApiError::BadRequest("message too large".into()));
+    }
+    // 字节预算：条数限流之外单独限制持续写入带宽（1 MiB/s，突发 8 MiB）。
+    if !state.check_rate_scoped_cost(
+        &uid,
+        "messages-bytes",
+        1024.0 * 1024.0,
+        8.0 * 1024.0 * 1024.0,
+        ct.len() as f64,
+    ) {
+        state.metrics.rate_limited();
+        return Err(ApiError::BadRequest("message byte budget exceeded".into()));
     }
 
     // C2：channel_id 必须存在（DM 走 dm.rs，不进这里）。
@@ -568,6 +682,18 @@ async fn post_message(
     // 同一频道内 ts 严格递增（原子 SQL 计算），否则同毫秒消息会在
     // `ts < before_ts` 分页时被跳过。
     let now = db::now_ms();
+    let mut tx = state.pool.begin().await?;
+
+    // 配额预占和消息 INSERT 必须在同一事务：超额拒绝，INSERT 失败时
+    // 配额自动回滚，不会出现“扣了额度但消息没落库”。
+    if !db::reserve_message_bytes(&mut tx, uid.as_str(), ct.len() as i64).await? {
+        tx.rollback().await?;
+        return Err(ApiError::BadRequest(format!(
+            "message quota exceeded (max {} MiB)",
+            db::MAX_USER_MESSAGE_BYTES / 1024 / 1024
+        )));
+    }
+
     let (ts,): (i64,) = sqlx::query_as(
         "INSERT INTO messages (channel_id, ts, sender, ciphertext) \
          SELECT ?, CASE WHEN ? > COALESCE(MAX(ts), 0) THEN ? ELSE COALESCE(MAX(ts), 0) + 1 END, ?, ? \
@@ -580,8 +706,11 @@ async fn post_message(
     .bind(uid.as_str()) // ← 服务器权威
     .bind(&ct)
     .bind(&req.channel_id)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
+
+    state.metrics.message_stored();
 
     // 私密频道：只把密文实时推给频道成员（公开频道由客户端 MLS 广播）。
     // 这里使用服务器权威 ts，客户端落 UI 时据此排序/去重。

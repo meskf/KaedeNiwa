@@ -10,6 +10,7 @@ use crate::state::{AppState, UiState};
 pub fn SettingsModal() -> Element {
     let mut ui = use_context::<UiState>();
     let app = use_context::<AppState>();
+    let voice = use_context::<crate::state::VoiceState>();
     let mut i18n = use_i18n();
     let mut sessions = use_signal(Vec::<kaede_client::http::SessionInfo>::new);
     let mut sessions_loading = use_signal(|| false);
@@ -206,6 +207,21 @@ pub fn SettingsModal() -> Element {
                                 },
                                 "撤销其他所有设备"
                             }
+                        }
+                    }
+                    div { class: "form-field",
+                        label { class: "form-label", "账号" }
+                        div {
+                            style: "font-size: 12px; color: var(--fg-faint); margin-bottom: 8px;",
+                            "退出后会撤销当前会话并断开实时连接；本地加密身份与已解密历史按账号保留。"
+                        }
+                        button {
+                            class: "btn-secondary",
+                            style: "color: var(--negative);",
+                            onclick: move |_| {
+                                crate::observer::logout_and_clear(app, ui, voice);
+                            },
+                            "退出登录"
                         }
                     }
                     div { class: "form-actions",

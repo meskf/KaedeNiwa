@@ -31,6 +31,7 @@ use kaede_protocol::{ClientMessage, ServerMessage, UserId};
 use crate::ClientObserver;
 use crate::error::ClientError;
 use crate::event::ClientEvent;
+use crate::http::HttpApi;
 use crate::mls_session::MlsSession;
 use crate::state::{ClientState, ClientStateMachine};
 use crate::transport::Transport;
@@ -74,6 +75,12 @@ pub struct ServerConnection {
     /// DM / 私密频道 v2 密文的 in-memory 重放窗口。
     dm_replay: Mutex<ReplayGuard>,
     channel_replay: Mutex<ReplayGuard>,
+    /// 已知私密频道集合。用于在**本地还没有 channel group** 时也拒绝
+    /// 主群广播里伪造的私密频道消息 / reaction。
+    private_channels: Mutex<HashSet<String>>,
+    /// 频道成员校验来源。生产由 `RoomSession` 注入；用于在加入/推进频道 group
+    /// 前对照服务端 `channel_members`，拒绝把群外成员带进 MLS group。
+    http: Mutex<Option<HttpApi>>,
 }
 
 type ReplayEntry = (HashSet<[u8; 16]>, VecDeque<[u8; 16]>);
@@ -144,7 +151,53 @@ impl ServerConnection {
             is_host: AtomicBool::new(false),
             dm_replay: Mutex::new(ReplayGuard::default()),
             channel_replay: Mutex::new(ReplayGuard::default()),
+            private_channels: Mutex::new(HashSet::new()),
+            http: Mutex::new(None),
         }
+    }
+
+    /// 注入 HTTP 客户端，供频道成员集合校验使用。
+    pub fn set_http(&self, http: HttpApi) {
+        *self.http.lock().unwrap_or_else(|e| e.into_inner()) = Some(http);
+    }
+
+    /// 拉取服务端权威的频道成员集合。
+    ///
+    /// 失败时返回错误而不是退化为“跳过校验”：否则攻击者只要让这次查询失败，
+    /// 就能绕过成员集合校验。
+    async fn channel_member_set(&self, channel_id: &str) -> Result<HashSet<String>, ClientError> {
+        let http = self
+            .http
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or_else(|| {
+                ClientError::Mls(
+                    "channel membership source unavailable; refusing channel sync".into(),
+                )
+            })?;
+        let members = http.list_channel_members(channel_id).await?;
+        Ok(members.into_iter().map(|m| m.login_id).collect())
+    }
+
+    /// 记录/清除某频道是否私密。RoomSession 在 list/create/join 时调用。
+    pub fn set_channel_private(&self, channel_id: &str, is_private: bool) {
+        let mut set = self
+            .private_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if is_private {
+            set.insert(channel_id.to_string());
+        } else {
+            set.remove(channel_id);
+        }
+    }
+
+    fn is_known_private_channel(&self, channel_id: &str) -> bool {
+        self.private_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(channel_id)
     }
 
     // =================================================================
@@ -230,17 +283,9 @@ impl ServerConnection {
     // 网络生命周期
     // =================================================================
 
-    /// 步骤 1：连接并握手（无 token）。
-    pub async fn connect(
-        &self,
-        client_name: impl Into<String>,
-        client_version: impl Into<String>,
-    ) -> Result<(), ClientError> {
-        self.connect_with_token(client_name, client_version, None)
-            .await
-    }
-
     /// 带 session token 的握手（登录后调用）。
+    ///
+    /// 生产服务端要求 Hello 必须携带 token；不带 token 的连接会被立即拒绝。
     pub async fn connect_with_token(
         &self,
         client_name: impl Into<String>,
@@ -392,14 +437,27 @@ impl ServerConnection {
         &self,
         welcome: &[u8],
         expected_group_id: Option<&[u8]>,
+        sender: &str,
     ) -> Result<bool, ClientError> {
+        // 必须先取 uid，避免在持有 mls 锁时再次加锁。
+        let me = {
+            let guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .as_ref()
+                .map(|s| s.uid().to_string())
+                .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?
+        };
+        // 主群 Welcome 必须包含自己和发送者（host）。否则恶意方可以构造一个
+        // 不含 host 的群替换本地主群，让后续公开频道消息只加密给攻击者。
+        let required = [me.as_str(), sender];
+
         let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let s = guard
             .as_mut()
             .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
 
         if !s.is_ready() {
-            s.join_with_welcome(welcome)?;
+            s.join_with_welcome_checked(welcome, &required)?;
             self.mark_main_dirty();
             return Ok(true);
         }
@@ -407,7 +465,7 @@ impl ServerConnection {
         match expected_group_id {
             Some(gid) if Some(gid) == s.group_id() => Ok(false),
             Some(_) => {
-                s.reset_and_join(welcome)?;
+                s.reset_and_join_checked(welcome, &required)?;
                 self.mark_main_dirty();
                 Ok(true)
             }
@@ -454,8 +512,11 @@ impl ServerConnection {
         Ok(out)
     }
 
-    /// 加密并广播一条应用消息。返回密文（供上层持久化）。
-    pub async fn mls_send_app(&self, plaintext: &[u8]) -> Result<Vec<u8>, ClientError> {
+    /// 只加密一条应用消息（推进 sender ratchet），**不发送**。
+    ///
+    /// 调用方必须在广播前把快照落盘；否则重启后 ratchet 回退会导致
+    /// 同一 key + generation 再次加密（AES-GCM nonce 复用）。
+    pub fn mls_encrypt_app(&self, plaintext: &[u8]) -> Result<Vec<u8>, ClientError> {
         let ciphertext = {
             let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard
@@ -463,26 +524,50 @@ impl ServerConnection {
                 .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
             s.encrypt(plaintext)?
         };
-        // 发送会推进 sender ratchet：必须尽快落盘，否则重启后 nonce 复用。
         self.mark_main_dirty();
-        let ct_for_send = ciphertext.clone();
-        self.transport
-            .send(ClientMessage::MlsAppMessage {
-                payload: ct_for_send,
-            })
-            .await?;
         Ok(ciphertext)
     }
 
-    /// MLS 解密应用消息。供上层拉历史时使用。
-    pub fn mls_decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, ClientError> {
+    /// 广播一条已经加密好的 MLS 应用消息。
+    pub async fn mls_send_ciphertext(&self, ciphertext: Vec<u8>) -> Result<(), ClientError> {
+        self.transport
+            .send(ClientMessage::MlsAppMessage {
+                payload: ciphertext,
+            })
+            .await
+    }
+
+    /// 加密并广播一条应用消息。返回密文（供上层持久化）。
+    ///
+    /// **注意**：此方法先发送后返回，调用方无法在广播前落盘。
+    /// 生产发送路径应使用 [`Self::mls_encrypt_app`] + 落盘 +
+    /// [`Self::mls_send_ciphertext`]。
+    pub async fn mls_send_app(&self, plaintext: &[u8]) -> Result<Vec<u8>, ClientError> {
+        let ciphertext = self.mls_encrypt_app(plaintext)?;
+        self.mls_send_ciphertext(ciphertext.clone()).await?;
+        Ok(ciphertext)
+    }
+
+    /// MLS 解密应用消息，返回 `(plaintext, MLS 认证的发送者 uid)`。
+    ///
+    /// 服务器注入的 `from` 不可信；调用方必须比较两者，不一致时丢弃。
+    pub fn mls_decrypt_with_sender(
+        &self,
+        ciphertext: &[u8],
+    ) -> Result<(Vec<u8>, String), ClientError> {
         let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let s = guard
             .as_mut()
             .ok_or_else(|| ClientError::Mls("mls not initialized".into()))?;
-        let out = s.decrypt(ciphertext)?;
+        let out = s.decrypt_with_sender(ciphertext)?;
         self.mark_main_dirty();
         Ok(out)
+    }
+
+    /// MLS 解密应用消息（丢弃发送者）。仅用于不关心归属的内部路径。
+    pub fn mls_decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, ClientError> {
+        self.mls_decrypt_with_sender(ciphertext)
+            .map(|(plaintext, _sender)| plaintext)
     }
     // =====================================================================
     // DM（B3 方案：per-conv AEAD）
@@ -623,10 +708,14 @@ impl ServerConnection {
     }
 
     /// B2：把 kp 加入 channel group，返回 (commit, welcome)。
+    ///
+    /// `expected_uid` 来自服务端的加入申请。必须与 KP 内部 credential 一致，
+    /// 防止恶意/故障服务端让权威成员把陌生人的 KP 加进频道群。
     pub fn channel_add_member(
         &self,
         channel_id: &str,
         kp: &[u8],
+        expected_uid: &str,
     ) -> Result<(Vec<u8>, Vec<u8>), ClientError> {
         let mut map = self
             .channel_groups
@@ -635,18 +724,47 @@ impl ServerConnection {
         let s = map
             .get_mut(channel_id)
             .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
-        let out = s.add_member(kp)?;
+        let out = s.add_member_for(kp, expected_uid)?;
         drop(map);
         self.mark_channel_dirty(channel_id);
         Ok(out)
     }
 
+    /// 校验频道的 MLS 群成员集合。
+    ///
+    /// 规则：
+    /// - 必须包含自己；
+    /// - 不允许出现任何不在服务端 `channel_members` 里的成员。
+    ///
+    /// 允许“服务端成员尚未全部进群”的子集状态（加入/移除过程中会短暂出现），
+    /// 但绝不允许群比业务成员集合**多**人。
+    fn ensure_channel_group_members(
+        members: &HashSet<String>,
+        allowed: &HashSet<String>,
+        me: &str,
+        channel_id: &str,
+    ) -> Result<(), ClientError> {
+        if !members.contains(me) {
+            return Err(ClientError::Mls(format!(
+                "channel {channel_id} group does not contain self; refusing"
+            )));
+        }
+        if let Some(extra) = members.difference(allowed).next() {
+            return Err(ClientError::Mls(format!(
+                "channel {channel_id} group contains non-member {extra}; refusing"
+            )));
+        }
+        Ok(())
+    }
+
     /// B2：处理 Welcome 加入 channel group。
-    pub fn channel_join_via_welcome(
+    pub async fn channel_join_via_welcome(
         &self,
         channel_id: &str,
         welcome: &[u8],
     ) -> Result<(), ClientError> {
+        // 先对照服务端权威成员列表。查询失败直接拒绝，不能退化为“跳过校验”。
+        let allowed = self.channel_member_set(channel_id).await?;
         // 先在 fork 出的临时 session 上解析 Welcome，得到新 group_id。
         // 已有旧 group 且 group_id 不同 → 用新群替换（权威重建频道群）；
         // 相同 → 重复投递，直接忽略。
@@ -659,6 +777,10 @@ impl ServerConnection {
             ch_session.join_with_welcome(welcome)?;
             ch_session
         };
+        let me = self.self_uid()?;
+        let members: HashSet<String> = probe.member_uids().into_iter().collect();
+        Self::ensure_channel_group_members(&members, &allowed, &me, channel_id)?;
+
         let new_group_id = probe.group_id().map(|g| g.to_vec());
 
         let existing_group_id = self
@@ -680,20 +802,35 @@ impl ServerConnection {
     }
 
     /// B2：处理 Commit 更新 channel group state。
-    pub fn channel_process_commit(
+    pub async fn channel_process_commit(
         &self,
         channel_id: &str,
         commit: &[u8],
     ) -> Result<bool, ClientError> {
-        let mut map = self
-            .channel_groups
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let s = map
-            .get_mut(channel_id)
-            .ok_or_else(|| ClientError::Mls(format!("channel group not found: {}", channel_id)))?;
-        let out = s.process_handshake(commit)?;
-        drop(map);
+        // 先拿服务端成员列表；查询失败就不推进 epoch（避免离线时误判）。
+        let allowed = self.channel_member_set(channel_id).await?;
+        let (out, members) = {
+            let mut map = self
+                .channel_groups
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let s = map.get_mut(channel_id).ok_or_else(|| {
+                ClientError::Mls(format!("channel group not found: {}", channel_id))
+            })?;
+            let out = s.process_handshake(commit)?;
+            (
+                out,
+                s.member_uids().into_iter().collect::<HashSet<String>>(),
+            )
+        };
+
+        let me = self.self_uid()?;
+        if let Err(e) = Self::ensure_channel_group_members(&members, &allowed, &me, channel_id) {
+            // 已经 merge 的非法 commit 无法回滚：直接丢弃整个频道 group，
+            // 让后续发送因“无 group”而被拒绝，再引导用户重新加入频道。
+            self.channel_drop_group(channel_id).await;
+            return Err(e);
+        }
         self.mark_channel_dirty(channel_id);
         Ok(out)
     }
@@ -787,13 +924,26 @@ impl ServerConnection {
         peer_kp: &[u8],
     ) -> Result<(Vec<u8>, u64), ClientError> {
         let conv_id = &canonical_conv_id(conv_id);
+        // 先解析会话双方，避免持有 mls 锁时再次加锁。
+        let me = self.self_uid()?;
+        let (_, peer) = dm_parties(conv_id, &me)?;
+        let expected: HashSet<String> = HashSet::from([me.clone(), peer.clone()]);
+
         let main_guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let main_session = main_guard
             .as_ref()
             .ok_or_else(|| ClientError::Mls("no main mls session".into()))?;
         let mut dm_session = main_session.fork_for_new_group();
         dm_session.create_group()?;
-        let (_commit, welcome) = dm_session.add_member(peer_kp)?;
+        // 校验 KP credential == 预期对端，防止服务端返回错误 KP。
+        let (_commit, welcome) = dm_session.add_member_for(peer_kp, &peer)?;
+        let members: HashSet<String> = dm_session.member_uids().into_iter().collect();
+        if members != expected {
+            return Err(ClientError::Mls(format!(
+                "DM group members {:?} != expected {:?} for {}",
+                members, expected, conv_id
+            )));
+        }
         let mut map = self.dm_groups.lock().unwrap_or_else(|e| e.into_inner());
         if map.contains_key(conv_id) {
             // 双方同时发起时，另一个 Welcome 可能已经先到并落库。
@@ -816,7 +966,7 @@ impl ServerConnection {
         let conv_id = canonical_conv_id(conv_id);
         self.dm_generations
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&conv_id)
             .copied()
             .unwrap_or(0)
@@ -868,12 +1018,26 @@ impl ServerConnection {
             return Ok(());
         }
 
+        // DM 群必须恰好是会话双方。MLS Welcome 只证明密码学正确，
+        // 不证明群成员符合业务语义；对端（或恶意服务器）可以把第三方
+        // Add 进来，让受害者后续消息加密给第三方。
+        let me = self.self_uid()?;
+        let (_, peer) = dm_parties(conv_id, &me)?;
+        let expected: HashSet<String> = HashSet::from([me.clone(), peer.clone()]);
+
         let main_guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
         let main_session = main_guard
             .as_ref()
             .ok_or_else(|| ClientError::Mls("no main mls session".into()))?;
         let mut dm_session = main_session.fork_for_new_group();
         dm_session.join_with_welcome(welcome)?;
+        let members: HashSet<String> = dm_session.member_uids().into_iter().collect();
+        if members != expected {
+            return Err(ClientError::Mls(format!(
+                "DM group members {:?} != expected {:?} for {}; refusing welcome",
+                members, expected, conv_id
+            )));
+        }
         let new_gid = dm_session.group_id().map(|g| g.to_vec());
         drop(main_guard);
 
@@ -1307,7 +1471,11 @@ impl ServerConnection {
             .map_err(|e| ClientError::Protocol(format!("dm seal: {e}")))
     }
 
-    /// 解密一条实时 DM 消息（v2；带重放检测，兼容旧 v1）。
+    /// 解密一条实时 DM 消息（仅 v2；带重放检测）。
+    ///
+    /// 实时路径**不再接受 v1**：v1 的 AAD 只有 conv_id，不含发送者/方向/消息 id，
+    /// 恶意服务器可以重放历史 v1 密文并伪装成任意发送者。v1 只允许在
+    /// [`Self::dm_open_history`] 里读取升级前历史。
     pub fn dm_open(
         &self,
         conv_id: &str,
@@ -1328,10 +1496,6 @@ impl ServerConnection {
                     return Err(ClientError::Protocol("replayed DM message".into()));
                 }
                 Ok(pt)
-            }
-            Err(kaede_crypto::dm_cipher::DmCipherError::UnknownVersion(_)) => {
-                kaede_crypto::dm_cipher::open_legacy(&key, conv_id, ciphertext)
-                    .map_err(|e| ClientError::Protocol(format!("dm open: {e}")))
             }
             Err(e) => Err(ClientError::Protocol(format!("dm open: {e}"))),
         }
@@ -1357,6 +1521,20 @@ impl ServerConnection {
         }
     }
 
+    /// 发送一条私密频道表情反应（`0x03 || sealed`）。
+    pub async fn send_channel_reaction(
+        &self,
+        channel_id: &str,
+        ciphertext: Vec<u8>,
+    ) -> Result<(), ClientError> {
+        self.transport
+            .send(ClientMessage::ChannelReaction {
+                channel_id: channel_id.to_string(),
+                ciphertext,
+            })
+            .await
+    }
+
     /// 解密一条私密频道实时消息（v2；带重放检测）。
     pub fn channel_open(
         &self,
@@ -1370,17 +1548,15 @@ impl ServerConnection {
                 if !self
                     .channel_replay
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|e| e.into_inner())
                     .accept(channel_id, msg_id)
                 {
                     return Err(ClientError::Protocol("replayed channel message".into()));
                 }
                 Ok(pt)
             }
-            Err(kaede_crypto::dm_cipher::DmCipherError::UnknownVersion(_)) => {
-                kaede_crypto::dm_cipher::open_legacy(&key, channel_id, ciphertext)
-                    .map_err(|e| ClientError::Protocol(format!("channel open: {e}")))
-            }
+            // 实时路径只接受 v2（AAD 绑定发送者）。v1 的 AAD 仅 channel_id，
+            // 恶意服务器可以重放旧密文并改写 from —— 只在历史读取路径兼容。
             Err(e) => Err(ClientError::Protocol(format!("channel open: {e}"))),
         }
     }
@@ -1631,7 +1807,7 @@ impl ServerConnection {
                 // 未就绪 → 正常加入；已就绪但 group_id 不同 → 重建主群。
                 let was_ready = self.mls_is_ready();
                 let (gid, welcome) = unpack_welcome_payload(&payload);
-                match self.mls_join_or_reset_welcome(welcome, gid) {
+                match self.mls_join_or_reset_welcome(welcome, gid, from.as_str()) {
                     Ok(false) => {
                         tracing::debug!(
                             "[client:{}] duplicate welcome from {} ignored",
@@ -1765,8 +1941,18 @@ impl ServerConnection {
                 let plaintext = {
                     let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
                     match guard.as_mut() {
-                        Some(s) if s.is_ready() => match s.decrypt(&payload) {
-                            Ok(pt) => Some(pt),
+                        Some(s) if s.is_ready() => match s.decrypt_with_sender(&payload) {
+                            Ok((pt, mls_sender)) if mls_sender == from.as_str() => Some(pt),
+                            Ok((_, mls_sender)) => {
+                                // 服务器改写了 from：MLS 密文本身有效，但归属不可信。
+                                tracing::warn!(
+                                    "[client:{}] sender mismatch: MLS={} server={}; dropping",
+                                    self.server_id,
+                                    mls_sender,
+                                    from
+                                );
+                                None
+                            }
                             Err(e) => {
                                 tracing::warn!(
                                     "[client:{}] decrypt from {} failed: {}",
@@ -1795,14 +1981,20 @@ impl ServerConnection {
                         }
                         // R2-02: 私密频道内容不得经主群广播进入本地状态。
                         // 任意主群成员都能构造 `c = <私密频道 id>` 的 payload。
-                        DecodedPayload::Message(ref p) if self.channel_has_group(&p.c) => {
+                        DecodedPayload::Message(ref p)
+                            if self.channel_has_group(&p.c)
+                                || self.is_known_private_channel(&p.c) =>
+                        {
                             tracing::warn!(
                                 "[client:{}] drop main-group message targeting private channel {}",
                                 self.server_id,
                                 p.c
                             );
                         }
-                        DecodedPayload::Reaction(ref r) if self.channel_has_group(&r.c) => {
+                        DecodedPayload::Reaction(ref r)
+                            if self.channel_has_group(&r.c)
+                                || self.is_known_private_channel(&r.c) =>
+                        {
                             tracing::warn!(
                                 "[client:{}] drop main-group reaction targeting private channel {}",
                                 self.server_id,
@@ -1843,7 +2035,7 @@ impl ServerConnection {
                             }
                         }
                     };
-                    match self.channel_add_member(&channel_id, &kp_bytes) {
+                    match self.channel_add_member(&channel_id, &kp_bytes, requester.as_str()) {
                         Ok((commit, welcome)) => {
                             let mut payload = Vec::with_capacity(1 + welcome.len());
                             payload.push(0x04u8);
@@ -1922,7 +2114,7 @@ impl ServerConnection {
                 match payload[0] {
                     0x04 => {
                         let welcome = &payload[1..];
-                        match self.channel_join_via_welcome(&channel_id, welcome) {
+                        match self.channel_join_via_welcome(&channel_id, welcome).await {
                             Ok(()) => {
                                 tracing::info!(
                                     "[client:{}] joined channel group {} via welcome",
@@ -1949,10 +2141,19 @@ impl ServerConnection {
                                     channel_id,
                                     e
                                 );
+                                self.emit(ClientEvent::MlsSyncError {
+                                    server_id: self.server_id.clone(),
+                                    user_message: format!(
+                                        "私密频道 {channel_id} 的群成员校验失败，已拒绝加入；\
+                                         请确认频道成员列表后重试"
+                                    ),
+                                    recoverable: true,
+                                    detail: e.to_string(),
+                                });
                                 let sender = self
                                     .channel_pending_welcomes
                                     .lock()
-                                    .unwrap()
+                                    .unwrap_or_else(|e| e.into_inner())
                                     .remove(&channel_id);
                                 if let Some(tx) = sender {
                                     let _ = tx.try_send(Err(e.to_string()));
@@ -1962,7 +2163,7 @@ impl ServerConnection {
                     }
                     0x05 => {
                         let commit = &payload[1..];
-                        match self.channel_process_commit(&channel_id, commit) {
+                        match self.channel_process_commit(&channel_id, commit).await {
                             Ok(_) => {
                                 tracing::info!(
                                     "[client:{}] processed channel commit for {}",
@@ -1979,12 +2180,23 @@ impl ServerConnection {
                                     });
                                 }
                             }
-                            Err(e) => tracing::warn!(
-                                "[client:{}] process_commit failed for {}: {}",
-                                self.server_id,
-                                channel_id,
-                                e
-                            ),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[client:{}] process_commit failed for {}: {}",
+                                    self.server_id,
+                                    channel_id,
+                                    e
+                                );
+                                self.emit(ClientEvent::MlsSyncError {
+                                    server_id: self.server_id.clone(),
+                                    user_message: format!(
+                                        "私密频道 {channel_id} 的群成员校验失败，本地频道密钥已丢弃；\
+                                         请重新加入该频道"
+                                    ),
+                                    recoverable: true,
+                                    detail: e.to_string(),
+                                });
+                            }
                         }
                     }
                     tag => tracing::warn!(
@@ -2036,10 +2248,50 @@ impl ServerConnection {
 
             ServerMessage::ChannelRemoved { channel_id } => {
                 self.channel_drop_group(&channel_id).await;
+                self.set_channel_private(&channel_id, false);
                 self.emit(ClientEvent::ChannelDeleted {
                     server_id: self.server_id.clone(),
                     channel_id,
                 });
+            }
+
+            ServerMessage::ChannelReaction {
+                channel_id,
+                from,
+                ciphertext,
+            } => {
+                if ciphertext.first() != Some(&0x03) {
+                    tracing::warn!(
+                        "[client:{}] channel reaction without 0x03 prefix for {}; drop",
+                        self.server_id,
+                        channel_id
+                    );
+                } else if !self.channel_has_group(&channel_id) {
+                    tracing::warn!(
+                        "[client:{}] channel reaction for {} but no local channel group; drop",
+                        self.server_id,
+                        channel_id
+                    );
+                } else {
+                    match self.channel_open(&channel_id, from.as_str(), &ciphertext[1..]) {
+                        Ok(plaintext) => {
+                            self.emit(ClientEvent::ChannelReaction {
+                                server_id: self.server_id.clone(),
+                                channel_id,
+                                from,
+                                plaintext,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "[client:{}] channel reaction decrypt failed for {}: {}",
+                                self.server_id,
+                                channel_id,
+                                e
+                            );
+                        }
+                    }
+                }
             }
 
             ServerMessage::ChannelMessage {
@@ -2099,6 +2351,8 @@ impl ServerConnection {
                 });
             }
             ServerMessage::ChannelDeleted { id } => {
+                self.channel_drop_group(&id).await;
+                self.set_channel_private(&id, false);
                 self.emit(ClientEvent::ChannelDeleted {
                     server_id: self.server_id.clone(),
                     channel_id: id,
@@ -2358,7 +2612,9 @@ mod tests {
         let (client_t, server_t) = MockTransport::pair();
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
         let h = tokio::spawn(spawn_hello_server(server_t));
-        conn.connect("test", "0.1.0").await.unwrap();
+        conn.connect_with_token("test", "0.1.0", Some("tok".into()))
+            .await
+            .unwrap();
         h.await.unwrap();
         assert_eq!(conn.state(), ClientState::Connecting);
     }
@@ -2388,7 +2644,9 @@ mod tests {
                 .unwrap();
         });
 
-        conn.connect("test", "0.1.0").await.unwrap();
+        conn.connect_with_token("test", "0.1.0", Some("tok".into()))
+            .await
+            .unwrap();
         conn.authenticate().unwrap();
         conn.join().await.unwrap();
         h.await.unwrap();
@@ -2430,7 +2688,10 @@ mod tests {
                 .unwrap();
         });
 
-        let err = conn.connect("test", "0.1.0").await.unwrap_err();
+        let err = conn
+            .connect_with_token("test", "0.1.0", Some("tok".into()))
+            .await
+            .unwrap_err();
         h.await.unwrap();
         assert!(matches!(
             err,
@@ -2783,7 +3044,9 @@ mod tests {
         let conn = ServerConnection::new("s1", Arc::new(client_t), None);
         *conn.mls.lock().unwrap_or_else(|e| e.into_inner()) = Some(bob);
 
-        let changed = conn.mls_join_or_reset_welcome(&w2, Some(&gid2)).unwrap();
+        let changed = conn
+            .mls_join_or_reset_welcome(&w2, Some(&gid2), "alice")
+            .unwrap();
         assert!(changed, "different group id must rebuild local group");
 
         {
@@ -2799,7 +3062,9 @@ mod tests {
 
         // 同一个 Welcome 再投递一次（重复）不应重建。
         assert!(
-            !conn.mls_join_or_reset_welcome(&w2, Some(&gid2)).unwrap(),
+            !conn
+                .mls_join_or_reset_welcome(&w2, Some(&gid2), "alice")
+                .unwrap(),
             "duplicate welcome must be ignored"
         );
     }
@@ -2847,5 +3112,78 @@ mod tests {
         assert_eq!(bob_conn.dm_open(conv, "alice", &ct2).unwrap(), b"new-group");
         let ct3 = bob_conn.dm_seal(conv, b"reply").unwrap();
         assert_eq!(alice.dm_open(conv, "bob", &ct3).unwrap(), b"reply");
+    }
+
+    // =================================================================
+    // S1：MLS 成员集合绑定
+    // =================================================================
+
+    #[test]
+    fn dm_join_rejects_group_with_extra_member() {
+        let conv = "dm:alice:bob";
+
+        // 正常的 bob / carol 接收端。
+        let bob = MlsSession::new("bob").unwrap();
+        let bob_kp = bob.generate_key_package().unwrap();
+        let carol = MlsSession::new("carol").unwrap();
+        let carol_kp = carol.generate_key_package().unwrap();
+
+        let (alice_t, _alice_s) = MockTransport::pair();
+        let alice = ServerConnection::new("s-alice", Arc::new(alice_t), None);
+        alice.mls_init("alice").unwrap();
+
+        // 模拟恶意对端：构造一个包含 alice + carol + bob 的 DM 群。
+        let dm_welcome = {
+            let guard = alice.mls.lock().unwrap_or_else(|e| e.into_inner());
+            let main = guard.as_ref().unwrap();
+            let mut dm = main.fork_for_new_group();
+            dm.create_group().unwrap();
+            dm.add_member(&carol_kp).unwrap();
+            dm.add_member(&bob_kp).unwrap().1
+        };
+
+        let (bob_t, _bob_s) = MockTransport::pair();
+        let bob_conn = ServerConnection::new("s-bob", Arc::new(bob_t), None);
+        *bob_conn.mls.lock().unwrap_or_else(|e| e.into_inner()) = Some(bob);
+
+        let err = bob_conn
+            .dm_join_group(conv, &dm_welcome, 1)
+            .expect_err("3-person DM group must be rejected");
+        assert!(
+            err.to_string().contains("members"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !bob_conn.dm_has_group(conv),
+            "rejected welcome must not create a local DM group"
+        );
+    }
+
+    #[test]
+    fn channel_group_member_validation() {
+        let allowed: HashSet<String> = ["alice", "bob"].iter().map(|s| s.to_string()).collect();
+
+        // 完整集合与“尚未全部进群”的子集都允许。
+        let full: HashSet<String> = allowed.clone();
+        assert!(
+            ServerConnection::ensure_channel_group_members(&full, &allowed, "alice", "ch").is_ok()
+        );
+        let pending: HashSet<String> = ["alice".to_string()].into();
+        assert!(
+            ServerConnection::ensure_channel_group_members(&pending, &allowed, "alice", "ch")
+                .is_ok()
+        );
+
+        // 群外成员、缺少自己都必须拒绝。
+        let extra: HashSet<String> = ["alice".to_string(), "carol".to_string()].into();
+        assert!(
+            ServerConnection::ensure_channel_group_members(&extra, &allowed, "alice", "ch")
+                .is_err()
+        );
+        let missing_self: HashSet<String> = ["bob".to_string()].into();
+        assert!(
+            ServerConnection::ensure_channel_group_members(&missing_self, &allowed, "alice", "ch")
+                .is_err()
+        );
     }
 }

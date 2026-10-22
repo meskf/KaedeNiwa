@@ -17,10 +17,11 @@
 //!
 //! - **Windows**：DPAPI（`CryptProtectData`）—— 用当前用户的 master key，
 //!   与账户绑定，换用户 / 换机器解不开
-//! - **其它平台 / Web**：SHA256 派生 key + AES-256-GCM（fallback，安全有限）
+//! - **macOS / Linux Desktop**：系统钥匙串（Keychain / Secret Service）保存随机 key；
+//!   钥匙串不可用时**拒绝持久化**，避免退回公开信息派生 key
+//! - **Web**：WebCrypto DEK（可用时）；否则 SHA256 派生 key（fallback，安全有限）
 //!
 //! 生产 TODO：
-//! - macOS：Keychain（`SecKeychainAddGenericPassword`）
 //! - Web：WebCrypto `generateKey(non-extractable)` + 存 IndexedDB
 //!
 //! # 向后兼容
@@ -233,11 +234,134 @@ pub mod fallback {
 // 统一入口
 // =========================================================================
 
+/// macOS / Linux Desktop：把随机 snapshot key 放进系统钥匙串。
+///
+/// key 在进程内缓存，避免每条消息落盘都访问 Keychain / Secret Service。
+#[cfg(all(not(windows), not(target_arch = "wasm32")))]
+pub mod keyring_store {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use kaede_mls::{AesGcmCipher, MlsError, SnapshotCipher};
+
+    const SERVICE: &str = "kaedeniwa-mls-snapshot";
+
+    fn cache() -> &'static Mutex<HashMap<String, [u8; 32]>> {
+        static CACHE: OnceLock<Mutex<HashMap<String, [u8; 32]>>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn entry(uid: &str, server_url: &str) -> Result<keyring::Entry, MlsError> {
+        keyring::Entry::new(SERVICE, &format!("{uid}@{server_url}"))
+            .map_err(|e| MlsError::OpenMls(format!("keyring entry: {e}")))
+    }
+
+    fn load_key(uid: &str, server_url: &str) -> Result<[u8; 32], MlsError> {
+        let cache_key = format!("{uid}\n{server_url}");
+        if let Some(k) = cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&cache_key)
+            .copied()
+        {
+            return Ok(k);
+        }
+
+        let entry = entry(uid, server_url)?;
+        let key = match entry.get_password() {
+            Ok(encoded) => {
+                let raw = URL_SAFE_NO_PAD
+                    .decode(encoded.as_bytes())
+                    .map_err(|e| MlsError::OpenMls(format!("keyring key decode: {e}")))?;
+                raw.try_into()
+                    .map_err(|_| MlsError::OpenMls("keyring key has wrong length".into()))?
+            }
+            Err(keyring::Error::NoEntry) => {
+                let key: [u8; 32] = kaede_crypto::random_bytes();
+                entry
+                    .set_password(&URL_SAFE_NO_PAD.encode(key))
+                    .map_err(|e| MlsError::OpenMls(format!("keyring set: {e}")))?;
+                key
+            }
+            Err(e) => return Err(MlsError::OpenMls(format!("keyring get: {e}"))),
+        };
+
+        cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(cache_key, key);
+        Ok(key)
+    }
+
+    pub struct KeyringCipher {
+        inner: AesGcmCipher,
+    }
+
+    impl KeyringCipher {
+        pub fn open(uid: &str, server_url: &str) -> Result<Self, MlsError> {
+            Ok(Self {
+                inner: AesGcmCipher::from_bytes(load_key(uid, server_url)?),
+            })
+        }
+    }
+
+    impl SnapshotCipher for KeyringCipher {
+        fn alg_id(&self) -> u8 {
+            kaede_mls::ALG_AES_GCM
+        }
+
+        fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
+            self.inner.encrypt(plaintext)
+        }
+
+        fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, MlsError> {
+            self.inner.decrypt(ciphertext)
+        }
+    }
+
+    /// 钥匙串不可用时的显式失败 cipher：让 save_snapshot 失败并阻断发送，
+    /// 而不是悄悄退回公开信息派生 key。
+    pub struct FailingCipher {
+        message: String,
+    }
+
+    impl FailingCipher {
+        pub fn new(message: impl Into<String>) -> Self {
+            Self {
+                message: message.into(),
+            }
+        }
+    }
+
+    impl SnapshotCipher for FailingCipher {
+        fn alg_id(&self) -> u8 {
+            kaede_mls::ALG_AES_GCM
+        }
+
+        fn encrypt(&self, _: &[u8]) -> Result<Vec<u8>, MlsError> {
+            Err(MlsError::OpenMls(format!(
+                "snapshot persistence unavailable: {}",
+                self.message
+            )))
+        }
+
+        fn decrypt(&self, _: &[u8]) -> Result<Vec<u8>, MlsError> {
+            Err(MlsError::OpenMls(format!(
+                "snapshot persistence unavailable: {}",
+                self.message
+            )))
+        }
+    }
+}
+
 /// 返回当前平台的 snapshot cipher。
 ///
 /// - Windows → DPAPI
+/// - macOS / Linux Desktop → 系统钥匙串里的随机 key
 /// - Web 且 WebCrypto DEK 已就绪 → WebCrypto DEK（与读取端一致）
-/// - 其它 → SHA256 派生 AES-GCM（fallback）
+/// - Web 无 DEK → SHA256 派生 AES-GCM（fallback）
 pub fn device_cipher(uid: &str, server_url: &str) -> Box<dyn SnapshotCipher> {
     #[cfg(windows)]
     {
@@ -253,7 +377,16 @@ pub fn device_cipher(uid: &str, server_url: &str) -> Box<dyn SnapshotCipher> {
     }
     #[cfg(all(not(windows), not(target_arch = "wasm32")))]
     {
-        Box::new(fallback::cipher(uid, server_url))
+        match keyring_store::KeyringCipher::open(uid, server_url) {
+            Ok(cipher) => Box::new(cipher),
+            Err(e) => {
+                tracing::error!(
+                    "[keystore] system keyring unavailable; refusing to persist MLS snapshot: {}",
+                    e
+                );
+                Box::new(keyring_store::FailingCipher::new(e.to_string()))
+            }
+        }
     }
 }
 
@@ -269,6 +402,30 @@ struct WebDekWithFallback {
 
 #[cfg(all(not(windows), target_arch = "wasm32"))]
 impl SnapshotCipher for WebDekWithFallback {
+    fn alg_id(&self) -> u8 {
+        kaede_mls::ALG_AES_GCM
+    }
+
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, kaede_mls::MlsError> {
+        self.primary.encrypt(plaintext)
+    }
+
+    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, kaede_mls::MlsError> {
+        self.primary
+            .decrypt(ciphertext)
+            .or_else(|_| self.secondary.decrypt(ciphertext))
+    }
+}
+
+/// Desktop 迁移期 cipher：优先用系统钥匙串 key 解密，失败后回退到旧 fallback。
+#[cfg(all(not(windows), not(target_arch = "wasm32")))]
+struct KeyringWithFallback {
+    primary: keyring_store::KeyringCipher,
+    secondary: kaede_mls::AesGcmCipher,
+}
+
+#[cfg(all(not(windows), not(target_arch = "wasm32")))]
+impl SnapshotCipher for KeyringWithFallback {
     fn alg_id(&self) -> u8 {
         kaede_mls::ALG_AES_GCM
     }
@@ -315,8 +472,24 @@ pub fn device_cipher_for_snapshot(
                 Box::new(fallback::cipher(uid, server_url))
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(windows)]
         kaede_mls::ALG_AES_GCM => Box::new(fallback::cipher(uid, server_url)),
+        #[cfg(all(not(windows), not(target_arch = "wasm32")))]
+        kaede_mls::ALG_AES_GCM => {
+            let secondary = fallback::cipher(uid, server_url);
+            match keyring_store::KeyringCipher::open(uid, server_url) {
+                Ok(primary) => Box::new(KeyringWithFallback { primary, secondary }),
+                Err(e) => {
+                    // 钥匙串暂时不可用：只用旧 fallback 读，避免直接丢身份；
+                    // 新写入仍会走 device_cipher 并显式失败。
+                    tracing::warn!(
+                        "[keystore] keyring unavailable while restoring; legacy fallback only: {}",
+                        e
+                    );
+                    Box::new(secondary)
+                }
+            }
+        }
         kaede_mls::ALG_DPAPI => {
             #[cfg(windows)]
             {

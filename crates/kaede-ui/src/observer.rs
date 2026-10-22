@@ -11,7 +11,7 @@ use kaede_client::{ClientEvent, ClientObserver, DecodedPayload};
 use kaede_protocol::UserId;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-use crate::state::{AppState, MainTab, UiMessage, UiState, View, VoiceState};
+use crate::state::{AccountInfo, AppState, MainTab, UiMessage, UiState, View, VoiceState};
 
 pub struct UiObserver {
     tx: Sender<ClientEvent>,
@@ -268,6 +268,20 @@ pub fn apply_event(
             }
         }
 
+        ClientEvent::ChannelReaction {
+            server_id,
+            channel_id,
+            from,
+            plaintext,
+        } => {
+            if let Some(mut r) = kaede_client::ReactionPayload::parse(&plaintext) {
+                // 频道与作者以服务器事件为准，避免成员伪造 payload 字段。
+                r.c = channel_id;
+                r.u = from.as_str().to_string();
+                apply_reaction(&mut app, &server_id, &r, from.as_str());
+            }
+        }
+
         ClientEvent::DmReceived {
             server_id,
             conv_id,
@@ -462,6 +476,81 @@ async fn retry_sleep(ms: u64) {
 #[cfg(target_arch = "wasm32")]
 async fn retry_sleep(ms: u64) {
     gloo_timers::future::TimeoutFuture::new(ms as u32).await;
+}
+
+/// 主动登出：撤销服务端 session、退出媒体、清空所有账号级 UI 状态。
+///
+/// 本地加密快照与历史缓存按 uid 隔离，保留给下次同账号登录恢复。
+pub fn logout_and_clear(mut app: AppState, mut ui: UiState, mut voice: VoiceState) {
+    spawn(async move {
+        let active_channel = voice.active_channel.read().as_ref().map(|c| c.id.clone());
+        let room = app.room.read().clone();
+        // 先摘掉 room：close() 会触发 Disconnected，observer 看到 room=None
+        // 就不会再走自动重连。
+        app.room.set(None);
+
+        if let Some(room) = room.as_ref() {
+            if let Some(ch) = active_channel.as_deref() {
+                let _ = room.leave_media_room(ch).await;
+            }
+            if let Err(e) = room.logout().await {
+                tracing::warn!("logout failed: {}", e);
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::voice_web::leave_voice().await;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(h) = voice.handle.write().take() {
+                h.inner().disconnect().await;
+            }
+            let consumers = std::mem::take(&mut *voice.media_consumers.write());
+            for (_, h) in consumers {
+                h.stop().await;
+            }
+        }
+        voice.active_channel.set(None);
+        voice.reconnect_request.set(None);
+        voice.screen_stats.set(None);
+
+        app.servers.write().clear();
+        app.current_server.set(None);
+        app.channels.write().clear();
+        app.messages.write().clear();
+        app.members.write().clear();
+        app.presence.write().clear();
+        app.friends.write().clear();
+        app.dm_conversations.write().clear();
+        app.dm_messages.write().clear();
+        app.loaded_channels.write().clear();
+        app.unread.write().clear();
+        app.pending_adds.write().clear();
+        app.is_host.set(None);
+        app.reconnecting.set(false);
+
+        ui.common_account.set(AccountInfo::default());
+        ui.selected_channel.set(None);
+        ui.selected_message.set(None);
+        ui.selected_dm_conv.set(None);
+        ui.draft.set(String::new());
+        ui.settings_open.set(false);
+        ui.server_modal_open.set(false);
+        ui.server_modal_selected.set(None);
+        ui.member_picker.set(None);
+        ui.channel_members_open.set(None);
+        ui.reply_target.set(None);
+        ui.emoji_picker.set(None);
+        ui.channel_menu.set(None);
+        ui.member_menu.set(None);
+        ui.mobile_detail.set(None);
+        ui.mobile_detail_kind.set(None);
+        ui.upload_progress.set(None);
+        ui.toast.set(None);
+        ui.view.set(View::Login);
+    });
 }
 
 /// 断线后自动重建连接（指数退避，最多 10 次）。

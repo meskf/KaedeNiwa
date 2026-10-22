@@ -12,6 +12,11 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use web_sys::{ClipboardEvent, DragEvent, Event, File};
 
+/// 与 server / 文件选择器一致的单文件上限。
+const MAX_ATTACHMENT_BYTES: f64 = 32.0 * 1024.0 * 1024.0;
+/// 一次拖拽/粘贴最多处理多少个文件，防止批量读入耗尽 WASM 内存。
+const MAX_FILES_PER_DROP: usize = 10;
+
 /// 把拖拽 / 粘贴事件绑定到 `#composer-wrap`。
 /// 幂等：重复调用不会重复绑定（用 DOM 元素属性标记）。
 pub fn bind_drop_and_paste(ui: UiState, app: AppState) {
@@ -91,6 +96,7 @@ pub fn bind_drop_and_paste(ui: UiState, app: AppState) {
 
             // 在 Dioxus 的 spawn 里读 bytes（wasm 下 spawn 是 spawn_local，不要求 Send）
             dioxus::prelude::spawn(async move {
+                let mut ui = ui;
                 let Some(ch) = ui.selected_channel.read().clone() else {
                     return;
                 };
@@ -98,10 +104,25 @@ pub fn bind_drop_and_paste(ui: UiState, app: AppState) {
                     return;
                 };
                 let mut uploads = Vec::new();
+                let mut skipped = 0usize;
                 for f in file_list {
+                    // 必须在 array_buffer() 之前判断：大文件读进 WASM 内存会直接 OOM。
+                    if f.size() > MAX_ATTACHMENT_BYTES || uploads.len() >= MAX_FILES_PER_DROP {
+                        skipped += 1;
+                        continue;
+                    }
                     if let Some(u) = file_to_upload(f).await {
                         uploads.push(u);
                     }
+                }
+                if skipped > 0 {
+                    ui.toast.set(Some((
+                        format!(
+                            "已跳过 {} 个文件（单个上限 32 MiB，一次最多 {} 个）",
+                            skipped, MAX_FILES_PER_DROP
+                        ),
+                        true,
+                    )));
                 }
                 if !uploads.is_empty() {
                     crate::content::send_attachments_bytes(ui, app, ch, sid, uploads);
@@ -116,6 +137,9 @@ pub fn bind_drop_and_paste(ui: UiState, app: AppState) {
 
 /// 把 `web_sys::File` 读成 `UploadFile`（name + mime + bytes）。
 async fn file_to_upload(file: File) -> Option<UploadFile> {
+    if file.size() > MAX_ATTACHMENT_BYTES {
+        return None;
+    }
     let name = file.name();
     let raw_mime = file.type_();
     let mime = if raw_mime.is_empty() {
@@ -150,7 +174,11 @@ pub fn bind_paste(ui: UiState, app: AppState) {
     if already {
         return;
     }
-    let _ = js_sys::Reflect::set(&input, &JsValue::from_str("__kaedePasteBound"), &JsValue::TRUE);
+    let _ = js_sys::Reflect::set(
+        &input,
+        &JsValue::from_str("__kaedePasteBound"),
+        &JsValue::TRUE,
+    );
 
     let closure = Closure::<dyn FnMut(ClipboardEvent)>::new(move |e: ClipboardEvent| {
         let Some(dt) = e.clipboard_data() else {
@@ -174,6 +202,7 @@ pub fn bind_paste(ui: UiState, app: AppState) {
         e.prevent_default();
 
         dioxus::prelude::spawn(async move {
+            let mut ui = ui;
             let Some(ch) = ui.selected_channel.read().clone() else {
                 return;
             };
@@ -181,10 +210,24 @@ pub fn bind_paste(ui: UiState, app: AppState) {
                 return;
             };
             let mut uploads = Vec::new();
+            let mut skipped = 0usize;
             for f in file_list {
+                if f.size() > MAX_ATTACHMENT_BYTES || uploads.len() >= MAX_FILES_PER_DROP {
+                    skipped += 1;
+                    continue;
+                }
                 if let Some(u) = file_to_upload(f).await {
                     uploads.push(u);
                 }
+            }
+            if skipped > 0 {
+                ui.toast.set(Some((
+                    format!(
+                        "已跳过 {} 个文件（单个上限 32 MiB，一次最多 {} 个）",
+                        skipped, MAX_FILES_PER_DROP
+                    ),
+                    true,
+                )));
             }
             if !uploads.is_empty() {
                 crate::content::send_attachments_bytes(ui, app, ch, sid, uploads);
@@ -192,9 +235,6 @@ pub fn bind_paste(ui: UiState, app: AppState) {
         });
     });
 
-    let _ = input.add_event_listener_with_callback(
-        "paste",
-        closure.as_ref().unchecked_ref(),
-    );
+    let _ = input.add_event_listener_with_callback("paste", closure.as_ref().unchecked_ref());
     closure.forget();
 }

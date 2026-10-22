@@ -94,12 +94,14 @@ where
 /// v3：新增 `ServerMessage::ChannelMessage`（私密频道实时消息）。
 /// v4：DM/私密频道密文升级为 v2（AAD 绑定发送者/接收者/消息 id，0x05 前缀）。
 /// v5：新增 `ServerMessage::FriendsChanged`；移除 SDP/ICE/SfuToken 遗留变体。
-pub const PROTOCOL_VERSION: u16 = 5;
+/// v6：新增私密频道表情反应（`ChannelReaction` 双向变体）。
+pub const PROTOCOL_VERSION: u16 = 6;
 
 /// 服务器接受的最低协议版本。
 ///
-/// DM 密文格式不兼容旧客户端，必须整体升级，避免旧客户端静默解密失败。
-pub const MIN_SUPPORTED_VERSION: u16 = 5;
+/// DM 密文格式与私密频道 reaction 不兼容旧客户端，必须整体升级，
+/// 避免旧客户端静默解密失败或丢弃 reaction。
+pub const MIN_SUPPORTED_VERSION: u16 = 6;
 
 /// 单条线消息的硬上限。
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
@@ -170,8 +172,8 @@ pub enum ClientMessage {
         client_version: String,
         /// HTTP 登录后拿到的 session token。
         ///
-        /// 未认证客户端可传 `None`，只做协议版本协商；此时后续 `Join`
-        /// 会被服务器拒绝。
+        /// **必填**。服务器在版本协商通过后立即校验；缺失或无效都会收到
+        /// `Unauthenticated` 并断开，防止未认证连接占满 WS 连接池。
         #[serde(default)]
         session_token: Option<String>,
     },
@@ -190,6 +192,16 @@ pub enum ClientMessage {
         channel_id: String,
         #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
+    },
+
+    /// 私密频道表情反应。
+    ///
+    /// `ciphertext` = `0x03 || dm_cipher::seal(channel_key, channel_id, from, "", payload)`。
+    /// 服务端只校验成员关系与前缀，不解析内容；实时 fanout 给频道成员。
+    ChannelReaction {
+        channel_id: String,
+        #[serde(with = "serde_bytes")]
+        ciphertext: Vec<u8>,
     },
 
     /// 频道级 MLS Commit 广播（0x05）。
@@ -319,11 +331,9 @@ pub struct Reaction {
 
 /// 附件元数据。
 ///
-/// **附件本身走 HTTPS 明文传输**（和 Discord 一致，不加密）。
-/// 理由：
-/// 1. 加密附件接收方必须先解密才能下载，体验差
-/// 2. Discord / Slack 附件也是明文
-/// 3. 强 E2EE 附件留待后续
+/// 附件 blob 由客户端加密后上传（`0x04` 包装），服务端只存密文。
+/// 消息里的这个结构位于 E2EE payload 内，因此 `sha256` 字段本身不可被服务端篡改；
+/// 接收方下载后必须校验密文哈希，防止服务端替换/降级附件内容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     /// 服务器分配的 id。
@@ -336,9 +346,17 @@ pub struct Attachment {
     pub size: u64,
     /// 下载 URL（相对或绝对）。
     pub url: String,
-    /// 图片缩略图 URL（可选）。
+    /// 图片缩略图附件 id（可选，历史字段名沿用 `url` 语义）。
     #[serde(default)]
     pub thumbnail_url: Option<String>,
+    /// 附件密文（`0x04 || nonce || ct || tag`）的 SHA-256，小写 hex。
+    ///
+    /// E2EE payload 内字段，由发送方在加密上传后填写；服务端上传响应不填。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// 缩略图密文的 SHA-256，小写 hex。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_sha256: Option<String>,
 }
 
 /// 成员。
@@ -434,6 +452,17 @@ pub enum ServerMessage {
         /// 服务器权威时间戳。
         ts: i64,
         /// 与历史中完全相同的 `0x03` 封装密文。
+        #[serde(with = "serde_bytes")]
+        ciphertext: Vec<u8>,
+    },
+
+    /// 私密频道表情反应（v6）。
+    ///
+    /// 与 `ChannelMessage` 一样由服务端定向 fanout 给频道成员；
+    /// `ciphertext` 是 `0x03 || AES-GCM 密文`，客户端用频道 group key 解。
+    ChannelReaction {
+        channel_id: String,
+        from: UserId,
         #[serde(with = "serde_bytes")]
         ciphertext: Vec<u8>,
     },
@@ -616,6 +645,7 @@ impl ClientMessage {
             | Self::PublishKeyPackages { .. }
             | Self::FetchKeyPackage { .. }
             | Self::ChannelCommit { .. }
+            | Self::ChannelReaction { .. }
             | Self::SetPresence { .. }
             | Self::Ping { .. } => None,
         }
@@ -755,6 +785,19 @@ mod tests {
             from: UserId::new("alice"),
             ts: 123456789,
             ciphertext: vec![0x03, 9, 8, 7],
+        });
+    }
+
+    #[test]
+    fn channel_reaction_round_trip() {
+        round_trip_client(ClientMessage::ChannelReaction {
+            channel_id: "ch_secret".into(),
+            ciphertext: vec![0x03, 1, 2, 3],
+        });
+        round_trip_server(ServerMessage::ChannelReaction {
+            channel_id: "ch_secret".into(),
+            from: UserId::new("alice"),
+            ciphertext: vec![0x03, 4, 5, 6],
         });
     }
 

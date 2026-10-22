@@ -130,6 +130,36 @@ impl MlsSession {
         Ok(())
     }
 
+    /// 加入 Welcome，并校验群成员包含 `required` 中的全部 uid。
+    ///
+    /// MLS 本身只保证 Welcome 的签名与加密正确，**不保证群的成员集合符合业务预期**：
+    /// 恶意对端/频道权威可以构造一个把第三方也 Add 进来的群，受害者加入后会把
+    /// 后续消息加密给这个第三方。因此所有业务群在 join 时必须显式校验成员集合。
+    ///
+    /// 校验在赋值给 `self.group` 之前完成；失败时内存中的会话状态不变
+    /// （已消费的 KeyPackage 私钥无法回收，这是 MLS 一次性凭证的固有限制）。
+    pub fn join_with_welcome_checked(
+        &mut self,
+        welcome: &[u8],
+        required: &[&str],
+    ) -> Result<(), ClientError> {
+        if self.group.is_some() {
+            return Err(ClientError::Mls("group already exists".into()));
+        }
+        let g = MlsGroupHandle::join(self.identity.clone(), &self.provider, welcome)?;
+        let members: std::collections::HashSet<String> = g.member_uids().into_iter().collect();
+        for uid in required {
+            if !members.contains(*uid) {
+                return Err(ClientError::Mls(format!(
+                    "welcome group does not contain required member {uid}; refusing"
+                )));
+            }
+        }
+        self.group_id = Some(g.group_id());
+        self.group = Some(g);
+        Ok(())
+    }
+
     /// 丢弃当前主群，改用 Welcome 指向的新群。
     ///
     /// 用于“房主丢失快照后重建主群”的恢复路径：已有本地群的一方
@@ -142,12 +172,45 @@ impl MlsSession {
         self.join_with_welcome(welcome)
     }
 
+    /// 重建路径的校验版本：先解析并校验新群，成功后才替换旧群。
+    ///
+    /// 校验失败时保留原群，避免攻击者用一个非法 Welcome 把本地状态打空。
+    pub fn reset_and_join_checked(
+        &mut self,
+        welcome: &[u8],
+        required: &[&str],
+    ) -> Result<(), ClientError> {
+        let old_group = self.group.take();
+        let old_group_id = self.group_id.take();
+        match self.join_with_welcome_checked(welcome, required) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.group = old_group;
+                self.group_id = old_group_id;
+                Err(e)
+            }
+        }
+    }
+
     pub fn add_member(&mut self, key_package: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ClientError> {
         let g = self
             .group
             .as_mut()
             .ok_or_else(|| ClientError::Mls("no group".into()))?;
         Ok(g.add_member(&self.provider, key_package)?)
+    }
+
+    /// 添加成员并校验 KeyPackage 的 credential 与 `expected_uid` 一致。
+    pub fn add_member_for(
+        &mut self,
+        key_package: &[u8],
+        expected_uid: &str,
+    ) -> Result<(Vec<u8>, Vec<u8>), ClientError> {
+        let g = self
+            .group
+            .as_mut()
+            .ok_or_else(|| ClientError::Mls("no group".into()))?;
+        Ok(g.add_member_for(&self.provider, key_package, expected_uid)?)
     }
 
     pub fn remove_member(
@@ -197,11 +260,20 @@ impl MlsSession {
     }
 
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, ClientError> {
+        self.decrypt_with_sender(ciphertext)
+            .map(|(plaintext, _sender)| plaintext)
+    }
+
+    /// 解密并返回 MLS 认证的发送者 uid。
+    pub fn decrypt_with_sender(
+        &mut self,
+        ciphertext: &[u8],
+    ) -> Result<(Vec<u8>, String), ClientError> {
         let g = self
             .group
             .as_mut()
             .ok_or_else(|| ClientError::Mls("no group".into()))?;
-        Ok(g.decrypt_app(&self.provider, ciphertext)?)
+        Ok(g.decrypt_app_with_sender(&self.provider, ciphertext)?)
     }
 
     pub fn process_handshake(&mut self, msg: &[u8]) -> Result<bool, ClientError> {
@@ -1017,5 +1089,35 @@ mod p0gh_regression {
     fn p0g_normal_snapshot_still_loads() {
         let snap = make_plain_snapshot();
         let _s = MlsSession::from_snapshot(&snap).unwrap();
+    }
+
+    /// S1：欢迎校验失败时不得改变本地状态。
+    #[test]
+    fn checked_welcome_rejects_missing_required_member() {
+        // 失败路径：Welcome 本身有效，但缺少业务要求的成员。
+        let mut alice = MlsSession::new("alice").unwrap();
+        alice.create_group().unwrap();
+        let mut bob = MlsSession::new("bob").unwrap();
+        let bob_kp = bob.generate_key_package().unwrap();
+        let (_commit, welcome) = alice.add_member(&bob_kp).unwrap();
+
+        let err = bob
+            .join_with_welcome_checked(&welcome, &["alice", "bob", "dave"])
+            .expect_err("missing required member must be rejected");
+        assert!(err.to_string().contains("dave"), "unexpected error: {err}");
+        assert!(
+            bob.group_id().is_none(),
+            "failed join must not mutate local state"
+        );
+
+        // 正向路径使用独立身份 / KP，避免复用已被消费的 Welcome。
+        let mut alice2 = MlsSession::new("alice").unwrap();
+        alice2.create_group().unwrap();
+        let mut bob2 = MlsSession::new("bob").unwrap();
+        let bob_kp2 = bob2.generate_key_package().unwrap();
+        let (_commit2, welcome2) = alice2.add_member(&bob_kp2).unwrap();
+        bob2.join_with_welcome_checked(&welcome2, &["alice", "bob"])
+            .unwrap();
+        assert!(bob2.group_id().is_some());
     }
 }

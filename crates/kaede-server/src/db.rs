@@ -201,6 +201,37 @@ pub async fn cleanup_expired(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// 单个账号的消息密文累计上限（终身）。
+///
+/// 512 MiB 与附件配额对齐；消息没有单文件 32 MiB 的限制，
+/// 没有这个配额时单个账号可持续写入直到磁盘耗尽。
+pub const MAX_USER_MESSAGE_BYTES: i64 = 512 * 1024 * 1024;
+
+/// 在事务内预占消息字节配额。返回 `false` 表示超额。
+///
+/// 调用方必须把消息 INSERT 和本函数放在同一个事务里；INSERT 失败时
+/// 配额会随事务一起回滚。
+pub async fn reserve_message_bytes(
+    conn: &mut sqlx::SqliteConnection,
+    login_id: &str,
+    bytes: i64,
+) -> Result<bool, sqlx::Error> {
+    // 单条 UPSERT 完成“检查 + 预占”，避免 SELECT 后再 INSERT 的锁升级
+    // 死锁（SQLite 并发写事务常见问题）。超额时 WHERE 不成立，无行返回。
+    let row: Option<(i64,)> = sqlx::query_as(
+        "INSERT INTO message_usage (login_id, bytes) VALUES (?, ?) \
+         ON CONFLICT(login_id) DO UPDATE SET bytes = message_usage.bytes + excluded.bytes \
+         WHERE message_usage.bytes + excluded.bytes <= ? \
+         RETURNING bytes",
+    )
+    .bind(login_id)
+    .bind(bytes)
+    .bind(MAX_USER_MESSAGE_BYTES)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.is_some())
+}
+
 /// 把 token 变成不可逆的存储值（DB 泄漏时不直接暴露可用 token）。
 pub fn hash_token(token: &str) -> String {
     use sha2::{Digest, Sha256};

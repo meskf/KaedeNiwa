@@ -73,7 +73,10 @@ pub async fn upload_file(
             .upload_attachment(target_id, &thumb_name, Some("image/jpeg"), thumb_bytes)
             .await
         {
-            Ok(t) => att.thumbnail_url = Some(t.id),
+            Ok(t) => {
+                att.thumbnail_url = Some(t.id);
+                att.thumbnail_sha256 = t.sha256;
+            }
             Err(e) => tracing::warn!("thumbnail upload failed: {}", e),
         }
     }
@@ -154,7 +157,10 @@ fn download_and_save(app: AppState, target_id: String, att: Attachment) {
     let room = app.room.read().clone();
     let Some(room) = room else { return };
     spawn(async move {
-        match room.download_attachment(&target_id, &att.id).await {
+        match room
+            .download_attachment(&target_id, &att.id, att.sha256.as_deref())
+            .await
+        {
             Ok(bytes) => {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -186,11 +192,16 @@ pub fn AttachmentView(att: Attachment, target_id: String) -> Element {
 
     let is_image = is_safe_image_mime(&att.mime);
     // 优先下载缩略图；没有缩略图的小图继续内联原图。
-    let preview: Option<(String, String)> = if is_image {
+    // 第三项是该 blob 的密文 SHA-256（来自 E2EE payload）。
+    let preview: Option<(String, String, Option<String>)> = if is_image {
         if let Some(thumb_id) = att.thumbnail_url.clone() {
-            Some((thumb_id, "image/jpeg".to_string()))
+            Some((
+                thumb_id,
+                "image/jpeg".to_string(),
+                att.thumbnail_sha256.clone(),
+            ))
         } else if should_inline_preview(&att) {
-            Some((att.id.clone(), att.mime.clone()))
+            Some((att.id.clone(), att.mime.clone(), att.sha256.clone()))
         } else {
             None
         }
@@ -202,7 +213,7 @@ pub fn AttachmentView(att: Attachment, target_id: String) -> Element {
         let preview = preview.clone();
         let target_id = target_id.clone();
         use_effect(move || {
-            let Some((preview_id, preview_mime)) = preview.clone() else {
+            let Some((preview_id, preview_mime, preview_sha256)) = preview.clone() else {
                 return;
             };
             let target_id = target_id.clone();
@@ -212,7 +223,10 @@ pub fn AttachmentView(att: Attachment, target_id: String) -> Element {
                 return;
             };
             spawn(async move {
-                match room.download_attachment(&target_id, &preview_id).await {
+                match room
+                    .download_attachment(&target_id, &preview_id, preview_sha256.as_deref())
+                    .await
+                {
                     Ok(bytes) => {
                         // 不能信任发送方声明的 size：以实际字节数为准。
                         if bytes.len() as u64 > INLINE_PREVIEW_MAX {
@@ -290,6 +304,12 @@ pub async fn upload_file_from_bytes(
     mime: Option<&str>,
     bytes: Vec<u8>,
 ) -> Result<kaede_protocol::Attachment, kaede_client::ClientError> {
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        return Err(kaede_client::ClientError::Protocol(format!(
+            "attachment too large (max {} MiB)",
+            MAX_ATTACHMENT_BYTES / 1024 / 1024
+        )));
+    }
     let is_image = mime.is_some_and(is_safe_image_mime) && bytes.len() > THUMB_TRIGGER_BYTES;
     #[cfg(target_arch = "wasm32")]
     let thumb_bytes = if is_image {
@@ -310,7 +330,10 @@ pub async fn upload_file_from_bytes(
             .upload_attachment(target_id, &thumb_name, Some("image/jpeg"), thumb_bytes)
             .await
         {
-            Ok(t) => att.thumbnail_url = Some(t.id),
+            Ok(t) => {
+                att.thumbnail_url = Some(t.id);
+                att.thumbnail_sha256 = t.sha256;
+            }
             Err(e) => tracing::warn!("thumbnail upload failed: {}", e),
         }
     }

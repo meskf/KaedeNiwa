@@ -238,12 +238,16 @@ impl MlsGroupHandle {
             .map_err(|e| MlsError::TlsCodec(e.to_string()))
     }
 
-    /// 解密应用消息。非 ApplicationMessage 会被拒绝。
-    pub fn decrypt_app(
+    /// 解密应用消息，并返回 **MLS 认证的发送者 uid**。
+    ///
+    /// `from` 字段由服务器注入，恶意服务器可以改写；真正的发送者身份
+    /// 必须取自 MLS 验证过的 sender credential。调用方应比较两者，
+    /// 不一致时丢弃消息。
+    pub fn decrypt_app_with_sender(
         &mut self,
         provider: &KaedeMlsProvider,
         ciphertext: &[u8],
-    ) -> Result<Vec<u8>, MlsError> {
+    ) -> Result<(Vec<u8>, String), MlsError> {
         let msg = MlsMessageIn::tls_deserialize(&mut &ciphertext[..])
             .map_err(|e| MlsError::TlsCodec(e.to_string()))?;
         let proto: ProtocolMessage = msg
@@ -254,10 +258,27 @@ impl MlsGroupHandle {
             .process_message(provider, proto)
             .map_err(mls_err)?;
 
+        // sender credential 已被 MLS 签名验证；在 into_content 之前取出。
+        let sender = processed.credential().serialized_content().to_vec();
+        let sender = String::from_utf8(sender)
+            .map_err(|e| MlsError::OpenMls(format!("sender credential not UTF-8: {}", e)))?;
+
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => Ok(app.into_bytes()),
+            ProcessedMessageContent::ApplicationMessage(app) => Ok((app.into_bytes(), sender)),
             _ => Err(MlsError::NotApplicationMessage),
         }
+    }
+
+    /// 解密应用消息。非 ApplicationMessage 会被拒绝。
+    ///
+    /// 不返回发送者；安全敏感路径请用 [`Self::decrypt_app_with_sender`]。
+    pub fn decrypt_app(
+        &mut self,
+        provider: &KaedeMlsProvider,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, MlsError> {
+        self.decrypt_app_with_sender(provider, ciphertext)
+            .map(|(plaintext, _sender)| plaintext)
     }
 
     /// 处理握手消息（Commit / Proposal）。成功返回 true。

@@ -320,6 +320,18 @@ async fn remove_member(
     //   用户被踢出内存（WS 断开）但账号仍然存在 → 重连成功 → 踢人失败。
     // 新顺序保证：DB 成功后才踢 WS；DB 失败则整个操作失败，peer 仍在。
     let mut tx = state.pool.begin().await?;
+
+    // 删除前写墓碑：否则 accounts 行删除后 login_id 重新变成可注册，
+    // 客户端“登录失败即自动注册”会把被删账号直接重建回来。
+    sqlx::query(
+        "INSERT INTO retired_logins (login_id, retired_at) VALUES (?, ?) \
+         ON CONFLICT(login_id) DO UPDATE SET retired_at = excluded.retired_at",
+    )
+    .bind(&target)
+    .bind(db::now_ms())
+    .execute(&mut *tx)
+    .await?;
+
     sqlx::query("DELETE FROM members WHERE login_id = ?")
         .bind(&target)
         .execute(&mut *tx)
@@ -334,6 +346,10 @@ async fn remove_member(
         .await?;
     // 清理该用户的 KeyPackage 队列，避免被误用
     sqlx::query("DELETE FROM key_packages WHERE login_id = ?")
+        .bind(&target)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM message_usage WHERE login_id = ?")
         .bind(&target)
         .execute(&mut *tx)
         .await?;

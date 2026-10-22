@@ -102,6 +102,14 @@ pub enum ClientEvent {
         plaintext: Vec<u8>,
     },
 
+    /// 收到私密频道表情反应（已用频道 group key 解密）。
+    ChannelReaction {
+        server_id: String,
+        channel_id: String,
+        from: UserId,
+        plaintext: Vec<u8>,
+    },
+
     /// 收到媒体会话信令（媒体格式元数据 / 开始 / 停止）。
     ///
     /// 由 `MlsAppMessage` 解密后经 `payload::decode` 识别为

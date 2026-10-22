@@ -25,12 +25,16 @@ async fn start_server() -> (String, SqlitePool) {
         livekit_api_key: "k".into(),
         livekit_api_secret: "s".into(),
         livekit_ws_url: "ws://localhost:7880".into(),
+        admin_enabled: false,
+        admin_bind: "127.0.0.1:3001".into(),
+        admin_token: String::new(),
     };
     let pool = db::init(&cfg.database_url).await.unwrap();
     let state = AppState::new(pool.clone(), cfg);
     let app = http::router(state.clone())
         .merge(kaede_server::friends::router(state.clone()))
         .merge(kaede_server::dm::router(state.clone()))
+        .merge(kaede_server::attachments::router(state.clone()))
         .merge(channels::router(state.clone()))
         .merge(members::router(state.clone()))
         .merge(kaede_server::reads::router(state.clone()))
@@ -423,6 +427,93 @@ async fn private_channel_message_is_broadcast_realtime() {
             assert_eq!(from.as_str(), "alice");
             assert!(ts > 0, "server ts must be authoritative");
             assert_eq!(ciphertext, URL_SAFE_NO_PAD.decode(ct).unwrap());
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// v6：私密频道表情反应只 fanout 给频道成员，非成员不能发送/接收。
+#[tokio::test]
+async fn private_channel_reaction_is_member_scoped() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let alice = register(&base, "alice").await;
+    let bob = register(&base, "bob").await;
+    let carol = register(&base, "carol").await;
+
+    let ch = create_private_channel(&base, &alice, "reactions", "pass1234").await;
+    join_private(&base, &bob, &ch, "pass1234", None).await;
+
+    let mut a = connect_auth(&url, &alice).await;
+    join(&mut a).await;
+    let mut b = connect_auth(&url, &bob).await;
+    join(&mut b).await;
+    let mut c = connect_auth(&url, &carol).await;
+    join(&mut c).await;
+
+    let ct = vec![0x03u8, 1, 2, 3, 4];
+    send(
+        &mut a,
+        ClientMessage::ChannelReaction {
+            channel_id: ch.clone(),
+            ciphertext: ct.clone(),
+        },
+    )
+    .await;
+
+    let got = recv_until(&mut b, |m| {
+        matches!(m, ServerMessage::ChannelReaction { .. })
+    })
+    .await;
+    match got {
+        ServerMessage::ChannelReaction {
+            channel_id,
+            from,
+            ciphertext,
+        } => {
+            assert_eq!(channel_id, ch);
+            assert_eq!(from.as_str(), "alice");
+            assert_eq!(ciphertext, ct);
+        }
+        _ => unreachable!(),
+    }
+
+    // 非成员在短暂窗口内不得收到 reaction（其他 presence 消息允许）。
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match timeout(remaining, c.next()).await {
+            Err(_) => break,
+            Ok(Some(Ok(Message::Binary(b)))) => {
+                let m = ServerMessage::decode(&b).unwrap();
+                assert!(
+                    !matches!(m, ServerMessage::ChannelReaction { .. }),
+                    "non-member received a private channel reaction"
+                );
+            }
+            Ok(None) | Ok(Some(Err(_))) => break,
+            Ok(Some(Ok(_))) => {}
+        }
+    }
+
+    // 非成员发送必须被拒绝。
+    send(
+        &mut c,
+        ClientMessage::ChannelReaction {
+            channel_id: ch,
+            ciphertext: ct,
+        },
+    )
+    .await;
+    match recv_until(&mut c, |m| matches!(m, ServerMessage::Error { .. })).await {
+        ServerMessage::Error { code, .. } => {
+            assert!(matches!(
+                code,
+                ErrorCode::TargetNotFound | ErrorCode::MalformedMessage
+            ));
         }
         _ => unreachable!(),
     }
@@ -901,6 +992,178 @@ async fn sessions_list_and_revoke() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+/// S3：撤销其他会话必须立即断开对应 WS，而不是等 5 分钟 token 重验。
+#[tokio::test]
+async fn revoke_others_kicks_active_ws_immediately() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let client = reqwest::Client::new();
+
+    let first = register(&base, "alice").await;
+    let second: serde_json::Value = client
+        .post(format!("{}/api/login", base))
+        .json(&serde_json::json!({
+            "login_id": "alice",
+            "password": "password1234",
+            "device_name": "second-device",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second = second["session_token"].as_str().unwrap().to_string();
+
+    // 旧设备（first）在线并 Join。
+    let mut ws = connect_auth(&url, &first).await;
+    join(&mut ws).await;
+
+    // 新设备撤销其他会话 → 旧设备连接必须立刻收到 Unauthenticated。
+    let resp = client
+        .post(format!("{}/api/sessions/revoke-others", base))
+        .bearer_auth(&second)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    match recv_until(&mut ws, |m| matches!(m, ServerMessage::Error { .. })).await {
+        ServerMessage::Error { code, .. } => {
+            assert_eq!(code, ErrorCode::Unauthenticated);
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// S3：登出撤销当前 session 并立即断开 WS。
+#[tokio::test]
+async fn logout_revokes_session_and_kicks_ws() {
+    let (url, _pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let client = reqwest::Client::new();
+
+    let token = register(&base, "alice").await;
+    let mut ws = connect_auth(&url, &token).await;
+    join(&mut ws).await;
+
+    let resp = client
+        .post(format!("{}/api/logout", base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    match recv_until(&mut ws, |m| matches!(m, ServerMessage::Error { .. })).await {
+        ServerMessage::Error { code, .. } => {
+            assert_eq!(code, ErrorCode::Unauthenticated);
+        }
+        _ => unreachable!(),
+    }
+
+    let resp = client
+        .get(format!("{}/api/me", base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+/// S3：附件每用户配额 + 频道删除时回收 blob。
+#[tokio::test]
+async fn attachment_quota_and_channel_purge() {
+    let (url, pool) = start_server().await;
+    let base = url.replace("ws://", "http://").replace("/ws", "");
+    let client = reqwest::Client::new();
+    let alice = register(&base, "alice").await;
+
+    let ch: serde_json::Value = client
+        .post(format!("{}/api/channels", base))
+        .bearer_auth(&alice)
+        .json(&serde_json::json!({ "name": "att", "kind": "text" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ch_id = ch["id"].as_str().unwrap().to_string();
+
+    // 配额：伪造一条已占满 512 MiB 的元数据，上传必须被拒。
+    sqlx::query(
+        "INSERT INTO attachments (id, owner, target_id, size, created_at) \
+         VALUES ('quota-fake', 'alice', NULL, ?, 0)",
+    )
+    .bind(512i64 * 1024 * 1024)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let resp = client
+        .post(format!(
+            "{}/api/attachments?name=a.bin&target={}",
+            base, ch_id
+        ))
+        .bearer_auth(&alice)
+        .body(b"ciphertext".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    sqlx::query("DELETE FROM attachments WHERE id = 'quota-fake'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 正常上传：元数据带 owner + target。
+    let resp = client
+        .post(format!(
+            "{}/api/attachments?name=a.bin&target={}",
+            base, ch_id
+        ))
+        .bearer_auth(&alice)
+        .body(b"ciphertext".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let att_id = body["attachment"]["id"].as_str().unwrap().to_string();
+
+    let row: (String, Option<String>) =
+        sqlx::query_as("SELECT owner, target_id FROM attachments WHERE id = ?")
+            .bind(&att_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row.0, "alice");
+    assert_eq!(row.1.as_deref(), Some(ch_id.as_str()));
+
+    // 删除频道 → 附件 blob + 元数据一起回收，下载 404。
+    let resp = client
+        .delete(format!("{}/api/channels/{}", base, ch_id))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let resp = client
+        .get(format!("{}/api/attachments/{}", base, att_id))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM attachments WHERE id = ?")
+        .bind(&att_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 /// op5 移除私密频道成员：目标收到 ChannelRemoved，权威收到 ChannelMemberLeft。

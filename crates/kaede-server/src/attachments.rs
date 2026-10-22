@@ -29,6 +29,9 @@ pub const MAX_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
 /// 附件目录总容量上限，防止任意登录用户持续上传把磁盘写满。
 const MAX_TOTAL_ATTACHMENT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
+/// 单用户附件总容量上限（含所有频道/DM）。
+const MAX_USER_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
+
 /// 统计附件目录当前占用（只统计普通文件）。
 async fn dir_size(dir: &std::path::Path) -> u64 {
     let mut total = 0u64;
@@ -55,9 +58,11 @@ pub fn router(state: AppState) -> Router {
 
 #[derive(Deserialize)]
 struct UploadQuery {
-    name: String,
+    /// 上传上下文（频道 id / DM conv_id）。只用于配额、授权与删除回收，
+    /// 不参与加密。文件名/MIME 不再上传——它们属于消息明文，
+    /// 由客户端放在 E2EE payload 内，避免通过 query 进入代理访问日志。
     #[serde(default)]
-    mime: Option<String>,
+    target: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -104,13 +109,25 @@ async fn upload(
         )));
     }
 
-    let name = sanitize_name(&q.name);
-    // P2-6: mime 白名单——客户端自报的 mime 不可信，限制到白名单内
-    // （防止 text/html 等被 UI 当作可执行内容渲染）
-    let mime = match q.mime {
-        Some(m) if is_allowed_mime(&m) => m,
-        _ => guess_mime(&name),
-    };
+    let target = sanitize_target(q.target.as_deref());
+    // 上传时必须能证明自己有权写入该上下文；否则可以把附件挂到别人的
+    // 私密频道/DM 下，或绕开后续下载授权。
+    if let Some(t) = target.as_deref() {
+        authorize_target(&state, uid.as_str(), t).await?;
+    }
+
+    // 每用户配额：防止单个账号占满全站附件空间。
+    let (user_used,): (i64,) =
+        sqlx::query_as("SELECT COALESCE(SUM(size), 0) FROM attachments WHERE owner = ?")
+            .bind(uid.as_str())
+            .fetch_one(&state.pool)
+            .await?;
+    if (user_used.max(0) as u64).saturating_add(body.len() as u64) > MAX_USER_ATTACHMENT_BYTES {
+        return Err(ApiError::BadRequest(format!(
+            "user attachment quota exceeded (max {} MiB)",
+            MAX_USER_ATTACHMENT_BYTES / 1024 / 1024
+        )));
+    }
 
     // 用 SHA256 前 16 字节 + 时间戳保证唯一
     let id = format!("att_{}", &db::random_token()[..22]);
@@ -138,21 +155,36 @@ async fn upload(
         .await
         .map_err(|e| ApiError::Internal(format!("rename: {}", e)))?;
 
+    // 元数据落库失败时必须回滚文件，避免留下无记录的孤儿 blob。
+    if let Err(e) = sqlx::query(
+        "INSERT INTO attachments (id, owner, target_id, size, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(uid.as_str())
+    .bind(target.as_deref())
+    .bind(body.len() as i64)
+    .bind(db::now_ms())
+    .execute(&state.pool)
+    .await
+    {
+        let _ = tokio::fs::remove_file(&final_path).await;
+        return Err(ApiError::Internal(format!("attachment meta: {e}")));
+    }
+
     let att = Attachment {
         id: id.clone(),
-        name,
-        mime: mime.clone(),
+        // 文件名/MIME 由客户端在 E2EE payload 中填写；服务端不接收、不返回。
+        name: String::new(),
+        mime: "application/octet-stream".into(),
         size: body.len() as u64,
         url: format!("/api/attachments/{}", id),
         thumbnail_url: None,
+        sha256: None,
+        thumbnail_sha256: None,
     };
 
-    tracing::info!(
-        "uploaded attachment {} ({} bytes, {})",
-        att.id,
-        att.size,
-        att.mime
-    );
+    tracing::info!("uploaded attachment {} ({} bytes)", att.id, att.size);
 
     Ok((StatusCode::CREATED, Json(UploadResp { attachment: att })))
 }
@@ -173,6 +205,20 @@ async fn download(
     // H17: 严格 id 校验——白名单字符集，防路径穿越 / Windows ADS / 保留名
     if !is_valid_attachment_id(&id) {
         return Err(ApiError::BadRequest("invalid id".into()));
+    }
+
+    // 授权：附件必须存在元数据，且当前用户有权访问其频道/DM 上下文。
+    // 仅“已登录 + 知道随机 id”不足以读取私密频道/DM 的密文。
+    let meta: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT target_id FROM attachments WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((target_id,)) = meta else {
+        return Err(ApiError::NotFound("attachment".into()));
+    };
+    if let Some(target) = target_id.as_deref() {
+        authorize_target(&state, uid.as_str(), target).await?;
     }
 
     let path = attachments_dir().join(&id);
@@ -198,55 +244,91 @@ fn is_valid_attachment_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-fn sanitize_name(s: &str) -> String {
-    let s = s.trim();
-    let s = s.replace(['/', '\\'], "_");
-    if s.is_empty() || s.len() > 200 {
-        "file".to_string()
-    } else {
-        s.to_string()
+/// 清理上传上下文（频道/DM id）：去控制字符、限长。只用于配额与回收。
+fn sanitize_target(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.chars()
+                .filter(|c| !c.is_control())
+                .take(128)
+                .collect::<String>()
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// 删除某个频道/DM 下的所有附件 blob 与元数据（频道删除时调用）。
+///
+/// 服务端不知道消息里最终引用了哪些附件，因此按“上传上下文”整体回收。
+pub(crate) async fn purge_target(pool: &sqlx::SqlitePool, target: &str) {
+    let ids: Vec<(String,)> = match sqlx::query_as("SELECT id FROM attachments WHERE target_id = ?")
+        .bind(target)
+        .fetch_all(pool)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("attachment purge query failed ({}): {}", target, e);
+            return;
+        }
+    };
+    if ids.is_empty() {
+        return;
+    }
+    if let Err(e) = sqlx::query("DELETE FROM attachments WHERE target_id = ?")
+        .bind(target)
+        .execute(pool)
+        .await
+    {
+        tracing::warn!("attachment purge delete failed ({}): {}", target, e);
+        return;
+    }
+    let dir = attachments_dir();
+    for (id,) in ids {
+        if !is_valid_attachment_id(&id) {
+            continue;
+        }
+        if let Err(e) = tokio::fs::remove_file(dir.join(&id)).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("attachment purge remove {} failed: {}", id, e);
+        }
     }
 }
 
-fn guess_mime(name: &str) -> String {
-    let lower = name.to_lowercase();
-    if lower.ends_with(".png") {
-        "image/png".into()
-    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        "image/jpeg".into()
-    } else if lower.ends_with(".gif") {
-        "image/gif".into()
-    } else if lower.ends_with(".webp") {
-        "image/webp".into()
-    } else if lower.ends_with(".svg") {
-        "image/svg+xml".into()
-    } else if lower.ends_with(".mp4") {
-        "video/mp4".into()
-    } else if lower.ends_with(".mp3") {
-        "audio/mpeg".into()
-    } else if lower.ends_with(".pdf") {
-        "application/pdf".into()
-    } else if lower.ends_with(".txt") || lower.ends_with(".md") {
-        "text/plain".into()
-    } else {
-        "application/octet-stream".into()
+/// 校验当前用户是否有权访问某个附件上下文（频道 / DM）。
+///
+/// - DM：`conv_id` 必须是当前用户参与的会话；
+/// - 私密频道：必须是 `channel_members` 成员；
+/// - 公开频道：所有登录用户可读；
+/// - 频道不存在：404（附件应随频道删除被回收）。
+async fn authorize_target(state: &AppState, uid: &str, target: &str) -> Result<(), ApiError> {
+    if crate::dm::parse_conv_id(target).is_some() {
+        if !crate::dm::is_member(target, uid) {
+            return Err(ApiError::Forbidden("not a dm participant".into()));
+        }
+        return Ok(());
     }
-}
-/// P2-6: 允许的 mime 白名单。任何非白名单的客户端自报值都回退到 guess_mime。
-fn is_allowed_mime(m: &str) -> bool {
-    matches!(
-        m,
-        "image/png"
-            | "image/jpeg"
-            | "image/gif"
-            | "image/webp"
-            | "image/svg+xml"
-            | "video/mp4"
-            | "audio/mpeg"
-            | "application/pdf"
-            | "text/plain"
-            | "application/octet-stream"
-    )
+
+    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+        .bind(target)
+        .fetch_optional(&state.pool)
+        .await?;
+    let Some((is_private,)) = meta else {
+        return Err(ApiError::NotFound("channel".into()));
+    };
+    if is_private != 0 {
+        let member: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM channel_members WHERE channel_id = ? AND login_id = ?")
+                .bind(target)
+                .bind(uid)
+                .fetch_optional(&state.pool)
+                .await?;
+        if member.is_none() {
+            return Err(ApiError::Forbidden("not a channel member".into()));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

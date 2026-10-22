@@ -212,12 +212,32 @@ async fn post_message(
     if ct.len() > 4 * 1024 * 1024 {
         return Err(ApiError::BadRequest("message too large".into()));
     }
+    if !state.check_rate_scoped_cost(
+        &uid,
+        "dm-bytes",
+        1024.0 * 1024.0,
+        8.0 * 1024.0 * 1024.0,
+        ct.len() as f64,
+    ) {
+        state.metrics.rate_limited();
+        return Err(ApiError::BadRequest(
+            "dm message byte budget exceeded".into(),
+        ));
+    }
 
     // S-3: 忽略客户端 ts，用服务器时间。
     //
     // 同时保证同一会话内 ts **严格递增**：否则同毫秒的多条消息会让
     // `ts < before_ts` 分页丢消息。用单条 INSERT ... SELECT 原子计算。
     let now = crate::db::now_ms();
+    let mut tx = state.pool.begin().await?;
+    if !crate::db::reserve_message_bytes(&mut tx, uid.as_str(), ct.len() as i64).await? {
+        tx.rollback().await?;
+        return Err(ApiError::BadRequest(format!(
+            "message quota exceeded (max {} MiB)",
+            crate::db::MAX_USER_MESSAGE_BYTES / 1024 / 1024
+        )));
+    }
     let (ts,): (i64,) = sqlx::query_as(
         "INSERT INTO messages (channel_id, ts, sender, ciphertext) \
          SELECT ?, CASE WHEN ? > COALESCE(MAX(ts), 0) THEN ? ELSE COALESCE(MAX(ts), 0) + 1 END, ?, ? \
@@ -230,8 +250,9 @@ async fn post_message(
     .bind(uid.as_str()) // ← 服务器权威
     .bind(&ct)
     .bind(&conv_id)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     // 更新会话索引（供 list_conversations 使用）。
     if let Some((a, b)) = parse_conv_id(&conv_id) {

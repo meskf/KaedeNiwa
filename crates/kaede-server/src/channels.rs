@@ -376,6 +376,9 @@ async fn delete_channel(
 
     tx.commit().await?;
 
+    // 回收该频道下的附件密文 blob（服务端只能按上传上下文整体删除）。
+    crate::attachments::purge_target(&state.pool, &id).await;
+
     // 删除时成员关系已清理：私密频道用事先保存的成员列表通知，
     // 公开频道广播给所有人。
     if is_private {

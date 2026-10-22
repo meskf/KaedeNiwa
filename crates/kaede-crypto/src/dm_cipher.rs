@@ -12,12 +12,15 @@
 //!
 //! # AAD
 //!
-//! AAD = `conv_id.as_bytes()`
+//! v2 AAD = `len(conv_id) || conv_id || len(from) || from || len(to) || to || msg_id`
 //!
 //! 理由：
 //! 1. **绑定会话**：key 已由 exporter context 绑定 conv_id，AAD 是第二道防线
 //! 2. **防篡改**：攻击者把密文从 conv A 挪到 conv B 会 AAD 校验失败
-//! 3. **与 server 落库的 channel_id 一致**：server 存 `messages.channel_id = conv_id`
+//! 3. **绑定发送者/接收者**：服务器反射密文并篡改 `from`/`to` 会解密失败
+//! 4. **绑定消息 id**：调用方按 `msg_id` 维护重放窗口
+//!
+//! 旧 v1 的 AAD 只有 `conv_id`，仅用于读取升级前历史（[`open_legacy`]）。
 //!
 //! # 密钥来源
 //!
@@ -240,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v1_still_decrypts() {
+    fn legacy_v1_still_decrypts_for_history_only() {
         let key = [0x42u8; 32];
         let conv = "dm:alice:bob";
         let mut nonce = [0u8; DM_NONCE_LEN];
@@ -250,5 +253,11 @@ mod tests {
         sealed.extend_from_slice(&nonce);
         sealed.extend_from_slice(&ct);
         assert_eq!(open_legacy(&key, conv, &sealed).unwrap(), b"old");
+        // 实时 open 必须拒绝 v1（防止服务器重放旧密文并伪造发送者）。
+        // v1 比 v2 头短，可能先触发 TooShort；两者都代表“实时路径拒绝”。
+        assert!(
+            open(&key, conv, "alice", "bob", &sealed).is_err(),
+            "live open must reject v1 ciphertext"
+        );
     }
 }

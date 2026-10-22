@@ -310,20 +310,7 @@ fn MessageList() -> Element {
 #[component]
 fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
     let mut ui = use_context::<UiState>();
-    let app = use_context::<AppState>();
     let mut hovered = use_signal(|| false);
-
-    let is_private = {
-        let sid = app.current_server.read().clone();
-        sid.and_then(|sid| {
-            app.channels
-                .read()
-                .get(&sid)
-                .and_then(|list| list.iter().find(|c| c.id == msg.channel_id))
-                .map(|c| c.is_private)
-        })
-        .unwrap_or(false)
-    };
 
     let mid = msg.id.clone();
     let mid_dbl = mid.clone();
@@ -404,7 +391,7 @@ fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
                 }
             }
 
-            if !is_private && !msg.reactions.is_empty() {
+            if !msg.reactions.is_empty() {
                 div {
                     class: "msg-reactions",
                     for r in msg.reactions.iter() {
@@ -433,15 +420,13 @@ fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
                         },
                         "↩"
                     }
-                    if !is_private {
-                        button {
-                            class: "msg-hover-btn",
-                            title: "添加反应",
-                            onclick: move |_| {
-                                ui.emoji_picker.set(Some((ch_id.clone(), target_ts)));
-                            },
-                            "😀"
-                        }
+                    button {
+                        class: "msg-hover-btn",
+                        title: "添加反应",
+                        onclick: move |_| {
+                            ui.emoji_picker.set(Some((ch_id.clone(), target_ts)));
+                        },
+                        "😀"
                     }
                 }
             }

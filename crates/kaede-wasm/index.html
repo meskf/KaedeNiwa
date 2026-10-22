@@ -18,18 +18,7 @@
     <noscript>KaedeNiwa 需要 JavaScript 才能运行。</noscript>
   <!-- LiveKit SDK 与 E2EE worker 已 vendored 到同源 assets，避免 CDN 供应链风险。 -->
   <script src="./livekit-client.umd.min.js"></script>
-<script>
-  // worker 与页面同源，可以直接创建；保持 async 接口让 Rust 侧继续 await。
-  window.__kaedeMakeE2EEWorker = async function (url) {
-    return new Worker(url);
-  };
-</script>
-<script>
-  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('./sw.js').catch((e) => console.warn('SW register failed:', e));
-    });
-  }
-</script>
+  <!-- 启动脚本独立成文件，保证 CSP 可以只允许 'self'（不需要 unsafe-inline）。 -->
+  <script src="./boot.js"></script>
 </body>
 </html>

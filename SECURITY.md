@@ -140,7 +140,8 @@ MLS snapshot 里含**签名私钥**。明文存储等于身份泄漏。各平台
 | 平台 | 方案 | 防御范围 |
 |---|---|---|
 | **Windows Desktop** | DPAPI（`CryptProtectData`） | ✅ 与当前用户账户绑定；换用户/换机器解不开 |
-| **macOS / Linux Desktop** | SHA256(公开信息) + AES-256-GCM | ⚠️ 见下文 Web 部分（同样问题） |
+| **macOS Desktop** | Keychain 保存随机 32 字节 key | ✅ 与当前用户钥匙串绑定；钥匙串不可用时拒绝持久化 |
+| **Linux Desktop** | Secret Service（GNOME Keyring / KWallet）保存随机 key | ✅ 与当前用户密钥环绑定；不可用时拒绝持久化并暂停发送 |
 | **Web（浏览器）** | SHA256(公开信息) + AES-256-GCM | ❌ 任何能读 IndexedDB 的攻击者都能解密 |
 
 ### Web 端的安全性 ≈ 0（S-2）
@@ -151,7 +152,9 @@ snapshot → 拿到签名私钥**。
 
 **生产建议**：
 - Web 端**只用于低价值账号**，不要承载生产身份
-- 生产部署优先 Desktop（Windows 走 DPAPI，macOS/Linux 需 Keychain/keyring 集成）
+- 生产部署优先 Desktop（Windows DPAPI / macOS Keychain / Linux Secret Service）
+- Linux Desktop 构建需要 `libdbus-1-dev` + `pkg-config`；无 Secret Service 的环境（如无头服务器）
+  不会退回公开信息派生 key，而是拒绝保存快照并暂停发送
 - 未来升级路径：WebCrypto `generateKey(non-extractable)` + IndexedDB 存 handle
   - 必须作为 **snapshot 格式升级**（`0x03` → `0x04`）一起做
   - 与 S-1 的 KDF 修正一起做
@@ -162,6 +165,17 @@ snapshot → 拿到签名私钥**。
 `keystore::fallback::derive_device_key` 的 `server_url` 被 hash 了**两次**（copy-paste 错误）。
 **不能单独修**——修会让所有现有 Web 用户丢失本地身份。必须与 snapshot 格式升级一起做。
 详见 `fallback::derive_device_key` 的 doc comment。
+
+## 管理后台
+
+- **独立 listener**：默认 `127.0.0.1:3001`，与用户 API / WS 端口分离；只在
+  `KAEDE_ADMIN_ENABLED=1` 时启动。
+- **认证**：`X-Admin-Token`，与用户 session token 完全隔离；服务端对 token 做 SHA-256
+  定长比较。`KAEDE_ADMIN_TOKEN` 为空时后台拒绝所有请求（fail-closed）。
+- **边界**：后台只能看账号/频道/消息**元数据**与内存日志，不能解密任何消息；
+  `/api/logs` 不会返回启动时打印的 Admin Token。
+- **部署**：远程访问应保持 loopback 绑定 + SSH 隧道，或使用 HTTPS 反向代理；
+  明文 HTTP + 公网绑定会泄露 Admin Token。
 
 ## 多设备
 

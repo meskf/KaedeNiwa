@@ -18,6 +18,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/revoke-others", post(revoke_others))
         .route("/api/sessions/{id}", delete(revoke_session))
+        .route("/api/logout", post(logout))
         .with_state(state)
 }
 
@@ -90,10 +91,15 @@ async fn revoke_session(
         .execute(&state.pool)
         .await?;
 
-    // 撤销当前会话：断开在线 WS。
-    if session_id == current_sid
-        && let Some(peer) = state.take_peer(&uid)
-    {
+    // 断开与被撤销会话对应的在线 WS：
+    // - 撤销当前会话：直接踢掉本 uid 的连接；
+    // - 撤销其他会话：只有在线连接确实属于那个 session 时才踢。
+    let peer = if session_id == current_sid {
+        state.take_peer(&uid)
+    } else {
+        state.take_peer_if_http_session(&uid, &session_id)
+    };
+    if let Some(peer) = peer {
         let _ = peer.tx.try_send(kaede_protocol::ServerMessage::Error {
             code: kaede_protocol::ErrorCode::Unauthenticated,
             message: "session revoked".into(),
@@ -113,5 +119,30 @@ async fn revoke_others(
         .bind(&current_sid)
         .execute(&state.pool)
         .await?;
+    // 单设备在线：若当前 WS 属于被撤销的“其他 session”，立即断开，
+    // 不再等 ≤5 分钟的 token 重验窗口。
+    if let Some(peer) = state.take_peer_if_other_http_session(&uid, &current_sid) {
+        let _ = peer.tx.try_send(kaede_protocol::ServerMessage::Error {
+            code: kaede_protocol::ErrorCode::Unauthenticated,
+            message: "session revoked".into(),
+        });
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 登出：撤销当前 HTTP session，并立即断开对应 WS。
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<StatusCode, ApiError> {
+    let (uid, current_sid) = authenticate_session(&state, &headers).await?;
+    sqlx::query("DELETE FROM sessions WHERE login_id = ? AND session_id = ?")
+        .bind(uid.as_str())
+        .bind(&current_sid)
+        .execute(&state.pool)
+        .await?;
+    if let Some(peer) = state.take_peer_if_http_session(&uid, &current_sid) {
+        let _ = peer.tx.try_send(kaede_protocol::ServerMessage::Error {
+            code: kaede_protocol::ErrorCode::Unauthenticated,
+            message: "logged out".into(),
+        });
+    }
     Ok(StatusCode::NO_CONTENT)
 }

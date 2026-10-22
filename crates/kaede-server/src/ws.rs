@@ -13,7 +13,7 @@ use futures_util::{SinkExt, Stream, StreamExt};
 use kaede_protocol::{ClientMessage, ErrorCode, ServerMessage, UserId, WireMessage};
 use tokio::sync::mpsc;
 
-use crate::state::{AppState, PeerHandle};
+use crate::state::{AppState, PeerHandle, WS_BYTES_BURST, WS_BYTES_PER_SEC};
 
 /// WS 空闲超时（P1-M）。
 ///
@@ -47,6 +47,9 @@ const MAX_MLS_HANDSHAKE_BYTES: usize = 2 * 1024 * 1024;
 
 /// 主群应用消息上限（与 HTTP post_message 的 4 MiB 对齐）。
 const MAX_MLS_APP_BYTES: usize = 4 * 1024 * 1024;
+
+/// 私密频道表情反应上限。reaction payload 只有几十字节，8 KiB 足够。
+const MAX_CHANNEL_REACTION_BYTES: usize = 8 * 1024;
 
 /// `recv_with_idle_timeout` 的返回值。
 #[derive(Debug)]
@@ -119,6 +122,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
     let permit = match state.ws_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
+            state.metrics.ws_rejected();
             return axum::response::Response::builder()
                 .status(axum::http::StatusCode::SERVICE_UNAVAILABLE)
                 .body(axum::body::Body::from("server connection limit reached"))
@@ -135,9 +139,11 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
-    if let Err(e) = run_socket(socket, state).await {
+    state.metrics.ws_connected();
+    if let Err(e) = run_socket(socket, state.clone()).await {
         tracing::debug!("ws closed: {}", e);
     }
+    state.metrics.ws_disconnected();
 }
 
 async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
@@ -147,8 +153,9 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(1024);
 
     // per-connection 限流器：30 msg/s，突发上限 60。
-    // 握手前不消耗令牌。
+    // 握手前不消耗令牌。另加字节桶，防止用小条数发送超大包。
     let mut limiter = RateLimiter::new(30.0, 60.0);
+    let mut byte_limiter = RateLimiter::new(WS_BYTES_PER_SEC, WS_BYTES_BURST);
 
     // P0-X：本连接的 session_id。握手前为 0（未分配）。
     let my_session_id: std::sync::Arc<std::sync::atomic::AtomicU64> =
@@ -194,6 +201,17 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
                 let _ = sink.send(Message::Binary(err.encode()?.into())).await;
                 return Ok(());
             }
+            // P1-DoS：认证必须前置。此前允许无 token 连接并长期 Ping 保活，
+            // 单个攻击者可占满全局 5000 个 WS permit，让正常用户 503。
+            // 版本协商仍在 token 校验之前，保证旧客户端能收到明确错误。
+            let Some(session_token) = session_token else {
+                let err = ServerMessage::Error {
+                    code: ErrorCode::Unauthenticated,
+                    message: "session_token required in ClientHello".into(),
+                };
+                let _ = sink.send(Message::Binary(err.encode()?.into())).await;
+                return Ok(());
+            };
             (client_name, client_version, session_token)
         }
         _ => anyhow::bail!("expected ClientHello, got {:?}", hello),
@@ -209,28 +227,24 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
     sink.send(Message::Binary(hello_reply.encode()?.into()))
         .await?;
 
-    // 若客户端提供了 session_token，则在此验证并绑定 uid。
-    // 未提供 token 的会话可继续连接，但调用 `Join` 会被拒。
-    let mut my_uid: Option<UserId> = if let Some(tok) = &session_token {
-        match validate_session(&state, tok).await {
-            Ok(uid) => {
+    // Hello 阶段已强制要求 session_token；这里验证失败必须立即关闭，
+    // 不允许无效 token 的连接继续占用 ws_semaphore。
+    let (mut my_uid, my_http_session_id): (Option<UserId>, String) =
+        match validate_session(&state, &session_token).await {
+            Ok((uid, http_sid)) => {
                 tracing::info!("ws auth ok uid={}", uid);
-                Some(uid)
+                (Some(uid), http_sid)
             }
             Err(e) => {
-                // C-6: token 无效时立即关闭连接，防止恶意连接占满 ws_semaphore
                 tracing::warn!("ws auth failed, closing: {:?}", e);
                 let err = ServerMessage::Error {
-                    code: ErrorCode::MalformedMessage,
+                    code: ErrorCode::Unauthenticated,
                     message: "invalid or expired session token".into(),
                 };
                 let _ = sink.send(Message::Binary(err.encode()?.into())).await;
                 return Ok(());
             }
-        }
-    } else {
-        None
-    };
+        };
 
     // ---- Writer task ----
     let writer = tokio::spawn(async move {
@@ -256,10 +270,8 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
     let mut last_activity = std::time::Instant::now();
     'outer: loop {
         // P1-L: 每 5 分钟重验一次 session token（防 token 泄漏后长时间滥用）
-        if let Some(tok) = &session_token
-            && should_revalidate(last_auth_check, SESSION_REVALIDATE_INTERVAL)
-        {
-            if validate_session(&state, tok).await.is_err() {
+        if should_revalidate(last_auth_check, SESSION_REVALIDATE_INTERVAL) {
+            if validate_session(&state, &session_token).await.is_err() {
                 tracing::info!("ws session expired, closing");
                 break;
             }
@@ -320,6 +332,28 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
             _ => continue,
         };
 
+        // 字节预算先于解码：畸形超大帧同样消耗带宽，不能靠 decode 失败绕过。
+        // 已认证走 per-uid（断线重连不重置速率），未认证走 per-connection。
+        let byte_cost = bytes.len() as f64;
+        let byte_ok = match &my_uid {
+            Some(uid) => state.check_rate_scoped_cost(
+                uid,
+                "ws-bytes",
+                WS_BYTES_PER_SEC,
+                WS_BYTES_BURST,
+                byte_cost,
+            ),
+            None => byte_limiter.try_consume(byte_cost),
+        };
+        if !byte_ok {
+            state.metrics.rate_limited();
+            let _ = tx.try_send(ServerMessage::Error {
+                code: ErrorCode::RateLimited,
+                message: "message byte budget exceeded; slow down".into(),
+            });
+            continue;
+        }
+
         let msg = match ClientMessage::decode(&bytes) {
             Ok(m) => m,
             Err(e) => {
@@ -333,13 +367,14 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
             }
         };
 
-        // 限流：已认证走 per-uid（断线重连不重置速率），未认证走 per-connection。
-        // 超限时给客户端一条 RateLimited，不断连接。
+        // 条数限流：只限条数时 30 条/s × 4 MiB 仍可打出 120 MiB/s，
+        // 因此字节预算单独计费（见上）。
         let allowed = match &my_uid {
             Some(uid) => state.check_rate_scoped(uid, "ws", 30.0, 60.0),
             None => limiter.try_consume(1.0),
         };
         if !allowed {
+            state.metrics.rate_limited();
             let _ = tx.try_send(ServerMessage::Error {
                 code: ErrorCode::RateLimited,
                 message: "too many messages, slow down".into(),
@@ -350,8 +385,7 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
         // 被踢/账号删除后，旧连接手里的 token 已失效；Join 必须重新校验，
         // 不能只信任 Hello 时缓存的 my_uid。
         if matches!(&msg, ClientMessage::Join)
-            && let Some(tok) = &session_token
-            && validate_session(&state, tok).await.is_err()
+            && validate_session(&state, &session_token).await.is_err()
         {
             let _ = tx.try_send(ServerMessage::Error {
                 code: ErrorCode::Kicked,
@@ -360,7 +394,16 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
             break 'outer;
         }
 
-        if let Err(e) = handle_message(msg, &state, &mut my_uid, &my_session_id, &tx).await {
+        if let Err(e) = handle_message(
+            msg,
+            &state,
+            &mut my_uid,
+            &my_session_id,
+            &my_http_session_id,
+            &tx,
+        )
+        .await
+        {
             tracing::warn!("handle message: {}", e);
             // 不把内部细节发给客户端，但必须让它知道请求没有被接受，
             // 否则客户端会一直以为自己是“已加入”的僵尸状态。
@@ -528,6 +571,7 @@ async fn handle_message(
     state: &AppState,
     my_uid: &mut Option<UserId>,
     my_session_id: &std::sync::atomic::AtomicU64,
+    my_http_session_id: &str,
     tx: &mpsc::Sender<ServerMessage>,
 ) -> anyhow::Result<()> {
     match msg {
@@ -565,6 +609,7 @@ async fn handle_message(
                 uid: uid.clone(),
                 tx: tx.clone(),
                 session_id,
+                http_session_id: my_http_session_id.to_string(),
             });
 
             let _ = tx.try_send(ServerMessage::Joined {
@@ -691,6 +736,89 @@ async fn handle_message(
             }
         }
 
+        ClientMessage::ChannelReaction {
+            channel_id,
+            ciphertext,
+        } => {
+            let from = ensure_joined(state, my_uid, my_session_id)?;
+            if ciphertext.len() > MAX_CHANNEL_REACTION_BYTES {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "channel reaction too large".into(),
+                });
+                return Ok(());
+            }
+            if ciphertext.first() != Some(&0x03) {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "channel reaction must use the channel group key (0x03 prefix)".into(),
+                });
+                return Ok(());
+            }
+
+            let meta: Option<(i64,)> =
+                sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+                    .bind(&channel_id)
+                    .fetch_optional(&state.pool)
+                    .await?;
+            let Some((is_private,)) = meta else {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::TargetNotFound,
+                    message: format!("channel not found: {}", channel_id),
+                });
+                return Ok(());
+            };
+            if is_private == 0 {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "public channels use MLS broadcast reactions".into(),
+                });
+                return Ok(());
+            }
+
+            let is_member: Option<(i64,)> = sqlx::query_as(
+                "SELECT 1 FROM channel_members WHERE channel_id = ? AND login_id = ?",
+            )
+            .bind(&channel_id)
+            .bind(from.as_str())
+            .fetch_optional(&state.pool)
+            .await?;
+            if is_member.is_none() {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::TargetNotFound,
+                    message: format!("not a member of {}", channel_id),
+                });
+                return Ok(());
+            }
+
+            // 定向 fanout 给频道成员，排除发送者（发送端本地已乐观更新）。
+            let members: Vec<(String,)> = sqlx::query_as(
+                "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ?",
+            )
+            .bind(&channel_id)
+            .bind(from.as_str())
+            .fetch_all(&state.pool)
+            .await?;
+            if !state.try_reserve_broadcast(ciphertext.len(), members.len()) {
+                state.metrics.broadcast_budget_rejected();
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::RateLimited,
+                    message: "room broadcast budget exceeded; reaction rejected".into(),
+                });
+                return Ok(());
+            }
+            for (member,) in members {
+                state.send_to(
+                    &UserId::new(member),
+                    ServerMessage::ChannelReaction {
+                        channel_id: channel_id.clone(),
+                        from: from.clone(),
+                        ciphertext: ciphertext.clone(),
+                    },
+                );
+            }
+        }
+
         ClientMessage::ChannelCommit {
             channel_id,
             exclude,
@@ -740,6 +868,15 @@ async fn handle_message(
             .bind(from.as_str())
             .fetch_all(&state.pool)
             .await?;
+
+            if !state.try_reserve_broadcast(framed.len(), members.len()) {
+                state.metrics.broadcast_budget_rejected();
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::RateLimited,
+                    message: "room broadcast budget exceeded; channel commit rejected".into(),
+                });
+                return Ok(());
+            }
 
             for (member,) in members {
                 if exclude.as_ref().is_some_and(|e| e.as_str() == member) {
@@ -853,6 +990,26 @@ async fn handle_message(
                 });
                 return Ok(());
             }
+            // 按发送者限流（2 条/秒，突发 32），避免单个 op4 用伪 epoch
+            // 快速填满 256 条、挤掉其他管理员的合法 commit。突发值保留
+            // 足够空间给房主在一次重连后连续 Add 多个成员。
+            // 必须在广播前拒绝，否则收件人已经拿到未落库的 Commit。
+            if !state.check_rate_scoped(&from, "mls_commit", 2.0, 32.0) {
+                state.metrics.rate_limited();
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::RateLimited,
+                    message: "mls commit rate limited".into(),
+                });
+                return Ok(());
+            }
+            if !state.try_reserve_broadcast(payload.len(), state.peer_count().saturating_sub(1)) {
+                state.metrics.broadcast_budget_rejected();
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::RateLimited,
+                    message: "room broadcast budget exceeded; commit rejected".into(),
+                });
+                return Ok(());
+            }
             // P1-7：关键消息用有背压的广播，避免 try_send 静默丢弃。
             state
                 .broadcast_except_important(
@@ -883,12 +1040,22 @@ async fn handle_message(
                     tracing::warn!("store mls commit failed: {}", e);
                 }
                 // 只保留最近 256 条 Commit。
-                // 注意：不能按 MAX(epoch) 保留——epoch 受客户端控制，
-                // 一个超大值会永久清空所有合法 commit。按插入顺序(rowid)保留。
+                // 不能按 MAX(epoch) 保留——epoch 受客户端控制，一个超大值
+                // 会永久清空所有合法 commit；按插入顺序(rowid)保留。
                 let _ = sqlx::query(
                     "DELETE FROM mls_commits WHERE rowid NOT IN \
                      (SELECT rowid FROM mls_commits ORDER BY rowid DESC LIMIT 256)",
                 )
+                .execute(&state.pool)
+                .await;
+                // 单个发送者最多占 64 条，给其他管理员保留补投空间。
+                let _ = sqlx::query(
+                    "DELETE FROM mls_commits WHERE from_uid = ? AND rowid NOT IN \
+                     (SELECT rowid FROM mls_commits WHERE from_uid = ? \
+                      ORDER BY rowid DESC LIMIT 64)",
+                )
+                .bind(from.as_str())
+                .bind(from.as_str())
                 .execute(&state.pool)
                 .await;
             }
@@ -935,6 +1102,14 @@ async fn handle_message(
                 });
                 return Ok(());
             }
+            if !state.try_reserve_broadcast(payload.len(), state.peer_count().saturating_sub(1)) {
+                state.metrics.broadcast_budget_rejected();
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::RateLimited,
+                    message: "room broadcast budget exceeded; proposal rejected".into(),
+                });
+                return Ok(());
+            }
             state
                 .broadcast_except_important(
                     &from,
@@ -952,6 +1127,15 @@ async fn handle_message(
                 let _ = tx.try_send(ServerMessage::Error {
                     code: ErrorCode::MalformedMessage,
                     message: "application message too large".into(),
+                });
+                return Ok(());
+            }
+            // 房间级扇出预算：成本 = payload × 在线收件人数。
+            if !state.try_reserve_broadcast(payload.len(), state.peer_count().saturating_sub(1)) {
+                state.metrics.broadcast_budget_rejected();
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::RateLimited,
+                    message: "room broadcast budget exceeded; slow down".into(),
                 });
                 return Ok(());
             }
@@ -986,15 +1170,22 @@ async fn handle_message(
 }
 
 /// 用 HTTP session token 换 uid，并刷新 last_seen_at。
-async fn validate_session(state: &AppState, token: &str) -> anyhow::Result<UserId> {
+async fn validate_session(state: &AppState, token: &str) -> anyhow::Result<(UserId, String)> {
     let token_hash = crate::db::hash_token(token);
-    let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT login_id, expires_at FROM sessions WHERE token = ?")
+    let row: Option<(String, i64, String)> =
+        sqlx::query_as("SELECT login_id, expires_at, session_id FROM sessions WHERE token = ?")
             .bind(&token_hash)
             .fetch_optional(&state.pool)
             .await?;
-    let (login_id, expires_at) = row.ok_or_else(|| anyhow::anyhow!("no session"))?;
+    let (login_id, expires_at, http_session_id) = match row {
+        Some(r) => r,
+        None => {
+            state.metrics.auth_failure();
+            anyhow::bail!("no session");
+        }
+    };
     if expires_at < crate::db::now_ms() {
+        state.metrics.auth_failure();
         anyhow::bail!("session expired");
     }
     let _ = sqlx::query("UPDATE sessions SET last_seen_at = ? WHERE token = ?")
@@ -1002,7 +1193,7 @@ async fn validate_session(state: &AppState, token: &str) -> anyhow::Result<UserI
         .bind(&token_hash)
         .execute(&state.pool)
         .await;
-    Ok(UserId::new(login_id))
+    Ok((UserId::new(login_id), http_session_id))
 }
 
 // ============================================================================

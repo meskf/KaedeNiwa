@@ -28,6 +28,9 @@ async fn start_server() -> String {
         livekit_api_key: "testkey".into(),
         livekit_api_secret: "testsecret".into(),
         livekit_ws_url: "ws://localhost:7880".into(),
+        admin_enabled: false,
+        admin_bind: "127.0.0.1:3001".into(),
+        admin_token: String::new(),
     };
     let pool = db::init(&cfg.database_url).await.unwrap();
     let state = AppState::new(pool, cfg);
@@ -36,7 +39,11 @@ async fn start_server() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
     });
 
     // 等待服务器就绪：尝试 TCP 连接，最多 20 次 × 20ms = 400ms
@@ -104,8 +111,15 @@ where
     panic!("recv_until: no matching message in 20 tries");
 }
 
-async fn connect_and_hello(url: &str) -> Ws {
-    let (mut ws, _) = connect_async(url).await.expect("connect");
+// ============================================================================
+// 测试
+// ============================================================================
+
+/// 未认证 Hello 必须在版本协商后立即拒绝，不能留下可保活的空连接。
+#[tokio::test]
+async fn unauthenticated_hello_is_rejected() {
+    let url = start_server().await;
+    let (mut ws, _) = connect_async(&url).await.expect("connect");
     send(
         &mut ws,
         ClientMessage::ClientHello {
@@ -117,19 +131,9 @@ async fn connect_and_hello(url: &str) -> Ws {
     )
     .await;
     match recv(&mut ws).await {
-        ServerMessage::ServerHello { .. } => ws,
-        other => panic!("expected ServerHello, got {:?}", other),
+        ServerMessage::Error { code, .. } => assert_eq!(code, ErrorCode::Unauthenticated),
+        other => panic!("expected Unauthenticated, got {:?}", other),
     }
-}
-
-// ============================================================================
-// 测试
-// ============================================================================
-
-#[tokio::test]
-async fn hello_roundtrip() {
-    let url = start_server().await;
-    let _ws = connect_and_hello(&url).await;
 }
 
 #[tokio::test]
@@ -154,25 +158,23 @@ async fn version_mismatch_rejected() {
 }
 
 #[tokio::test]
-async fn join_requires_session_token() {
+async fn invalid_session_token_is_rejected_at_hello() {
     let url = start_server().await;
-    let mut ws = connect_and_hello(&url).await;
-
-    // 没 token 直接 join：必须收到明确的 NotJoined 错误，而不是静默。
-    send(&mut ws, ClientMessage::Join).await;
-    match recv(&mut ws).await {
-        ServerMessage::Error {
-            code: ErrorCode::NotJoined,
-            ..
-        } => {}
-        other => panic!("expected NotJoined, got {:?}", other),
-    }
-
-    // 连接必须保持可用（不是 fatal error）。
-    send(&mut ws, ClientMessage::Ping { nonce: 42 }).await;
-    match recv(&mut ws).await {
-        ServerMessage::Pong { nonce } => assert_eq!(nonce, 42),
-        other => panic!("expected Pong, got {:?}", other),
+    let (mut ws, _) = connect_async(&url).await.expect("connect");
+    send(
+        &mut ws,
+        ClientMessage::ClientHello {
+            protocol_version: kaede_protocol::PROTOCOL_VERSION,
+            client_name: "test".into(),
+            client_version: "0.1.0".into(),
+            session_token: Some("not-a-real-token".into()),
+        },
+    )
+    .await;
+    // 服务器先回 ServerHello 再做 token 校验；错误紧随其后。
+    match recv_until(&mut ws, |m| matches!(m, ServerMessage::Error { .. })).await {
+        ServerMessage::Error { code, .. } => assert_eq!(code, ErrorCode::Unauthenticated),
+        other => panic!("expected Unauthenticated, got {:?}", other),
     }
 }
 
@@ -377,7 +379,9 @@ async fn direct_message_routing() {
 #[tokio::test]
 async fn rate_limit_kicks_in() {
     let url = start_server().await;
-    let mut ws = connect_and_hello(&url).await;
+    let http_url = url.replace("ws://", "http://").replace("/ws", "");
+    let token = register_via_http(&http_url, "rate-limit-test", "pw-rate-limit-123").await;
+    let mut ws = connect_with_token(&url, &token).await;
 
     // burst=60，发 100 条应该触发限流
     for i in 0..100u64 {

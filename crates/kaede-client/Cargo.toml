@@ -72,3 +72,14 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security_Cryptography",
 ] }
 
+# macOS Keychain：snapshot key 存在系统钥匙串，避免公开信息派生 key。
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+# Linux Secret Service：snapshot key 存在系统密钥环。
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = [
+    "sync-secret-service",
+    "crypto-rust",
+] }
+

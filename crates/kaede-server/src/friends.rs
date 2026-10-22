@@ -107,6 +107,12 @@ async fn send_request(
     let uid = authenticate(&state, &headers).await?;
     let me = uid.as_str().to_string();
 
+    // 好友请求会触发对方实时通知：限流防通知轰炸与关系表灌水。
+    if !state.check_rate_scoped(&uid, "friend_request", 0.2, 5.0) {
+        state.metrics.rate_limited();
+        return Err(ApiError::BadRequest("friend request rate limited".into()));
+    }
+
     if me == target {
         return Err(ApiError::BadRequest("cannot friend yourself".into()));
     }

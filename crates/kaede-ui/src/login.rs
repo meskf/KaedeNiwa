@@ -33,6 +33,17 @@ pub fn LoginView() -> Element {
     let mut server_url = use_signal(|| "http://localhost:8080".to_string());
     let mut error = use_signal(|| Option::<String>::None);
     let mut connecting = use_signal(|| false);
+    // 登出回到登录页时清空密码输入，避免共享设备上残留凭据。
+    let mut was_main = use_signal(|| false);
+    use_effect(move || {
+        let is_login = *ui.view.read() == View::Login;
+        if is_login && *was_main.read() {
+            password.set(String::new());
+            error.set(None);
+            connecting.set(false);
+        }
+        was_main.set(!is_login);
+    });
 
     let (tx, rx) = use_hook(async_channel::unbounded::<LoginMsg>);
 

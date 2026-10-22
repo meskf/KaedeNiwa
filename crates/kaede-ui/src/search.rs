@@ -36,6 +36,19 @@ async fn do_search(app: AppState, query: String) -> Vec<SearchHit> {
             .map(|c| c.name.clone())
             .unwrap_or_else(|| id.to_string())
     };
+    let dm_convs = app
+        .dm_conversations
+        .read()
+        .get(&sid)
+        .cloned()
+        .unwrap_or_default();
+    let dm_label_of = |id: &str| {
+        dm_convs
+            .iter()
+            .find(|c| c.conv_id == id)
+            .map(|c| c.peer_nickname.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
 
     let mut hits = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -75,7 +88,7 @@ async fn do_search(app: AppState, query: String) -> Vec<SearchHit> {
                     hits.push(SearchHit {
                         is_dm: true,
                         target: conv.clone(),
-                        label: conv.clone(),
+                        label: dm_label_of(conv),
                         author: m.author.clone(),
                         ts: m.ts,
                         text: m.text.clone(),
@@ -92,11 +105,21 @@ async fn do_search(app: AppState, query: String) -> Vec<SearchHit> {
             .filter(|c| c.kind != "voice")
             .map(|c| c.id.clone())
             .collect();
-        for h in room.search_local(&query, &ids, 200).await {
-            if seen.insert((format!("c:{}", h.channel_id), h.ts, h.sender.clone())) {
+        let dm_ids: Vec<String> = dm_convs.iter().map(|c| c.conv_id.clone()).collect();
+        for h in room.search_local(&query, &ids, &dm_ids, 200).await {
+            let seen_key = if h.is_dm {
+                format!("d:{}", h.channel_id)
+            } else {
+                format!("c:{}", h.channel_id)
+            };
+            if seen.insert((seen_key, h.ts, h.sender.clone())) {
                 hits.push(SearchHit {
-                    is_dm: false,
-                    label: label_of(&h.channel_id),
+                    is_dm: h.is_dm,
+                    label: if h.is_dm {
+                        dm_label_of(&h.channel_id)
+                    } else {
+                        label_of(&h.channel_id)
+                    },
                     target: h.channel_id,
                     author: h.sender,
                     ts: h.ts,

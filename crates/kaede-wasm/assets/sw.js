@@ -12,6 +12,7 @@ const SHELL = [
   './index.html',
   './manifest.json',
   './icon.svg',
+  './boot.js',
   './livekit-client.umd.min.js',
   './livekit-client.e2ee.worker.js',
 ];

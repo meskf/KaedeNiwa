@@ -84,6 +84,17 @@ async fn full_mls_chat_flow() {
     // --- Alice 建组 ---
     alice.become_host().await.expect("alice become host");
     alice.join_room().await.expect("alice join");
+    // 等 Alice 真正进入 peers 表，再让 Bob Join；否则服务器的处理顺序
+    // 可能让 Bob 的 PeerJoined 广播发生时 Alice 还不在线。
+    assert!(
+        timeout(
+            TEST_TIMEOUT,
+            alice_obs.wait_for(|e| matches!(e, ClientEvent::Joined { .. }))
+        )
+        .await
+        .expect("timeout waiting for Alice Joined"),
+        "alice did not receive Joined"
+    );
 
     // --- Bob 上传 KP + join ---
     bob.become_guest().await.expect("bob become guest");
@@ -295,5 +306,78 @@ async fn begin_media_session_key_rotates_per_epoch() {
     assert_ne!(
         key1, key2,
         "same seed + different epoch must yield different key (P0-Z: no nonce reuse)"
+    );
+}
+
+/// S2：附件上传必须带密文哈希；下载必须校验哈希并拒绝明文/缺哈希。
+#[tokio::test]
+async fn attachment_roundtrip_with_integrity_hash() {
+    let (alice, bob, alice_obs, _bob_obs) = setup_two_users().await;
+
+    alice.become_host().await.unwrap();
+    alice.join_room().await.unwrap();
+    // 先确认 Alice 已进入 peers 表，再让 Bob Join（避免 Join 顺序竞态）。
+    assert!(
+        timeout(
+            TEST_TIMEOUT,
+            alice_obs.wait_for(|e| matches!(e, ClientEvent::Joined { .. }))
+        )
+        .await
+        .expect("timeout waiting for Alice Joined"),
+        "alice did not receive Joined"
+    );
+    bob.become_guest().await.unwrap();
+    bob.join_room().await.unwrap();
+
+    let got_peer = timeout(
+        TEST_TIMEOUT,
+        alice_obs.wait_for(|e| matches!(e, ClientEvent::PeerJoined { .. })),
+    )
+    .await
+    .expect("timeout waiting for PeerJoined");
+    assert!(got_peer);
+
+    alice
+        .host_add_peer(&UserId::from("bob"))
+        .await
+        .expect("alice add bob");
+
+    for _ in 0..60 {
+        if bob.is_mls_ready() && alice.member_count() == 2 && bob.member_count() == 2 {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(alice.member_count(), 2);
+    assert_eq!(bob.member_count(), 2);
+
+    let payload = b"hello encrypted attachment".to_vec();
+    let att = alice
+        .upload_attachment("general", "note.txt", Some("text/plain"), payload.clone())
+        .await
+        .expect("upload attachment");
+    let hash = att.sha256.clone().expect("upload must set sha256");
+    assert_eq!(hash.len(), 64, "sha256 must be lowercase hex");
+
+    let downloaded = bob
+        .download_attachment("general", &att.id, Some(&hash))
+        .await
+        .expect("download with matching hash");
+    assert_eq!(downloaded, payload);
+
+    // 错误哈希必须拒绝（防服务端替换 blob）。
+    let wrong = "0".repeat(64);
+    assert!(
+        bob.download_attachment("general", &att.id, Some(&wrong))
+            .await
+            .is_err(),
+        "mismatched hash must be rejected"
+    );
+    // 旧消息没有哈希 → 拒绝，避免明文降级。
+    assert!(
+        bob.download_attachment("general", &att.id, None)
+            .await
+            .is_err(),
+        "missing hash must be rejected"
     );
 }

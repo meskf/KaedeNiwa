@@ -368,6 +368,23 @@ impl HttpApi {
         }
     }
 
+    /// 登出：撤销当前 HTTP session 并清除本地 token。
+    pub async fn logout(&self) -> Result<(), ClientError> {
+        let resp = self
+            .http
+            .post(format!("{}/api/logout", self.base_url))
+            .bearer_auth(self.bearer()?)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            self.clear_token();
+            Ok(())
+        } else {
+            Err(parse_api_error(resp).await)
+        }
+    }
+
     /// 当前账户。
     pub async fn me(&self) -> Result<MeResp, ClientError> {
         let resp = self
@@ -775,11 +792,10 @@ impl HttpApi {
     /// 上传附件。返回服务器分配元数据。
     pub async fn upload_attachment(
         &self,
-        name: &str,
-        mime: Option<&str>,
+        target: &str,
         bytes: Vec<u8>,
     ) -> Result<kaede_protocol::Attachment, ClientError> {
-        self.upload_attachment_with_progress(name, mime, bytes, None)
+        self.upload_attachment_with_progress(target, bytes, None)
             .await
     }
 
@@ -792,14 +808,14 @@ impl HttpApi {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn upload_attachment_with_progress(
         &self,
-        name: &str,
-        mime: Option<&str>,
+        target: &str,
         bytes: Vec<u8>,
         progress: Option<UploadProgress>,
     ) -> Result<kaede_protocol::Attachment, ClientError> {
-        let mut url = format!("{}/api/attachments?name={}", self.base_url, urlencode(name));
-        if let Some(m) = mime {
-            url.push_str(&format!("&mime={}", urlencode(m)));
+        // 只传上下文；文件名/MIME 留在 E2EE payload，避免进入代理访问日志。
+        let mut url = format!("{}/api/attachments", self.base_url);
+        if !target.is_empty() {
+            url.push_str(&format!("?target={}", urlencode(target)));
         }
 
         let total = bytes.len() as u64;
@@ -841,17 +857,17 @@ impl HttpApi {
     #[cfg(target_arch = "wasm32")]
     pub async fn upload_attachment_with_progress(
         &self,
-        name: &str,
-        mime: Option<&str>,
+        target: &str,
         bytes: Vec<u8>,
         progress: Option<UploadProgress>,
     ) -> Result<kaede_protocol::Attachment, ClientError> {
         use wasm_bindgen::JsCast;
         use wasm_bindgen::closure::Closure;
 
-        let mut url = format!("{}/api/attachments?name={}", self.base_url, urlencode(name));
-        if let Some(m) = mime {
-            url.push_str(&format!("&mime={}", urlencode(m)));
+        // 只传上下文；文件名/MIME 留在 E2EE payload，避免进入代理访问日志。
+        let mut url = format!("{}/api/attachments", self.base_url);
+        if !target.is_empty() {
+            url.push_str(&format!("?target={}", urlencode(target)));
         }
 
         let xhr = web_sys::XmlHttpRequest::new()
