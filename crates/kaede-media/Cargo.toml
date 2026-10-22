@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-kaede-capture = { path = "../kaede-capture", version = "0.0.1" }
+kaede-capture = { path = "../kaede-capture", version = "0.0.2" }
 kaede-crypto  = { workspace = true }
 crossbeam-channel = "0.5"
 thiserror     = { workspace = true }

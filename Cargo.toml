@@ -18,20 +18,20 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.0.1"
+version      = "0.0.2"
 edition      = "2024"
 rust-version = "1.99"
 license      = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # internal
-kaede-protocol = { path = "crates/kaede-protocol", version = "0.0.1" }
-kaede-crypto   = { path = "crates/kaede-crypto", version = "0.0.1" }
-kaede-mls      = { path = "crates/kaede-mls", version = "0.0.1" }
-kaede-storage  = { path = "crates/kaede-storage", version = "0.0.1" }
-kaede-client   = { path = "crates/kaede-client", version = "0.0.1" }
-kaede-ui       = { path = "crates/kaede-ui", version = "0.0.1" }
-kaede-livekit-web = { path = "crates/kaede-livekit-web", version = "0.0.1" }
+kaede-protocol = { path = "crates/kaede-protocol", version = "0.0.2" }
+kaede-crypto   = { path = "crates/kaede-crypto", version = "0.0.2" }
+kaede-mls      = { path = "crates/kaede-mls", version = "0.0.2" }
+kaede-storage  = { path = "crates/kaede-storage", version = "0.0.2" }
+kaede-client   = { path = "crates/kaede-client", version = "0.0.2" }
+kaede-ui       = { path = "crates/kaede-ui", version = "0.0.2" }
+kaede-livekit-web = { path = "crates/kaede-livekit-web", version = "0.0.2" }
 
 # serialization
 serde    = { version = "1", features = ["derive"] }
@@ -39,12 +39,9 @@ serde_bytes = "0.11"
 ciborium = "0.2"
 
 # crypto
-x25519-dalek     = { version = "2", features = ["static_secrets"] }
-ml-kem           = "0.3"
 hkdf             = "0.12"
 sha2             = "0.10"
 aes-gcm          = "0.10"
-chacha20poly1305 = "0.10"
 zeroize          = { version = "1", features = ["derive"] }
 rand_core        = { version = "0.6", features = ["getrandom"] }
 subtle           = "2"
@@ -107,7 +104,10 @@ opt-level     = "z"
 lto           = "fat"
 codegen-units = 1
 panic         = "abort"
-strip         = true
+# 必须关闭：LLVM 23 起 cargo 的 strip 会移除 `__wasm_bindgen_unstable`
+# 自定义段，导致 dx / wasm-bindgen 无法处理链接产物（打包直接失败）。
+# 体积由 dx 后续的 wasm-opt 负责。
+strip         = false
 
 # 通用 dev：快编译，保留 debug 信息
 [profile.dev]

@@ -61,7 +61,7 @@ features = ["js"]
 [dev-dependencies]
 base64 = "0.22"
 tokio = { workspace = true }
-kaede-server = { path = "../kaede-server", version = "0.0.1" }
+kaede-server = { path = "../kaede-server", version = "0.0.2" }
 axum = "0.8"
 
 

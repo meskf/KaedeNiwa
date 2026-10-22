@@ -18,9 +18,9 @@ base64         = "0.22"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 dioxus = { workspace = true, features = ["desktop"] }
 tokio = { workspace = true }
-kaede-media   = { path = "../kaede-media", version = "0.0.1" }
-kaede-capture = { path = "../kaede-capture", version = "0.0.1" }
-kaede-media-session = { path = "../kaede-media-session", version = "0.0.1" }
+kaede-media   = { path = "../kaede-media", version = "0.0.2" }
+kaede-capture = { path = "../kaede-capture", version = "0.0.2" }
+kaede-media-session = { path = "../kaede-media-session", version = "0.0.2" }
 kaede-crypto  = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
