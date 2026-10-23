@@ -1,12 +1,12 @@
-﻿[package]
+[package]
 license.workspace = true
 name = "kaede-media-session"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-kaede-media   = { path = "../kaede-media", version = "0.0.2" }
-kaede-capture = { path = "../kaede-capture", version = "0.0.2" }
+kaede-media   = { path = "../kaede-media", version = "0.0.3" }
+kaede-capture = { path = "../kaede-capture", version = "0.0.3" }
 
 livekit       = "0.9.5"
 tokio         = { workspace = true }
