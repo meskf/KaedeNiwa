@@ -43,7 +43,7 @@ hkdf             = "0.12"
 sha2             = "0.10"
 aes-gcm          = "0.10"
 zeroize          = { version = "1", features = ["derive"] }
-rand_core        = { version = "0.6", features = ["getrandom"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 subtle           = "2"
 
 # mls

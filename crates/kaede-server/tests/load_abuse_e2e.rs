@@ -30,26 +30,33 @@ async fn spawn() -> String {
 }
 
 async fn register(base: &str, login_id: &str) -> String {
-    let resp = reqwest::Client::new()
-        .post(format!("{base}/api/register"))
-        .json(&serde_json::json!({
-            "login_id": login_id,
-            "password": "loadtest-123",
-            "nickname": "",
-        }))
-        .send()
-        .await
-        .expect("register send");
-    assert!(
-        resp.status().is_success(),
-        "register {login_id}: {}",
-        resp.status()
-    );
-    let body: serde_json::Value = resp.json().await.expect("register json");
-    body["session_token"]
-        .as_str()
-        .expect("session_token")
-        .to_string()
+    let client = reqwest::Client::new();
+    for attempt in 0..15 {
+        let resp = client
+            .post(format!("{base}/api/register"))
+            .json(&serde_json::json!({
+                "login_id": login_id,
+                "password": "loadtest-123",
+                "nickname": "",
+            }))
+            .send()
+            .await
+            .expect("register send");
+
+        if resp.status().is_success() {
+            let body: serde_json::Value = resp.json().await.expect("register json");
+            return body["session_token"].as_str().unwrap().to_string();
+        }
+
+        // 如果遇到限流 (400 Bad Request)，等待 500ms 后重试
+        if resp.status() == reqwest::StatusCode::BAD_REQUEST && attempt < 14 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            continue;
+        }
+
+        panic!("register {login_id}: {}", resp.status());
+    }
+    panic!("register {login_id}: too many retries");
 }
 
 fn ws_url(base: &str) -> String {

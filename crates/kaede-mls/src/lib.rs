@@ -38,13 +38,10 @@ pub use purpose::SframePurpose;
 pub const SFRAME_EXPORT_LABEL: &str = "SFrame 10 MLS";
 
 /// SFrame 密钥长度。
-pub const SFRAME_KEY_LEN: usize = 32;
-
-/// 默认 ciphersuite（X25519 + AES-128-GCM + SHA-256 + Ed25519）。
-///
-/// TODO 阶段 2：评估 PQ ciphersuite。
 pub const DEFAULT_CIPHERSUITE: openmls::prelude::Ciphersuite =
     openmls::prelude::Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+
+pub const SFRAME_KEY_LEN: usize = 32;
 
 /// crate 版本。
 pub fn version() -> &'static str {

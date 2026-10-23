@@ -37,12 +37,18 @@ pub fn LoginView() -> Element {
     let mut was_main = use_signal(|| false);
     use_effect(move || {
         let is_login = *ui.view.read() == View::Login;
-        if is_login && *was_main.read() {
-            password.set(String::new());
-            error.set(None);
-            connecting.set(false);
+        let prev = *was_main.read();
+        let new_val = !is_login;
+
+        // 只在值真正发生变化时写入，避免 Signal::set 无条件触发重绘导致死循环
+        if prev != new_val {
+            if is_login && prev {
+                password.set(String::new());
+                error.set(None);
+                connecting.set(false);
+            }
+            was_main.set(new_val);
         }
-        was_main.set(!is_login);
     });
 
     let (tx, rx) = use_hook(async_channel::unbounded::<LoginMsg>);

@@ -121,6 +121,20 @@ async fn main() -> Result<()> {
         });
     }
 
+    // 定期清理过期数据，防止 SQLite 膨胀
+    {
+        let pool = state.pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                if let Err(e) = kaede_server::db::cleanup_expired(&pool).await {
+                    tracing::warn!("periodic cleanup failed: {}", e);
+                }
+            }
+        });
+    }
+
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!("listening on http://{}", listener.local_addr()?);
     // CORS 已由 `with_middleware` 统一配置（KAEDE_CORS_ORIGINS）。

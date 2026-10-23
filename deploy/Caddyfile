@@ -14,19 +14,19 @@
 	}
 
 	handle /api/* {
-		reverse_proxy 127.0.0.1:8080
+		reverse_proxy {$KAEDE_UPSTREAM:127.0.0.1:8080}
 	}
 
 	handle /ws {
-		reverse_proxy 127.0.0.1:8080
+		reverse_proxy {$KAEDE_UPSTREAM:127.0.0.1:8080}
 	}
 
 	handle /health {
-		reverse_proxy 127.0.0.1:8080
+		reverse_proxy {$KAEDE_UPSTREAM:127.0.0.1:8080}
 	}
 
 	handle /ready {
-		reverse_proxy 127.0.0.1:8080
+		reverse_proxy {$KAEDE_UPSTREAM:127.0.0.1:8080}
 	}
 
 	# SPA：未知路径回退 index.html
@@ -48,3 +48,4 @@
 		-Server
 	}
 }
+
