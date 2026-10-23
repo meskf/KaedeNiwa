@@ -5,6 +5,14 @@ use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 
 pub async fn init(url: &str) -> Result<SqlitePool> {
     let pool = SqlitePoolOptions::new()
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("PRAGMA foreign_keys = ON;")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .max_connections(10)
         .connect(url)
         .await?;
@@ -31,8 +39,8 @@ pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 pub fn random_token() -> String {
@@ -77,6 +85,14 @@ pub async fn enqueue_envelope(
             MAX_ENVELOPE_BYTES
         )));
     }
+    // 单事务完成 INSERT + 双重配额裁剪：
+    //   1. 按条数保留最新 MAX_PENDING_PER_USER 条
+    //   2. 按字节总量从最旧开始删，直到 <= MAX_PENDING_BYTES
+    //
+    // 原实现是 SELECT 全部 + 逐行 DELETE，非原子且 O(n)；并发入队时可能
+    // 删到新插入的行，高频场景下成为瓶颈。窗口函数需要 SQLite 3.25+，
+    // sqlx bundled 3.45 满足。
+    let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO pending_envelopes (to_uid, from_uid, kind, channel_id, payload, created_at) \
          VALUES (?, ?, ?, ?, ?, ?)",
@@ -87,27 +103,39 @@ pub async fn enqueue_envelope(
     .bind(channel_id)
     .bind(payload)
     .bind(now_ms())
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    // 按条数 + 总字节双重配额删最旧的信封。
-    let rows: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT id, length(payload) FROM pending_envelopes WHERE to_uid = ? ORDER BY id DESC",
+    // 按条数裁剪：保留最新 N 条
+    sqlx::query(
+        "DELETE FROM pending_envelopes \
+         WHERE to_uid = ? AND id NOT IN ( \
+           SELECT id FROM pending_envelopes \
+           WHERE to_uid = ? ORDER BY id DESC LIMIT ? \
+         )",
     )
     .bind(to_uid)
-    .fetch_all(pool)
+    .bind(to_uid)
+    .bind(MAX_PENDING_PER_USER)
+    .execute(&mut *tx)
     .await?;
-    let mut total: i64 = 0;
-    for (idx, (id, len)) in rows.into_iter().enumerate() {
-        total += len;
-        if idx as i64 >= MAX_PENDING_PER_USER || total > MAX_PENDING_BYTES {
-            sqlx::query("DELETE FROM pending_envelopes WHERE id = ?")
-                .bind(id)
-                .execute(pool)
-                .await?;
-        }
-    }
 
+    // 按字节裁剪：按 id DESC 累加 payload 长度，累加值超出预算的行全部删除
+    sqlx::query(
+        "DELETE FROM pending_envelopes WHERE id IN ( \
+           SELECT id FROM ( \
+             SELECT id, \
+                    SUM(length(payload)) OVER (ORDER BY id DESC) AS cum \
+             FROM pending_envelopes WHERE to_uid = ? \
+           ) WHERE cum > ? \
+         )",
+    )
+    .bind(to_uid)
+    .bind(MAX_PENDING_BYTES)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
     Ok(())
 }
 
