@@ -241,6 +241,7 @@ fn ChannelRow(channel: kaede_protocol::Channel, display: String) -> Element {
     let mut ui = use_context::<UiState>();
     let mut voice = use_context::<VoiceState>();
     let app = use_context::<AppState>();
+    #[allow(unused_variables)]
     let controls = use_context::<VoiceControls>();
 
     let ch_id = channel.id.clone();
@@ -278,19 +279,14 @@ fn ChannelRow(channel: kaede_protocol::Channel, display: String) -> Element {
             ondoubleclick: move |_| {
                 if is_voice {
                     // 已在某个语音频道里：忽略（先离开再进新的）
-                    #[cfg(not(target_arch = "wasm32"))]
+                    #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
                     {
                         if voice.handle.read().is_some() {
                             return;
                         }
                     }
-                    // 私密语音频道：先弹密码框，密码通过后自动 connect_voice
-                    if is_private {
-                        ui.join_channel_prefill_id.set(Some(ch_id_click.clone()));
-                        ui.join_channel_then_voice.set(true);
-                        ui.join_channel_open.set(true);
-                        return;
-                    }
+                    // 私密频道只对已加入成员可见（服务端 list_channels 已过滤），
+                    // 能看到就说明已通过密码校验，直接连接即可，不再重复弹密码框。
                     let ch_id_v = ch_id_click.clone();
                     let ch_name_v = ch_name_click.clone();
                     voice.active_channel.set(Some(VoiceChannel {
@@ -298,7 +294,7 @@ fn ChannelRow(channel: kaede_protocol::Channel, display: String) -> Element {
                         name: ch_name_v,
                         members: vec![VoiceMember { uid: "me".into(), name: "我".into(), initial: "我".into(), speaking: false }],
                     }));
-                    #[cfg(not(target_arch = "wasm32"))]
+                    #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
                     {
                         spawn(async move {
                             if let Err(e) = connect_voice(app, voice, controls, ch_id_v).await {
@@ -330,15 +326,14 @@ fn ChannelRow(channel: kaede_protocol::Channel, display: String) -> Element {
                             }
                         });
                     }
+                    #[cfg(all(
+                        not(target_arch = "wasm32"),
+                        not(feature = "desktop-media")
+                    ))]
+                    mobile_voice_unavailable(ui, voice);
                 } else {
-                    // A1: 私密频道总是弹密码框（不管是否已有 group）
-                    if is_private {
-                        ui.join_channel_prefill_id.set(Some(ch_id_click.clone()));
-                        // 文字频道不能沿用上一次“加入后自动连语音”的状态。
-                        ui.join_channel_then_voice.set(false);
-                        ui.join_channel_open.set(true);
-                        return;
-                    }
+                    // 私密频道能出现在列表里 = 已是成员，直接打开；
+                    // 未加入的频道通过“按 ID 加入”弹窗进入。
                     ui.selected_channel.set(Some(ch_id_click.clone()));
                 }
             },
@@ -816,6 +811,7 @@ pub fn JoinChannelModal() -> Element {
     let mut app = use_context::<AppState>();
     #[allow(unused_mut)] // native 分支需要 mut（active_channel.set），wasm 分支不需要
     let mut voice = use_context::<VoiceState>();
+    #[allow(unused_variables)]
     let controls = use_context::<VoiceControls>();
     let mut channel_id = use_signal(String::new);
     let mut password = use_signal(String::new);
@@ -888,6 +884,16 @@ pub fn JoinChannelModal() -> Element {
                     }
                     ui.join_channel_open.set(false);
                     ui.join_channel_prefill_id.set(None);
+                    // 文字频道加入后直接打开；语音频道交给下面的自动连接逻辑。
+                    let is_voice = app
+                        .channels
+                        .read()
+                        .get(&sid)
+                        .and_then(|l| l.iter().find(|c| c.id == id).map(|c| c.kind == "voice"))
+                        .unwrap_or(false);
+                    if !is_voice {
+                        ui.selected_channel.set(Some(id.clone()));
+                    }
                     // 如果双击的是私密语音频道，密码通过后自动连语音
                     if *ui.join_channel_then_voice.read() {
                         ui.join_channel_then_voice.set(false);
@@ -900,7 +906,7 @@ pub fn JoinChannelModal() -> Element {
                                 l.iter().find(|c| c.id == ch_id_v).map(|c| c.name.clone())
                             })
                             .unwrap_or_else(|| ch_id_v.clone());
-                        #[cfg(not(target_arch = "wasm32"))]
+                        #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
                         {
                             voice.active_channel.set(Some(VoiceChannel {
                                 id: ch_id_v.clone(),
@@ -945,6 +951,8 @@ pub fn JoinChannelModal() -> Element {
                             });
                         }
                     }
+                    #[cfg(all(not(target_arch = "wasm32"), not(feature = "desktop-media")))]
+                    mobile_voice_unavailable(ui, voice);
                 }
                 Err(e) => {
                     let msg = match &e {
@@ -1042,6 +1050,7 @@ pub fn JoinChannelModal() -> Element {
 fn VoicePanel() -> Element {
     let i18n = use_i18n();
     let mut ui = use_context::<UiState>();
+    #[allow(unused_variables)]
     let app = use_context::<AppState>();
     // app 在 native / wasm 两个分支都被使用（native: NativeHandle；wasm: app.room）
     let mut voice = use_context::<VoiceState>();
@@ -1060,11 +1069,12 @@ fn VoicePanel() -> Element {
     // 主群 epoch 变化 → 媒体 E2EE key 已变，自动重建媒体会话。
     use_effect(move || {
         let req = voice.reconnect_request.read().clone();
+        #[allow(unused_variables)]
         let Some(ch) = req else {
             return;
         };
         voice.reconnect_request.set(None);
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
         {
             let h = voice.handle.write().take();
             let consumers = std::mem::take(&mut *voice.media_consumers.write());
@@ -1159,7 +1169,7 @@ fn VoicePanel() -> Element {
                     class: if mic { "vp-btn vp-on" } else { "vp-btn vp-off" },
                     title: "{i18n.t(\"voice.mic\")}",
                     onclick: move |_| {
-                        #[cfg(not(target_arch = "wasm32"))]
+                        #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
                         {
                             let new_val = !*controls.mic_on.read();
                             let h = voice.handle.read().clone();
@@ -1215,7 +1225,7 @@ fn VoicePanel() -> Element {
                     class: if scr { "vp-btn vp-on" } else { "vp-btn vp-off" },
                     title: "{i18n.t(\"voice.screen\")}",
                     onclick: move |_| {
-                        #[cfg(not(target_arch = "wasm32"))]
+                        #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
                         {
                             let new_val = !*controls.screen_on.read();
                             let h = voice.handle.read().clone();
@@ -1313,12 +1323,13 @@ fn VoicePanel() -> Element {
                     class: "vp-btn vp-leave",
                     title: "{i18n.t(\"voice.leave\")}",
                     onclick: move |_| {
+                        #[allow(unused_variables)]
                         let leaving = voice
                             .active_channel
                             .read()
                             .as_ref()
                             .map(|c| c.id.clone());
-                        #[cfg(not(target_arch = "wasm32"))]
+                        #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
                         {
                             // H25: 先清空本地状态，再执行异步断开，避免 UI 残留
                             let h = voice.handle.write().take();
@@ -1400,7 +1411,19 @@ fn UserPanel() -> Element {
 // Voice 连接（native only）
 // ============================================================================
 
-#[cfg(not(target_arch = "wasm32"))]
+/// 移动端原生构建（不含桌面媒体栈）进入语音频道时的提示。
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "desktop-media")))]
+fn mobile_voice_unavailable(mut ui: UiState, mut voice: VoiceState) {
+    voice.active_channel.set(None);
+    spawn(async move {
+        ui.toast.set(Some((
+            "当前移动端构建不含语音/屏幕共享；请使用 web-shell 构建或网页版".into(),
+            true,
+        )));
+    });
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
 pub(crate) async fn connect_voice(
     app: AppState,
     mut voice: VoiceState,
@@ -1481,10 +1504,26 @@ pub(crate) async fn connect_voice(
                     }
                     Err(e) => tracing::warn!("[voice] AudioPlayer::new: {}", e),
                 },
-                Ok(MediaEvent::TrackGone {
+                Ok(MediaEvent::TrackAvailable {
                     track,
-                    kind: RemoteKind::Audio,
+                    kind: RemoteKind::Video,
                 }) => {
+                    // 桌面端远端视频：解码后的 I420 帧送 GStreamer。
+                    match kaede_media::LiveKitVideoSink::new() {
+                        Ok(sink) => {
+                            let sink = std::sync::Arc::new(sink);
+                            match handle_for_loop.inner().attach_video(track.clone(), sink) {
+                                Ok(h) => {
+                                    tracing::info!("[voice] video attached");
+                                    voice.media_consumers.write().push((track, h));
+                                }
+                                Err(e) => tracing::warn!("[voice] attach_video: {}", e),
+                            }
+                        }
+                        Err(e) => tracing::warn!("[voice] LiveKitVideoSink::new: {}", e),
+                    }
+                }
+                Ok(MediaEvent::TrackGone { track, .. }) => {
                     // C16: 对方关闭音频流，主动清理对应的 consumer handle
                     let mut to_stop = None;
                     {

@@ -212,6 +212,19 @@ async fn post_message(
     if ct.len() > 4 * 1024 * 1024 {
         return Err(ApiError::BadRequest("message too large".into()));
     }
+    // 实时通道只接受两种封装：
+    //   0x02 = DM group Welcome 信封（首次建会话时通过本端点投递给对方）
+    //   0x05 = v2 per-conv AEAD 密文（AAD 绑定 conv_id / from / to / msg_id）
+    // 旧 v1（0x01）只允许用于读取历史：允许重新写入会让失陷服务器能把
+    // 旧格式密文当成新消息注入（v1 的 AAD 不绑定发送者）。
+    match ct.first() {
+        Some(&0x02) | Some(&0x05) => {}
+        _ => {
+            return Err(ApiError::BadRequest(
+                "dm ciphertext must start with 0x02 (welcome) or 0x05 (v2)".into(),
+            ));
+        }
+    }
     if !state.check_rate_scoped_cost(
         &uid,
         "dm-bytes",

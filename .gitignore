@@ -96,3 +96,15 @@ _scratch/
 
 # ---- PWA 打包产物（本地保留）----
 kaede-web-public.zip
+
+# ---- admin token (Phase 0 P0-2) ----
+kaede-admin-token.txt
+
+# ---- Dioxus mobile 生成工程（dx build 生成，不入库）----
+crates/kaede-mobile/gen/
+crates/kaede-mobile/.dioxus/
+crates/kaede-mobile/android/
+crates/kaede-mobile/ios/
+
+# ---- 本地临时回收站（2026-10-23）----
+_local_trash/

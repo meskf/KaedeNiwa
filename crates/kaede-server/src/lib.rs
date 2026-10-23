@@ -41,7 +41,7 @@ static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 ///   逗号分隔配置，`*` 表示允许任意来源。
 pub fn with_middleware(app: Router) -> Router {
     let raw = std::env::var("KAEDE_CORS_ORIGINS").unwrap_or_else(|_| {
-        "http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081,http://127.0.0.1:8081"
+        "http://localhost:18080,http://127.0.0.1:18080,http://localhost:18085,http://127.0.0.1:18085"
             .to_string()
     });
     let cors = if raw.trim() == "*" {
@@ -112,9 +112,9 @@ pub async fn spawn_test_server() -> std::io::Result<SocketAddr> {
         session_ttl_hours: 1,
         livekit_api_key: "testkey".into(),
         livekit_api_secret: "testsecret".into(),
-        livekit_ws_url: "ws://localhost:7880".into(),
+        livekit_ws_url: "ws://localhost:18082".into(),
         admin_enabled: false,
-        admin_bind: "127.0.0.1:3001".into(),
+        admin_bind: "127.0.0.1:18081".into(),
         admin_token: String::new(),
     };
     let pool = db::init(&cfg.database_url).await.expect("db init");

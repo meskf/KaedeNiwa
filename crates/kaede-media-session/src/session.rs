@@ -1,6 +1,6 @@
 //! 媒体会话：一条 LiveKit 连接，多 track。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -45,6 +45,24 @@ struct PublishedEntry {
     handle: tokio::task::JoinHandle<()>,
 }
 
+/// 「正在发布」占位。发布流程包含多次 `await`（采集器启动、publish_track），
+/// 只用 `published.contains_key` 检查会让并发双击同时通过，后插入者覆盖先前的
+/// `PublishedEntry` 并泄漏 track。这个 RAII 守卫在**同一临界区**内完成
+/// 检查 + 占位，函数返回（成功或失败）时自动释放占位。
+struct PublishClaim<'a> {
+    set: &'a Mutex<HashSet<TrackKind>>,
+    kind: TrackKind,
+}
+
+impl Drop for PublishClaim<'_> {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.kind);
+    }
+}
+
 pub struct ConsumerEntry {
     stop_tx: Option<oneshot::Sender<()>>,
     handle: tokio::task::JoinHandle<()>,
@@ -85,6 +103,8 @@ pub struct MediaSession {
     room_name: String,
     events_tx: broadcast::Sender<MediaEvent>,
     published: Arc<Mutex<HashMap<TrackKind, PublishedEntry>>>,
+    /// 正在发布中的 kind（并发发布占位，见 [`PublishClaim`]）。
+    publishing: Mutex<HashSet<TrackKind>>,
     remote_tracks: Arc<Mutex<HashMap<TrackId, Arc<RemoteTrack>>>>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -168,6 +188,7 @@ impl MediaSession {
             room_name,
             events_tx,
             published,
+            publishing: Mutex::new(HashSet::new()),
             remote_tracks,
             event_task: Mutex::new(Some(event_task)),
         }))
@@ -183,6 +204,23 @@ impl MediaSession {
 
     pub fn events(&self) -> broadcast::Receiver<MediaEvent> {
         self.events_tx.subscribe()
+    }
+
+    /// 原子地检查并占位一个 `TrackKind`，防止并发 publish 覆盖/泄漏。
+    fn claim_publish(&self, kind: TrackKind) -> Result<PublishClaim<'_>, MediaError> {
+        let published = self.published.lock().unwrap_or_else(|e| e.into_inner());
+        let mut publishing = self.publishing.lock().unwrap_or_else(|e| e.into_inner());
+        if published.contains_key(&kind) || publishing.contains(&kind) {
+            return Err(MediaError::InvalidState(format!(
+                "{:?} already published",
+                kind
+            )));
+        }
+        publishing.insert(kind);
+        Ok(PublishClaim {
+            set: &self.publishing,
+            kind,
+        })
     }
 
     /// 发布一个源。同 kind 已发布时返回错误。
@@ -221,17 +259,8 @@ impl MediaSession {
 
     async fn publish_screen(self: &Arc<Self>, config: VideoConfig) -> Result<(), MediaError> {
         let kind = TrackKind::ScreenVideo;
-        if self
-            .published
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&kind)
-        {
-            return Err(MediaError::InvalidState(format!(
-                "{:?} already published",
-                kind
-            )));
-        }
+        // 检查 + 占位在同一个锁内完成；并发双击只有第一个能进入发布流程。
+        let _claim = self.claim_publish(kind)?;
 
         // C-5: 未显式指定时使用主显示器实际分辨率，而不是硬编码 1080p。
         let (dw, dh) = kaede_capture::primary_display_size();
@@ -432,17 +461,7 @@ impl MediaSession {
         track_kind: TrackKind,
         denoise: bool,
     ) -> Result<(), MediaError> {
-        if self
-            .published
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&track_kind)
-        {
-            return Err(MediaError::InvalidState(format!(
-                "{:?} already published",
-                track_kind
-            )));
-        }
+        let _claim = self.claim_publish(track_kind)?;
 
         let cfg = AudioCaptureConfig {
             sample_rate,

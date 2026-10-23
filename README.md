@@ -22,6 +22,7 @@ Rust 原生的 E2EE 实时协作平台。
       kaede-ui/             Dioxus 组件（Web / Desktop / 移动端响应式）
       kaede-wasm/           Web 入口（PWA）
       kaede-desktop/        Desktop 入口（Wry）
+      kaede-mobile/         原生移动端入口（Dioxus mobile / Android 优先）
       kaede-admin/          管理后台桌面端（Dioxus）
       kaede-capture/        屏幕采集 + NVENC + 音频（GStreamer）
       kaede-media/          媒体层（SFrame / LiveKit E2EE）
@@ -42,6 +43,33 @@ Rust 原生的 E2EE 实时协作平台。
     dx serve --package kaede-wasm --platform web
     dx serve --package kaede-desktop --platform desktop
 
+    # 移动端（需 JDK 17+ / Android SDK+NDK）
+    pwsh -File scripts/build-mobile.ps1                 # 原生 UI（文字/DM/附件）
+    pwsh -File scripts/build-mobile.ps1 -WebShell `      # 内嵌网页版（含语音/屏幕共享）
+        -WebUrl https://kaede.example.com -Release
+
+## 移动端（Android 优先）
+
+前置：JDK 17+、Android SDK（Platform + NDK）、`cargo install dioxus-cli`（需与 Dioxus 0.7 匹配）。
+iOS 只能在 macOS 上构建（`--platform ios`），当前仓库只保证 Android 路径。
+
+```powershell
+# 原生 UI：文字 / DM / 附件 / 私密频道（不含语音）
+pwsh -File scripts/build-mobile.ps1
+
+# 内嵌网页版：语音 + 屏幕共享观看（推荐内测使用）
+pwsh -File scripts/build-mobile.ps1 -WebShell -Release `
+    -WebUrl https://kaede.example.com
+```
+
+- 原生 UI 不编译 GStreamer / LiveKit 原生栈，因此没有语音；进入语音频道会提示。
+- web-shell 会全屏加载指定网页版地址；Android 模拟器访问宿主机用 `http://10.0.2.2:18080`，
+  真机/生产必须 HTTPS（Android 9+ 默认拒绝明文）。本地 http 调试需在生成的 manifest 里
+  临时加 `android:usesCleartextTraffic="true"`，不要带进发布包。
+- web-shell 的**屏幕共享观看不依赖系统权限**；麦克风/摄像头采集还需要宿主 WebView 实现
+  `onPermissionRequest` 并申请 `RECORD_AUDIO` / `CAMERA`，当前未接入。
+- 移动端本地数据（SQLite 快照）落在 App 私有可写目录（`KAEDE_HOME` → cwd → 系统临时目录）。
+
 ## 已知限制
 
 - **协议版本 v6**：v5 新增好友变更实时事件；v6 新增私密频道表情反应
@@ -54,7 +82,12 @@ Rust 原生的 E2EE 实时协作平台。
   保存随机 key；钥匙串不可用时拒绝持久化并暂停发送，不再退回公开信息派生 key。
   Linux 构建需要 `libdbus-1-dev` + `pkg-config`。
 - **本地搜索**：只搜索本地已解密的频道历史与 DM 历史；服务端只有密文，无法全文搜索。
-- **媒体 seed TTL 8 小时**：崩溃/关页不会调用 `/leave`，seed 最迟在 8 小时后轮换。
+- **原生移动端暂不含语音/屏幕共享**：`kaede-mobile` 默认构建不编译 GStreamer/LiveKit
+  原生媒体栈。需要语音与屏幕共享观看时使用 `-WebShell` 构建，内嵌网页版客户端。
+- **移动端快照加密**：当前没有 Android/iOS 系统 Keystore 绑定，使用与 Web 相同的
+  公开信息派生 key（App 私有沙箱），安全边界与 Web 端一致。
+- **媒体 seed TTL 8 小时**：崩溃/关页不会调用 `/leave`，seed 最迟在 8 小时后轮换；
+  配置 LiveKit webhook 后由 `participant_left` / `room_finished` 立即回收。
 - **Windows 并发编译**：`webrtc-sys` 和 `tao` 在多核并发编译时偶发元数据竞争失败。
   解决：`$env:CARGO_BUILD_JOBS = "2"` 后重试，或直接重试一次。
   CI 中已设 `CARGO_BUILD_JOBS: "4"` 作为保守值。
@@ -87,13 +120,13 @@ pwsh -File scripts/backup-db.ps1 -Db C:\kaede\kaede.db
 
 ## 管理后台
 
-独立 listener（默认 `127.0.0.1:3001`），通过 `X-Admin-Token` 认证，只管理元数据，
+独立 listener（默认 `127.0.0.1:18081`），通过 `X-Admin-Token` 认证，只管理元数据，
 看不到任何消息明文。
 
     # 启动服务端时启用
     KAEDE_ADMIN_ENABLED=1 \
     KAEDE_ADMIN_TOKEN=<随机长 token> \
-    KAEDE_ADMIN_BIND=127.0.0.1:3001 \
+    KAEDE_ADMIN_BIND=127.0.0.1:18081 \
     cargo run -p kaede-server
 
     # 启动桌面端后台

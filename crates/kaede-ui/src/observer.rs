@@ -210,10 +210,7 @@ pub fn apply_event(
                             );
                             return;
                         }
-                        let viewing = *ui.view.read() == View::Main
-                            && *ui.main_tab.read() == MainTab::Server
-                            && ui.selected_channel.read().as_deref()
-                                == Some(msg.channel_id.as_str());
+                        let viewing = viewing_channel(app, ui, &server_id, &msg.channel_id);
                         if !viewing {
                             let mention_me = self_uid
                                 .as_deref()
@@ -242,6 +239,38 @@ pub fn apply_event(
                 }
                 _ => {}
             }
+        }
+
+        ClientEvent::PendingWelcome {
+            server_id,
+            from,
+            is_rebuild,
+            sender_login_id,
+        } => {
+            let mut list = ui.pending_welcomes.write();
+            list.retain(|p| !(p.server_id == server_id && p.sender_login_id == sender_login_id));
+            list.push(crate::state::PendingWelcomeUi {
+                server_id,
+                sender_login_id,
+                from,
+                is_rebuild,
+            });
+            // 恶意成员可以批量发 Welcome；UI 队列必须有上限，避免无限弹窗/内存增长。
+            const MAX_PENDING_WELCOME_UI: usize = 8;
+            if list.len() > MAX_PENDING_WELCOME_UI {
+                let drop_n = list.len() - MAX_PENDING_WELCOME_UI;
+                list.drain(0..drop_n);
+            }
+        }
+
+        ClientEvent::PendingWelcomeResolved {
+            server_id,
+            sender_login_id,
+            accepted: _,
+        } => {
+            ui.pending_welcomes
+                .write()
+                .retain(|p| !(p.server_id == server_id && p.sender_login_id == sender_login_id));
         }
 
         ClientEvent::ChannelMessage {
@@ -273,9 +302,7 @@ pub fn apply_event(
                     reactions: Vec::new(),
                     mentions: p.m,
                 };
-                let viewing = *ui.view.read() == View::Main
-                    && *ui.main_tab.read() == MainTab::Server
-                    && ui.selected_channel.read().as_deref() == Some(channel_id.as_str());
+                let viewing = viewing_channel(app, ui, &server_id, &channel_id);
                 if !viewing {
                     let me = app
                         .room
@@ -349,9 +376,7 @@ pub fn apply_event(
                     reactions: vec![],
                     mentions: p.m,
                 };
-                let viewing = *ui.view.read() == View::Main
-                    && *ui.main_tab.read() == MainTab::Dm
-                    && ui.selected_dm_conv.read().as_deref() == Some(conv_id.as_str());
+                let viewing = viewing_dm(app, ui, &server_id, &conv_id);
                 if !viewing {
                     let me = app
                         .room
@@ -395,7 +420,7 @@ pub fn apply_event(
             }
             voice.active_channel.set(None);
 
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
             {
                 if let Some(h) = voice.handle.write().take() {
                     spawn(async move {
@@ -531,7 +556,7 @@ pub fn logout_and_clear(mut app: AppState, mut ui: UiState, mut voice: VoiceStat
         {
             crate::voice_web::leave_voice().await;
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
         {
             if let Some(h) = voice.handle.write().take() {
                 h.inner().disconnect().await;
@@ -577,9 +602,48 @@ pub fn logout_and_clear(mut app: AppState, mut ui: UiState, mut voice: VoiceStat
         ui.mobile_detail.set(None);
         ui.mobile_detail_kind.set(None);
         ui.upload_progress.set(None);
+        // 换账号后不能残留上一会话的待确认邀请，否则“接受”会作用到新账号。
+        ui.pending_welcomes.write().clear();
+        ui.join_channel_open.set(false);
+        ui.join_channel_prefill_id.set(None);
+        ui.join_channel_then_voice.set(false);
         ui.toast.set(None);
         ui.view.set(View::Login);
     });
+}
+
+/// 当前是否正在“看”这个频道。
+///
+/// 必须同时校验 server（多服务器同 id）和移动端详情页——移动端退回列表页时
+/// `selected_channel` 仍保留旧值，只看 selected 会把未读吞掉。
+fn viewing_channel(app: AppState, ui: UiState, server_id: &str, channel_id: &str) -> bool {
+    if app.current_server.read().as_deref() != Some(server_id) {
+        return false;
+    }
+    if *ui.view.read() != View::Main || *ui.main_tab.read() != MainTab::Server {
+        return false;
+    }
+    if *ui.layout_mode.read() == crate::state::LayoutMode::Mobile
+        && ui.mobile_detail.read().as_deref() != Some(channel_id)
+    {
+        return false;
+    }
+    ui.selected_channel.read().as_deref() == Some(channel_id)
+}
+
+fn viewing_dm(app: AppState, ui: UiState, server_id: &str, conv_id: &str) -> bool {
+    if app.current_server.read().as_deref() != Some(server_id) {
+        return false;
+    }
+    if *ui.view.read() != View::Main || *ui.main_tab.read() != MainTab::Dm {
+        return false;
+    }
+    if *ui.layout_mode.read() == crate::state::LayoutMode::Mobile
+        && ui.mobile_detail.read().as_deref() != Some(conv_id)
+    {
+        return false;
+    }
+    ui.selected_dm_conv.read().as_deref() == Some(conv_id)
 }
 
 /// 断线后自动重建连接（指数退避，最多 10 次）。
@@ -714,8 +778,10 @@ fn maybe_auto_reconnect(
             app.messages.write().retain(|k, _| !k.starts_with(&prefix));
 
             let room = std::sync::Arc::new(room);
+            // 与登录流程保持同一顺序：先把 room 放进全局状态，再启动事件循环。
+            // 否则首个 Joined/PeerJoined 会命中旧的（已断开）room，房主补加失效。
+            app.room.set(Some(room.clone()));
             room.spawn_event_loop();
-            app.room.set(Some(room));
             app.reconnecting.set(false);
             ui.toast.set(Some(("已重新连接".to_string(), false)));
             tracing::info!(

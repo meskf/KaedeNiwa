@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_BASE: &str = "http://127.0.0.1:3001";
+const DEFAULT_BASE: &str = "http://127.0.0.1:18081";
 
 fn main() {
     tracing_subscriber::fmt::init();

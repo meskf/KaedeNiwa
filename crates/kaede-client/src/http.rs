@@ -260,7 +260,7 @@ struct ErrorResp {
 // ---------------------------------------------------------------------------
 
 impl HttpApi {
-    /// 新建。`base_url` 形如 `http://localhost:8080`。
+    /// 新建。`base_url` 形如 `http://localhost:18080`。
     pub fn new(base_url: impl Into<String>) -> Result<Self, ClientError> {
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
@@ -476,13 +476,14 @@ impl HttpApi {
     }
 
     /// 保存一条消息（服务端只存密文，不解密）。
+    /// 落库一条频道消息，返回服务器权威 ts。
     pub async fn post_message(
         &self,
         channel_id: &str,
         ts: i64,
         sender: &str,
         ciphertext: &[u8],
-    ) -> Result<(), ClientError> {
+    ) -> Result<i64, ClientError> {
         let req = PostMessageReq {
             channel_id: channel_id.into(),
             ts,
@@ -498,7 +499,15 @@ impl HttpApi {
             .await
             .map_err(map_reqwest_err)?;
         if resp.status().is_success() {
-            Ok(())
+            #[derive(Deserialize)]
+            struct PostMessageResp {
+                ts: i64,
+            }
+            Ok(resp
+                .json::<PostMessageResp>()
+                .await
+                .map_err(map_reqwest_err)?
+                .ts)
         } else {
             Err(parse_api_error(resp).await)
         }
@@ -1279,15 +1288,15 @@ mod tests {
 
     #[test]
     fn new_normalizes_url() {
-        let api = HttpApi::new("http://localhost:8080/").unwrap();
-        assert_eq!(api.base_url, "http://localhost:8080");
-        let api = HttpApi::new("http://localhost:8080").unwrap();
-        assert_eq!(api.base_url, "http://localhost:8080");
+        let api = HttpApi::new("http://localhost:18080/").unwrap();
+        assert_eq!(api.base_url, "http://localhost:18080");
+        let api = HttpApi::new("http://localhost:18080").unwrap();
+        assert_eq!(api.base_url, "http://localhost:18080");
     }
 
     #[test]
     fn token_lifecycle() {
-        let api = HttpApi::new("http://localhost:8080").unwrap();
+        let api = HttpApi::new("http://localhost:18080").unwrap();
         assert!(api.token().is_none());
         assert!(api.bearer().is_err());
 

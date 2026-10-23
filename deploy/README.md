@@ -6,14 +6,14 @@
 ## 1. 拓扑与端口
 
 ```
-浏览器 / Desktop ──HTTPS/WSS──> Caddy 或 Nginx ──HTTP──> kaede-server :8080
+浏览器 / Desktop ──HTTPS/WSS──> Caddy 或 Nginx ──HTTP──> kaede-server :18080
                                                       ├─ /api/*   HTTP API
                                                       ├─ /ws      WebSocket 信令
                                                       ├─ /health  存活探针
                                                       ├─ /ready   就绪探针（查 DB）
                                                       └─ /metrics Prometheus（勿公网暴露）
 
-管理后台（可选）: kaede-server 独立 listener 127.0.0.1:3001
+管理后台（可选）: kaede-server 独立 listener 127.0.0.1:18081
 LiveKit: 独立进程 / 独立端口，LIVEKIT_WS_URL 必须指向它
 ```
 
@@ -37,21 +37,56 @@ docker build -f deploy/Dockerfile -t kaede-server:0.0.1 .
 
 | 变量 | 必填 | 默认 | 说明 |
 |---|---|---|---|
-| `KAEDE_BIND` | 否 | `0.0.0.0:8080` | 监听地址；本机部署建议 `127.0.0.1:8080` |
+| `KAEDE_BIND` | 否 | `0.0.0.0:18080` | 监听地址；本机部署建议 `127.0.0.1:18080` |
 | `KAEDE_DB` | 否 | `sqlite://kaede.db?mode=rwc` | 只支持 `sqlite:`；父目录会自动创建 |
 | `KAEDE_SESSION_TTL_HOURS` | 否 | `168` | 会话有效期，`1..=8760` |
+| `KAEDE_DATA_DIR` | 否 | `<cwd>/data` | 附件密文根目录；容器部署应指向可写卷 |
+| `KAEDE_TRUSTED_PROXIES` | 容器部署建议 | 仅 loopback | 逗号分隔 IP/CIDR；Docker bridge 需设为 `172.16.0.0/12`，否则所有用户共享代理 IP |
 | `KAEDE_CORS_ORIGINS` | 生产必填 | 本地开发端口 | 逗号分隔；生产禁止 `*` |
 | `KAEDE_LOG_FORMAT` | 否 | `human` | `json` 输出单行 JSON |
 | `RUST_LOG` | 否 | `info,kaede_server=debug` | tracing 过滤 |
 | `LIVEKIT_API_KEY` | **是** | 无 | 缺失时启动失败 |
 | `LIVEKIT_API_SECRET` | **是** | 无 | 缺失时启动失败 |
-| `LIVEKIT_WS_URL` | 否 | `ws://localhost:7880` | 必须是 `ws://` 或 `wss://` |
+| `LIVEKIT_WS_URL` | 否 | `ws://localhost:18082` | 必须是 `ws://` 或 `wss://` |
+| `KAEDE_LIVEKIT_HTTP_URL` | 否 | 由 `LIVEKIT_WS_URL` 推导（`ws`→`http` / `wss`→`https`） | LiveKit RoomService HTTP 端点；WS 与 HTTP 不同端口时显式设置 |
 | `KAEDE_ADMIN_ENABLED` | 否 | `0` | `1` 启动独立管理 listener |
-| `KAEDE_ADMIN_BIND` | 否 | `127.0.0.1:3001` | 非 loopback 且无 token 时拒绝启动 |
+| `KAEDE_ADMIN_BIND` | 否 | `127.0.0.1:18081` | 非 loopback 且无 token 时拒绝启动 |
 | `KAEDE_ADMIN_TOKEN` | 公网后台必填 | 空 | 未设置时启动生成一次性 token 并打印 |
 
 启动时会校验以上配置，任何一项非法都直接退出（fail-fast）。
 完整样例见 [`../.env.example`](./.env.example)。
+
+### 3.1 LiveKit webhook（强烈建议）
+
+服务端提供 `POST /api/livekit/webhook`，用于在参与者崩溃/断网（无法调用
+`/leave`）时立即回收媒体 seed。没有 webhook 时，seed 会保留到 8 小时 TTL，
+同一房间下一次会话可能复用同一 E2EE key。
+
+在 LiveKit 配置中加上（`api_key` 必须与 `LIVEKIT_API_KEY` 相同）：
+
+```yaml
+webhook:
+  api_key: <LIVEKIT_API_KEY>
+  urls:
+    - https://kaede.example.com/api/livekit/webhook
+```
+
+服务端会用 `LIVEKIT_API_SECRET` 校验请求的 HS256 JWT 与 `sha256(body)`。
+内置 `livekit-server.exe`（bundle 双击启动）不配置 webhook，仅适合本机试用；
+生产请使用独立 LiveKit 并配置上面的 webhook。
+
+### 3.2 媒体访问吊销（踢人 / 封禁 / 移除频道成员）
+
+只删数据库行和 MLS 成员**不会**中断已经建立的 LiveKit 连接（token 有效期 6 小时），
+被移除者仍能继续收听该房间的音视频。因此服务端在以下操作后会调用 LiveKit
+RoomService `RemoveParticipant` 主动断开：
+
+- 私密频道移除成员 / 成员主动退出（同时回收该房间 media seed）
+- 踢出服务器成员、封禁账号（回收该账号在所有房间的 seed）
+
+这需要服务端能访问 LiveKit 的 **HTTP** 管理端点（默认由 `LIVEKIT_WS_URL`
+推导，可用 `KAEDE_LIVEKIT_HTTP_URL` 覆盖）。调用失败只记 warn 日志：seed 已经
+同步回收，被踢者拿不到新的 e2ee key，仍属于 E2EE 保护范围内。
 
 ## 4. 部署方式
 
@@ -82,8 +117,10 @@ docker compose -f deploy/docker-compose.yml up -d --build
 docker compose -f deploy/docker-compose.yml logs -f kaede
 ```
 
-compose 只把 Caddy 的 80/443 暴露到公网；`kaede` 仅在容器网络内监听 8080。
-数据库放在命名卷 `kaede-data`。
+compose 只把 Caddy 的 80/443 暴露到公网；`kaede` 仅在容器网络内监听 18080。
+数据库与附件放在命名卷 `kaede-data`。compose 已设置 `KAEDE_UPSTREAM=kaede:18080`
+（Caddy 反代目标）和 `KAEDE_TRUSTED_PROXIES=172.16.0.0/12`（Docker bridge），
+否则容器内会把所有用户识别成同一个代理 IP，登录失败计数会全站共享。
 
 ### 4.3 TLS / 反向代理
 
@@ -101,7 +138,7 @@ compose 只把 Caddy 的 80/443 暴露到公网；`kaede` 仅在容器网络内�
 | 端点 | 用途 | 说明 |
 |---|---|---|
 | `GET /health` | 存活探针 | 进程能响应即 200，不查 DB |
-| `GET /ready` | 就绪探针 | `SELECT 1` 成功 200，否则 503 |
+| `GET /ready` | 就绪探针 | DB 可查询且附件目录可写时 200，否则 503 |
 | `GET /metrics` | Prometheus | 计数/容量，不含账号与消息内容 |
 
 主要指标：
@@ -164,10 +201,14 @@ scripts/backup-db.sh restore /var/lib/kaede/kaede.db /var/lib/kaede/backups/kaed
 sudo systemctl start kaede-server
 ```
 
-脚本会校验 `PRAGMA integrity_check` 并输出 SHA-256。恢复流程会删除旧的
-`-wal` / `-shm`，避免把旧日志重放到新库上。
+脚本会校验 `PRAGMA integrity_check` 并输出 SHA-256；恢复时若存在 `.sha256`
+旁车文件会先校验哈希。恢复流程会删除旧的 `-wal` / `-shm`，避免把旧日志重放到新库上。
 
-建议：每日备份 + 保留 14 天；备份目录与数据库不要放在同一块盘。
+**附件不在数据库里**：`KAEDE_DATA_DIR/attachments` 是独立目录，必须一起备份
+（加密 blob 丢失后无法从数据库恢复）。恢复时也要一并还原，并确保属主仍是
+运行服务的系统用户（如 `kaede`），否则上传/下载会 500。
+
+建议：每日备份数据库 + 附件目录，保留 14 天；备份目录与数据不要放在同一块盘。
 
 ## 7. 升级 / 迁移 Runbook
 
@@ -180,8 +221,8 @@ sudo systemctl start kaede-server
 4. 替换二进制 / `docker compose up -d --build`。
 5. 启动后检查：
    ```bash
-   curl -fsS http://127.0.0.1:8080/ready
-   curl -fsS http://127.0.0.1:8080/metrics | head
+   curl -fsS http://127.0.0.1:18080/ready
+   curl -fsS http://127.0.0.1:18080/metrics | head
    journalctl -u kaede-server -n 100 --no-pager
    ```
 6. 客户端同时升级：协议当前为 **v6**，旧客户端会被明确拒绝（`UnsupportedVersion`），

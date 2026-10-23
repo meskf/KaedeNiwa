@@ -139,14 +139,15 @@ async fn send_request(
 
     if let Some((s,)) = reverse {
         if s == "pending" {
-            // 双向 accepted
+            // 双向 accepted：两条写入包事务，避免单向朋友关系（例如第二步失败）
+            let mut tx = state.pool.begin().await?;
             sqlx::query(
                 "UPDATE friends SET status = 'accepted' \
                  WHERE login_id = ? AND friend_login_id = ?",
             )
             .bind(&target)
             .bind(&me)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
             sqlx::query(
                 "INSERT OR REPLACE INTO friends (login_id, friend_login_id, status, created_at) \
@@ -155,8 +156,9 @@ async fn send_request(
             .bind(&me)
             .bind(&target)
             .bind(now)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
+            tx.commit().await?;
             notify_friends_changed(&state, &[&me, &target]);
             return Ok(StatusCode::OK);
         }
@@ -205,13 +207,15 @@ async fn accept_request(
     }
 
     let now = db::now_ms();
+    // 双向 accepted：两条写入包事务，避免单向朋友关系
+    let mut tx = state.pool.begin().await?;
     sqlx::query(
         "UPDATE friends SET status = 'accepted' \
          WHERE login_id = ? AND friend_login_id = ?",
     )
     .bind(&from)
     .bind(&me)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
     sqlx::query(
         "INSERT OR REPLACE INTO friends (login_id, friend_login_id, status, created_at) \
@@ -220,8 +224,9 @@ async fn accept_request(
     .bind(&me)
     .bind(&from)
     .bind(now)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     notify_friends_changed(&state, &[&me, &from]);
 

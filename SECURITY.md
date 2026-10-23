@@ -63,7 +63,18 @@
   - 同一次媒体会话内所有参与者共享 server seed → key 一致
   - 跨会话 key 轮换由 server seed 生命周期保证：最后一个参与者调用
     `/api/livekit/leave` 后 seed 被删除，下次进入生成新 seed
-  - **保证**：即使应用重启、LiveKit SDK ratchet 归零，两次会话 key 也不同 → **无 nonce 复用**
+  - 崩溃/断网的参与者不会调用 `/leave`。服务端提供
+    `POST /api/livekit/webhook`，按 LiveKit 的 HS256 JWT + `sha256(body)`
+    校验后处理 `participant_left` / `room_finished`，立即回收 seed；
+    未配置 webhook 时只能依赖 8 小时 TTL，复用窗口会相应变长
+  - **主动吊销（2026-10）**：只删 DB 行 / MLS 成员不会中断已建立的 LiveKit
+    连接（token 6 小时有效）。因此以下操作会同步回收房间 seed，并调用
+    LiveKit RoomService `RemoveParticipant` 主动断开：
+    - 私密频道移除成员 / 成员主动退出 / 频道被删除
+    - 踢出服务器成员、封禁账号（回收该 uid 在所有房间的 seed）
+    - 调用失败只记 warn：seed 已回收，被吊销者拿不到新的 e2ee key
+  - **保证（配置 webhook 后）**：即使应用重启、LiveKit SDK ratchet 归零，
+    两次会话 key 也不同 → **无 nonce 复用**
   - **已知限制**：通话中发生成员变更（epoch 前进）不会热更新已连接会话，需要离开重进
 - **server 可见**：谁在哪个语音房间、track 数量、码率
 - **server 不可见**：媒体明文、媒体明文加密 key
@@ -143,6 +154,7 @@ MLS snapshot 里含**签名私钥**。明文存储等于身份泄漏。各平台
 | **macOS Desktop** | Keychain 保存随机 32 字节 key | ✅ 与当前用户钥匙串绑定；钥匙串不可用时拒绝持久化 |
 | **Linux Desktop** | Secret Service（GNOME Keyring / KWallet）保存随机 key | ✅ 与当前用户密钥环绑定；不可用时拒绝持久化并暂停发送 |
 | **Web（浏览器）** | SHA256(公开信息) + AES-256-GCM | ❌ 任何能读 IndexedDB 的攻击者都能解密 |
+| **Android / iOS（Dioxus mobile）** | 同 Web fallback（SHA256 + AES-GCM），文件位于 App 私有沙箱 | ❌ 能执行 App 内代码/读取沙箱者可解密；不防越狱/root |
 
 ### Web 端的安全性 ≈ 0（S-2）
 
@@ -155,6 +167,9 @@ snapshot → 拿到签名私钥**。
 - 生产部署优先 Desktop（Windows DPAPI / macOS Keychain / Linux Secret Service）
 - Linux Desktop 构建需要 `libdbus-1-dev` + `pkg-config`；无 Secret Service 的环境（如无头服务器）
   不会退回公开信息派生 key，而是拒绝保存快照并暂停发送
+- 移动端当前**未接入** Android Keystore / iOS Keychain；内测阶段只适合低价值账号。
+  升级路径：`android-keystore` + `security-framework`（iOS）保存随机 DEK，再把
+  snapshot 外层头升级为 `0x04`（与 Web DEK 迁移一起做）。
 - 未来升级路径：WebCrypto `generateKey(non-extractable)` + IndexedDB 存 handle
   - 必须作为 **snapshot 格式升级**（`0x03` → `0x04`）一起做
   - 与 S-1 的 KDF 修正一起做
@@ -168,7 +183,7 @@ snapshot → 拿到签名私钥**。
 
 ## 管理后台
 
-- **独立 listener**：默认 `127.0.0.1:3001`，与用户 API / WS 端口分离；只在
+- **独立 listener**：默认 `127.0.0.1:18081`，与用户 API / WS 端口分离；只在
   `KAEDE_ADMIN_ENABLED=1` 时启动。
 - **认证**：`X-Admin-Token`，与用户 session token 完全隔离；服务端对 token 做 SHA-256
   定长比较。`KAEDE_ADMIN_TOKEN` 为空时后台拒绝所有请求（fail-closed）。

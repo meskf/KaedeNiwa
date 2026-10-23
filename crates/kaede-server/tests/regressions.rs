@@ -1,4 +1,9 @@
 //! 回归测试：连接接管、离线 Welcome 补投。
+//!
+//! 注意：DM 与私密频道的**实时**密文由服务端按首字节校验封装版本
+//! （`0x02` = DM group Welcome 信封，`0x05` = v2 per-conv AEAD，`0x03` = 频道 group）。
+//! 因此本文件里用作占位的 `"BQID"` 是合法的 `0x05` 前缀密文；旧格式 `AQID`（`0x01`）
+//! 只允许出现在历史读取路径上，写入会被拒绝。
 
 use std::time::Duration;
 
@@ -24,9 +29,9 @@ async fn start_server() -> (String, SqlitePool) {
         session_ttl_hours: 1,
         livekit_api_key: "k".into(),
         livekit_api_secret: "s".into(),
-        livekit_ws_url: "ws://localhost:7880".into(),
+        livekit_ws_url: "ws://localhost:18082".into(),
         admin_enabled: false,
-        admin_bind: "127.0.0.1:3001".into(),
+        admin_bind: "127.0.0.1:18081".into(),
         admin_token: String::new(),
     };
     let pool = db::init(&cfg.database_url).await.unwrap();
@@ -156,7 +161,7 @@ async fn dm_conversation_index_and_monotonic_ts() {
             .json(&serde_json::json!({
                 "ts": 0,
                 "sender": "alice",
-                "ciphertext": "AQID",
+                "ciphertext": "BQID",
                 "_i": i,
             }))
             .send()
@@ -586,7 +591,7 @@ async fn removing_member_cleans_orphan_rows() {
         .json(&serde_json::json!({
             "ts": 0,
             "sender": "alice",
-            "ciphertext": "AQID",
+            "ciphertext": "BQID",
         }))
         .send()
         .await
@@ -766,7 +771,7 @@ async fn unread_counts_track_reads() {
             "channel_id": ch_id,
             "ts": 0,
             "sender": "alice",
-            "ciphertext": "AQID",
+            "ciphertext": "BQID",
         }))
         .send()
         .await
@@ -855,7 +860,7 @@ async fn unread_counts_track_reads() {
         .json(&serde_json::json!({
             "ts": 0,
             "sender": "alice",
-            "ciphertext": "AQID",
+            "ciphertext": "BQID",
         }))
         .send()
         .await

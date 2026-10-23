@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# 最小权限：CI 只需要读仓库。新增 job 若需写权限请单独声明。
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1

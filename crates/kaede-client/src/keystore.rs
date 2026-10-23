@@ -237,7 +237,12 @@ pub mod fallback {
 /// macOS / Linux Desktop：把随机 snapshot key 放进系统钥匙串。
 ///
 /// key 在进程内缓存，避免每条消息落盘都访问 Keychain / Secret Service。
-#[cfg(all(not(windows), not(target_arch = "wasm32")))]
+#[cfg(all(
+    not(windows),
+    not(target_arch = "wasm32"),
+    not(target_os = "android"),
+    not(target_os = "ios")
+))]
 pub mod keyring_store {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -375,7 +380,26 @@ pub fn device_cipher(uid: &str, server_url: &str) -> Box<dyn SnapshotCipher> {
         }
         Box::new(fallback::cipher(uid, server_url))
     }
-    #[cfg(all(not(windows), not(target_arch = "wasm32")))]
+    // 移动端：当前没有可用的系统 Keystore 绑定。使用与 Web 相同的
+    // 公开信息派生 key；snapshot 位于 App 私有沙箱内。威胁模型与 Web 一致
+    // （防随手读取，不防能执行代码的攻击者）。
+    #[cfg(all(
+        not(windows),
+        not(target_arch = "wasm32"),
+        any(target_os = "android", target_os = "ios")
+    ))]
+    {
+        tracing::warn!(
+            "[keystore] mobile build uses fallback snapshot cipher (no platform keystore integration)"
+        );
+        Box::new(fallback::cipher(uid, server_url))
+    }
+    #[cfg(all(
+        not(windows),
+        not(target_arch = "wasm32"),
+        not(target_os = "android"),
+        not(target_os = "ios")
+    ))]
     {
         match keyring_store::KeyringCipher::open(uid, server_url) {
             Ok(cipher) => Box::new(cipher),
@@ -418,13 +442,23 @@ impl SnapshotCipher for WebDekWithFallback {
 }
 
 /// Desktop 迁移期 cipher：优先用系统钥匙串 key 解密，失败后回退到旧 fallback。
-#[cfg(all(not(windows), not(target_arch = "wasm32")))]
+#[cfg(all(
+    not(windows),
+    not(target_arch = "wasm32"),
+    not(target_os = "android"),
+    not(target_os = "ios")
+))]
 struct KeyringWithFallback {
     primary: keyring_store::KeyringCipher,
     secondary: kaede_mls::AesGcmCipher,
 }
 
-#[cfg(all(not(windows), not(target_arch = "wasm32")))]
+#[cfg(all(
+    not(windows),
+    not(target_arch = "wasm32"),
+    not(target_os = "android"),
+    not(target_os = "ios")
+))]
 impl SnapshotCipher for KeyringWithFallback {
     fn alg_id(&self) -> u8 {
         kaede_mls::ALG_AES_GCM
@@ -474,7 +508,18 @@ pub fn device_cipher_for_snapshot(
         }
         #[cfg(windows)]
         kaede_mls::ALG_AES_GCM => Box::new(fallback::cipher(uid, server_url)),
-        #[cfg(all(not(windows), not(target_arch = "wasm32")))]
+        #[cfg(all(
+            not(windows),
+            not(target_arch = "wasm32"),
+            any(target_os = "android", target_os = "ios")
+        ))]
+        kaede_mls::ALG_AES_GCM => Box::new(fallback::cipher(uid, server_url)),
+        #[cfg(all(
+            not(windows),
+            not(target_arch = "wasm32"),
+            not(target_os = "android"),
+            not(target_os = "ios")
+        ))]
         kaede_mls::ALG_AES_GCM => {
             let secondary = fallback::cipher(uid, server_url);
             match keyring_store::KeyringCipher::open(uid, server_url) {

@@ -25,7 +25,7 @@ const ROOM: &str = "kaede-test";
 const IDENTITY: &str = "bob-video-listener";
 const API_KEY: &str = "devkey";
 const API_SECRET: &str = "secret";
-const LIVEKIT_WS: &str = "ws://localhost:7880";
+const LIVEKIT_WS: &str = "ws://localhost:18082";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

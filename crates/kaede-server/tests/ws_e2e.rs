@@ -27,9 +27,9 @@ async fn start_server() -> String {
         session_ttl_hours: 1,
         livekit_api_key: "testkey".into(),
         livekit_api_secret: "testsecret".into(),
-        livekit_ws_url: "ws://localhost:7880".into(),
+        livekit_ws_url: "ws://localhost:18082".into(),
         admin_enabled: false,
-        admin_bind: "127.0.0.1:3001".into(),
+        admin_bind: "127.0.0.1:18081".into(),
         admin_token: String::new(),
     };
     let pool = db::init(&cfg.database_url).await.unwrap();

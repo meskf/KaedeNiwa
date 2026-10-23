@@ -10,6 +10,7 @@ members = [
     "crates/kaede-ui",
     "crates/kaede-wasm",
     "crates/kaede-desktop",
+    "crates/kaede-mobile",
     "crates/kaede-admin",
     "crates/kaede-capture",
     "crates/kaede-media",
@@ -54,7 +55,9 @@ openmls_traits      = "0.6"
 # server
 axum               = "0.8"
 tokio              = { version = "1", features = ["full"] }
-tokio-tungstenite  = "0.24"
+# 必须启用 rustls，否则 wss:// 在生产环境直接失败（默认特性只支持 ws://）。
+# 同时避免 native-tls/OpenSSL，便于 Android 交叉编译。
+tokio-tungstenite  = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 rustls             = "0.23"
 rustls-pemfile     = "2"
 sqlx               = { version = "0.8", features = ["runtime-tokio", "sqlite"] }

@@ -32,13 +32,14 @@ COPY --from=builder /src/target/release/kaede-server /usr/local/bin/kaede-server
 USER kaede
 WORKDIR /var/lib/kaede
 
-ENV KAEDE_BIND=0.0.0.0:8080 \
+ENV KAEDE_BIND=0.0.0.0:18080 \
     KAEDE_DB=sqlite:///var/lib/kaede/kaede.db?mode=rwc \
+    KAEDE_DATA_DIR=/var/lib/kaede/data \
     KAEDE_LOG_FORMAT=json
 
-EXPOSE 8080
+EXPOSE 18080
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8080/ready || exit 1
+    CMD curl -fsS http://127.0.0.1:18080/ready || exit 1
 
 ENTRYPOINT ["kaede-server"]

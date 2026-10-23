@@ -82,7 +82,7 @@ fn build_rows(messages: &[UiMessage]) -> Vec<Row> {
 
 #[component]
 fn MessageList() -> Element {
-    let ui = use_context::<UiState>();
+    let mut ui = use_context::<UiState>();
     let mut app = use_context::<AppState>();
     let i18n = use_i18n();
 
@@ -98,13 +98,33 @@ fn MessageList() -> Element {
         build_rows(&list)
     });
 
-    use_effect(move || {
-        let _ = rows.read().len();
-        // 只有用户本来就在底部时才跟随新消息；加载更早历史时不要把人弹回底部。
-        let _ = dioxus::document::eval(
-            "setTimeout(function(){var el=document.getElementById('msg-list');\
-             if(el && el.scrollHeight-el.scrollTop-el.clientHeight<120)el.scrollTop=el.scrollHeight;},0);",
-        );
+    // 记录上一次渲染的频道，用于区分“切换频道”和“当前频道来新消息”。
+    let last_channel = use_hook(|| std::sync::Arc::new(std::sync::Mutex::new(String::new())));
+    use_effect({
+        let last_channel = last_channel.clone();
+        move || {
+            let _ = rows.read().len();
+            let ch = ui.selected_channel.read().clone().unwrap_or_default();
+            let switched = {
+                let mut prev = last_channel.lock().unwrap_or_else(|e| e.into_inner());
+                if *prev == ch {
+                    false
+                } else {
+                    *prev = ch;
+                    true
+                }
+            };
+            // 切换频道：强制滚到底部。新消息：只有用户本来就在底部时才跟随，
+            // 加载更早历史时不要把人弹回底部。
+            let js = if switched {
+                "setTimeout(function(){var el=document.getElementById('msg-list');\
+                 if(el)el.scrollTop=el.scrollHeight;},0);"
+            } else {
+                "setTimeout(function(){var el=document.getElementById('msg-list');\
+                 if(el && el.scrollHeight-el.scrollTop-el.clientHeight<120)el.scrollTop=el.scrollHeight;},0);"
+            };
+            let _ = dioxus::document::eval(js);
+        }
     });
 
     // 7d-a: 进频道时 load_history（消息为空时）
@@ -172,29 +192,55 @@ fn MessageList() -> Element {
     });
 
     // 已读：查看中的频道收到/加载新消息时上报 last_read 并清本地未读。
-    use_effect(move || {
-        let sid = app.current_server.read().clone();
-        let ch = ui.selected_channel.read().clone();
-        let (Some(sid), Some(ch)) = (sid, ch) else {
-            return;
-        };
-        let max_ts = app
-            .messages
-            .read()
-            .get(&AppState::channel_key(&sid, &ch))
-            .and_then(|list| list.iter().map(|m| m.ts).max());
-        let Some(ts) = max_ts else {
-            return;
-        };
-        app.clear_unread(&sid, &ch);
-        if let Some(room) = app.room.read().clone() {
-            let ch = ch.clone();
-            spawn(async move {
-                if let Err(e) = room.mark_channel_read(&ch, ts).await {
-                    tracing::debug!("mark_channel_read: {}", e);
+    //
+    // 这里按频道记录“已上报的最大 ts”。messages 是整张 map 的信号，
+    // 任何频道来消息都会让 effect 重跑；没有这个去重会向服务端重复 POST
+    // mark-read（直到限流）。
+    let reported_ts = use_hook(|| {
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            i64,
+        >::new()))
+    });
+    use_effect({
+        let reported_ts = reported_ts.clone();
+        move || {
+            let sid = app.current_server.read().clone();
+            let ch = ui.selected_channel.read().clone();
+            let (Some(sid), Some(ch)) = (sid, ch) else {
+                return;
+            };
+            let max_ts = app
+                .messages
+                .read()
+                .get(&AppState::channel_key(&sid, &ch))
+                .and_then(|list| list.iter().map(|m| m.ts).max());
+            let Some(ts) = max_ts else {
+                return;
+            };
+            {
+                let mut seen = reported_ts.lock().unwrap_or_else(|e| e.into_inner());
+                if seen.get(&ch).is_some_and(|prev| *prev >= ts) {
+                    return;
                 }
-            });
+                seen.insert(ch.clone(), ts);
+            }
+            app.clear_unread(&sid, &ch);
+            if let Some(room) = app.room.read().clone() {
+                let ch = ch.clone();
+                spawn(async move {
+                    if let Err(e) = room.mark_channel_read(&ch, ts).await {
+                        tracing::debug!("mark_channel_read: {}", e);
+                    }
+                });
+            }
         }
+    });
+
+    // 切换频道时清掉回复目标，避免把 A 频道的引用发到 B 频道。
+    use_effect(move || {
+        let _ = ui.selected_channel.read();
+        ui.reply_target.set(None);
     });
 
     // 1.2 滚到顶自动加载：监听 #msg-list 滚动，靠近顶部时自动触发"加载更早"按钮。
@@ -295,7 +341,9 @@ fn MessageList() -> Element {
                         div { key: "day-{i}", class: "date-divider", "{d}" }
                     },
                     Row::Msg { msg, merged } => rsx! {
-                        MessageGroup { key: "msg-{i}", msg: msg.clone(), merged: *merged }
+                        // 用稳定 id 作为 key：下标 key 在前插历史/裁剪窗口时会
+                        // 让所有节点重建，丢失 hover/选中状态。
+                        MessageGroup { key: "{msg.id}", msg: msg.clone(), merged: *merged }
                     },
                 }
             }
@@ -553,6 +601,10 @@ fn Composer() -> Element {
                     value: "{draft}",
                     oninput: move |e| draft.set(e.value()),
                     onkeydown: move |e: KeyboardEvent| {
+                        // 中文/日文输入法用 Enter 确认候选词，此时不能发送消息。
+                        if e.is_composing() {
+                            return;
+                        }
                         if e.key() == Key::Enter && !e.modifiers().contains(Modifiers::SHIFT) {
                             e.prevent_default();
                             let t = draft.read().trim().to_string();

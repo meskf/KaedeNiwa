@@ -119,28 +119,45 @@ pub fn DmView() -> Element {
         .unwrap_or_default();
 
     // 已读：查看中的 DM 收到/加载新消息时上报 last_read 并清本地未读。
-    use_effect(move || {
-        let sid = app.current_server.read().clone();
-        let conv = ui.selected_dm_conv.read().clone();
-        let (Some(sid), Some(conv)) = (sid, conv) else {
-            return;
-        };
-        let max_ts = app
-            .dm_messages
-            .read()
-            .get(&conv)
-            .and_then(|list| list.iter().map(|m| m.ts).max());
-        let Some(ts) = max_ts else {
-            return;
-        };
-        app.clear_unread(&sid, &conv);
-        if let Some(room) = app.room.read().clone() {
-            let conv = conv.clone();
-            spawn(async move {
-                if let Err(e) = room.mark_dm_read(&conv, ts).await {
-                    tracing::debug!("mark_dm_read: {}", e);
+    // 按会话记录已上报的最大 ts，避免任何 DM 来消息都重复 POST。
+    let reported_ts = use_hook(|| {
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            i64,
+        >::new()))
+    });
+    use_effect({
+        let reported_ts = reported_ts.clone();
+        move || {
+            let sid = app.current_server.read().clone();
+            let conv = ui.selected_dm_conv.read().clone();
+            let (Some(sid), Some(conv)) = (sid, conv) else {
+                return;
+            };
+            let max_ts = app
+                .dm_messages
+                .read()
+                .get(&conv)
+                .and_then(|list| list.iter().map(|m| m.ts).max());
+            let Some(ts) = max_ts else {
+                return;
+            };
+            {
+                let mut seen = reported_ts.lock().unwrap_or_else(|e| e.into_inner());
+                if seen.get(&conv).is_some_and(|prev| *prev >= ts) {
+                    return;
                 }
-            });
+                seen.insert(conv.clone(), ts);
+            }
+            app.clear_unread(&sid, &conv);
+            if let Some(room) = app.room.read().clone() {
+                let conv = conv.clone();
+                spawn(async move {
+                    if let Err(e) = room.mark_dm_read(&conv, ts).await {
+                        tracing::debug!("mark_dm_read: {}", e);
+                    }
+                });
+            }
         }
     });
 

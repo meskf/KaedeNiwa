@@ -234,7 +234,8 @@ mod wasm_ws {
                 .map_err(|e| ClientError::Transport(format!("WebSocket::new: {:?}", e)))?;
             ws.set_binary_type(BinaryType::Arraybuffer);
 
-            let (in_tx, in_rx) = async_channel::unbounded::<InMsg>();
+            // 有界队列：JS 回调里用 try_send，消费端落后时丢帧而不是 OOM。
+            let (in_tx, in_rx) = async_channel::bounded::<InMsg>(256);
             let (open_tx, open_rx) = async_channel::bounded::<()>(1);
             let (err_tx, err_rx) = async_channel::bounded::<String>(1);
 

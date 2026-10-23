@@ -19,7 +19,7 @@ const ROOM: &str = "kaede-test-audio";
 const IDENTITY: &str = "alice-audio";
 const API_KEY: &str = "devkey";
 const API_SECRET: &str = "secret";
-const LIVEKIT_WS: &str = "ws://localhost:7880";
+const LIVEKIT_WS: &str = "ws://localhost:18082";
 const SAMPLE_RATE: u32 = 48000;
 const CHANNELS: u32 = 2;
 

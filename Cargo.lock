@@ -4141,7 +4141,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -4804,6 +4804,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaede-mobile"
+version = "0.0.2"
+dependencies = [
+ "dioxus 0.7.10",
+ "dioxus-desktop",
+ "kaede-client",
+ "kaede-ui",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "kaede-protocol"
 version = "0.0.2"
 dependencies = [
@@ -4824,6 +4837,7 @@ dependencies = [
  "ciborium",
  "futures-util",
  "hmac 0.12.1",
+ "ipnet",
  "kaede-mls",
  "kaede-protocol",
  "rand 0.8.8",
@@ -7727,7 +7741,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -9213,8 +9227,12 @@ checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite 0.24.0",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -9538,6 +9556,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.8.8",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 1.0.69",
  "utf-8",
@@ -9943,6 +9963,15 @@ dependencies = [
  "pkg-config",
  "soup3-sys",
  "system-deps 6.2.2",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]

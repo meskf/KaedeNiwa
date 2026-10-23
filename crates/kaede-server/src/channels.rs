@@ -5,7 +5,7 @@
 use argon2::Argon2;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode},
     routing::get,
 };
@@ -15,7 +15,8 @@ use kaede_protocol::{Channel, ServerMessage, UserId};
 
 use crate::db;
 use crate::error::ApiError;
-use crate::http::authenticate;
+use crate::http::{authenticate, client_ip};
+use crate::livekit;
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
@@ -121,25 +122,28 @@ async fn create_channel(
         return Err(ApiError::BadRequest("kind must be text|voice".into()));
     }
 
-    // 私密频道必须提供 password，且长度 4..=128。
+    // 私密频道必须提供 password，且长度 8..=128。
+    //
+    // 最短长度从 4 提到 8：Argon2 只保护“离线破解”，4 位数字口令在
+    // 在线爆破场景下只需几千次尝试（配合 join_channel 的 per-uid 限流，
+    // 多账号轮换即可打穿）。已存在的短口令频道不受影响（校验走已存 PHC 串）。
     let password_hash = if req.is_private {
         // 创建私密频道会跑 Argon2（最高 256 MiB）。必须和 login 一样限流 + 限并发，
         // 否则 op3+ 用户可用并发建频道打爆内存。
         if !state.check_rate_scoped(&uid, "create_channel", 0.2, 3.0) {
             return Err(ApiError::BadRequest("create_channel rate limited".into()));
         }
-        let _permit = state
-            .login_semaphore
-            .acquire()
-            .await
-            .map_err(|_| ApiError::Internal("create_channel queue closed".into()))?;
+        // 256 MiB 档按 4 份额度计费：最多 2 个并发，峰值 512 MiB。
+        let _permit =
+            crate::http::acquire_argon2_weighted(&state, argon2_permits(req.hash_tier.as_deref()))
+                .await?;
 
         let pw = req
             .password
             .as_deref()
             .ok_or_else(|| ApiError::BadRequest("is_private requires password".into()))?;
-        if pw.len() < 4 || pw.len() > 128 {
-            return Err(ApiError::BadRequest("password length 4..=128".into()));
+        if pw.chars().count() < 8 || pw.len() > 128 {
+            return Err(ApiError::BadRequest("password length 8..=128".into()));
         }
         let (hash, tier_str) = hash_channel_password(pw, req.hash_tier.as_deref())?;
         Some((hash, tier_str))
@@ -383,6 +387,8 @@ async fn delete_channel(
     // 删除时成员关系已清理：私密频道用事先保存的成员列表通知，
     // 公开频道广播给所有人。
     if is_private {
+        // 频道整体消失：直接销毁房间 seed，任何残留连接都无法再拿到同一 key。
+        state.media_room_finished(&livekit::room_name_for(&id));
         for member in private_members {
             state.send_to(
                 &UserId::new(member),
@@ -434,6 +440,7 @@ struct JoinChannelReq {
 
 async fn join_channel(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<JoinChannelReq>,
@@ -444,12 +451,26 @@ async fn join_channel(
     if !state.check_rate_scoped(&uid, "join_channel", 0.5, 3.0) {
         return Err(ApiError::BadRequest("join_channel rate limited".into()));
     }
+    // 私密频道密码爆破：单账号轮换不够，还要压住"多账号 + 单频道"的维度。
+    // 两个桶：
+    //   - (uid, channel)：单账号对同一频道最多 1 次/10s（突发 3）
+    //   - (ip, channel)：同一来源 IP 对同一频道最多 1 次/10s（突发 5）
+    // 这样即使攻击者批量注册账号，也无法显著提高对某个频道的猜测速率。
+    if !state.check_rate_key(&format!("chan_pw:{}:{}", uid.as_str(), id), 0.1, 3.0) {
+        state.metrics.rate_limited();
+        return Err(ApiError::TooManyRequests(
+            "channel password attempts limited".into(),
+        ));
+    }
+    let ip = client_ip(&headers, peer);
+    if !state.check_rate_key(&format!("chan_pw_ip:{}:{}", ip, id), 0.1, 5.0) {
+        state.metrics.rate_limited();
+        return Err(ApiError::TooManyRequests(
+            "channel password attempts limited from this address".into(),
+        ));
+    }
     // C10: 并发 Argon2 上限（同 login），防 OOM DoS
-    let _permit = state
-        .login_semaphore
-        .acquire()
-        .await
-        .map_err(|_| ApiError::Internal("join_channel queue closed".into()))?;
+    let _permit = crate::http::acquire_argon2(&state).await?;
 
     // C8: 若提交了 KP，先校验 credential == auth uid。
     // 无论首次加入还是重广播，KP 都会流到 channel group 的 add_member，
@@ -774,8 +795,21 @@ async fn remove_channel_member(
 
     // 通知权威成员轮换频道密钥并广播 Commit。
     notify_member_left(&state, &id, &UserId::new(&target), &others).await;
+    // 同时吊销被移除者的媒体访问（MLS 轮换不影响已建立的 LiveKit 连接）。
+    revoke_media_access(&state, &id, &target);
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 成员离开 / 被移出私密频道后吊销其媒体访问。
+///
+/// 只删 DB 行与 MLS 成员**不会**中断已建立的 LiveKit 连接（token 6 小时有效），
+/// 被移除者仍能继续收听该频道的音视频。这里同步回收房间 seed 里该参与者的额度
+/// （房间已空则整体销毁，下次进入换新 e2ee key），再后台把 LiveKit 连接踢掉。
+fn revoke_media_access(state: &AppState, channel_id: &str, uid: &str) {
+    let room = livekit::room_name_for(channel_id);
+    state.media_participant_left(&room, uid);
+    livekit::spawn_remove_participant(state.clone(), room, uid.to_string());
 }
 
 /// 通知频道权威成员（最早加入者）执行 MLS remove；离线则暂存事件。
@@ -852,6 +886,9 @@ async fn leave_channel(
 
     if is_private {
         notify_member_left(&state, &id, &uid, &others).await;
+        // 主动退出同样要吊销场合：否则该用户可以在已建立的语音连接里
+        // 继续收听（Token 有效期 6 小时）。
+        revoke_media_access(&state, &id, uid.as_str());
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -862,6 +899,17 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, ApiError> {
     URL_SAFE_NO_PAD
         .decode(s)
         .map_err(|e| ApiError::BadRequest(format!("base64: {}", e)))
+}
+
+/// Argon2 档位对应的并发额度（份数），用于按内存占用计费。
+///
+/// 值与 [`resolve_argon2`] 的内存参数成比例：19 MiB → 1 份，64 → 1 份（可接受），
+/// 256 MiB → 4 份（全局最多 2 个并发，峰值 512 MiB）。
+fn argon2_permits(tier: Option<&str>) -> u32 {
+    match tier {
+        Some("256") => 4,
+        _ => 1,
+    }
 }
 
 /// 按档位选 Argon2 参数。返回 (argon2 实例, 归一化后的档位字符串)。

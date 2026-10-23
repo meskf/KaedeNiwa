@@ -7,7 +7,7 @@
 //! | `kaede.example.com` | `https://kaede.example.com` | `wss://kaede.example.com/ws` | ✅ |
 //! | `kaede.example.com:8443` | `https://kaede.example.com:8443` | `wss://kaede.example.com:8443/ws` | ✅ |
 //! | `https://kaede.example.com/kaede` | `https://kaede.example.com/kaede` | `wss://kaede.example.com/kaede/ws` | ✅ |
-//! | `http://localhost:8080` | `http://localhost:8080` | `ws://localhost:8080/ws` | ❌（明文）|
+//! | `http://localhost:18080` | `http://localhost:18080` | `ws://localhost:18080/ws` | ❌（明文）|
 //! | `ws://...` / `wss://...` | 拒绝 | 拒绝 | — |
 //! | 空串 | 拒绝 | 拒绝 | — |
 //!
@@ -76,6 +76,15 @@ pub fn parse_server_url(input: &str) -> Result<ServerEndpoint, EndpointError> {
     if hostport.contains(char::is_whitespace) {
         return Err(EndpointError::Invalid("host 含空格".into()));
     }
+    // 拒绝 `user:pass@host` / `user@host`。
+    // reqwest 会把 `alice@evil.com` 当作带 credentials 的 URL，可能触发
+    // Authorization 头注入；UI 上 `alice@evil.com` 显示得像 alice 的主页
+    // 但实际连到 evil.com——典型钓鱼面。
+    if hostport.contains('@') {
+        return Err(EndpointError::Invalid(
+            "host 不允许包含 '@'（不支持 URL 内嵌凭据）".into(),
+        ));
+    }
 
     // 3. 规整 path：去首尾 `/`，空字符串表示无前缀
     let path = path.trim_matches('/');
@@ -140,10 +149,10 @@ mod tests {
 
     #[test]
     fn http_explicit_insecure() {
-        let e = parse_server_url("http://localhost:8080").unwrap();
-        assert_eq!(e.http_url, "http://localhost:8080");
-        assert_eq!(e.ws_url, "ws://localhost:8080/ws");
-        assert_eq!(e.display, "localhost:8080");
+        let e = parse_server_url("http://localhost:18080").unwrap();
+        assert_eq!(e.http_url, "http://localhost:18080");
+        assert_eq!(e.ws_url, "ws://localhost:18080/ws");
+        assert_eq!(e.display, "localhost:18080");
         assert!(!e.is_secure);
     }
 
@@ -173,7 +182,7 @@ mod tests {
 
     #[test]
     fn ws_input_rejected() {
-        match parse_server_url("ws://localhost:8080") {
+        match parse_server_url("ws://localhost:18080") {
             Err(EndpointError::UseHttpNotWs(_)) => {}
             other => panic!("expected UseHttpNotWs, got {:?}", other),
         }
@@ -213,6 +222,23 @@ mod tests {
     fn host_with_space_rejected() {
         assert!(matches!(
             parse_server_url("kaede example.com"),
+            Err(EndpointError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn userinfo_rejected() {
+        // https://user@host / user:pass@host 全部拒绝，防钓鱼与认证头注入。
+        assert!(matches!(
+            parse_server_url("https://alice@evil.com"),
+            Err(EndpointError::Invalid(_))
+        ));
+        assert!(matches!(
+            parse_server_url("alice:pass@evil.com"),
+            Err(EndpointError::Invalid(_))
+        ));
+        assert!(matches!(
+            parse_server_url("http://alice@localhost:18080"),
             Err(EndpointError::Invalid(_))
         ));
     }

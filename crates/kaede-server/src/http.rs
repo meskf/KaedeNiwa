@@ -43,16 +43,21 @@ pub fn router(state: AppState) -> Router {
 /// 就绪探针：DB 可查询才算 ready。进程活着但 DB 不可用时返回 503，
 /// 让负载均衡器把流量摘走，而不是继续把请求打到坏实例上。
 async fn ready(State(state): State<AppState>) -> (StatusCode, &'static str) {
-    match sqlx::query_scalar::<_, i64>("SELECT 1")
+    if let Err(e) = sqlx::query_scalar::<_, i64>("SELECT 1")
         .fetch_one(&state.pool)
         .await
     {
-        Ok(_) => (StatusCode::OK, "ready"),
-        Err(e) => {
-            tracing::warn!("readiness check failed: {}", e);
-            (StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
-        }
+        tracing::warn!("readiness check failed: {}", e);
+        return (StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
     }
+    if let Err(e) = crate::attachments::storage_ready() {
+        tracing::warn!("readiness: {}", e);
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "attachment storage unavailable",
+        );
+    }
+    (StatusCode::OK, "ready")
 }
 
 /// Prometheus text exposition。只含计数与容量，不含账号/频道/消息内容。
@@ -88,6 +93,35 @@ struct RegisterResp {
     session_token: String,
 }
 
+/// 获取一次 Argon2 并发许可。
+///
+/// 队列满时最多等 10 秒，然后返回 429，而不是让请求无限期挂起——
+/// 否则并发登录/建频道可以把 semaphore 队列撑爆。
+pub(crate) async fn acquire_argon2(
+    state: &AppState,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    acquire_argon2_weighted(state, 1).await
+}
+
+/// 获取 `permits` 份 Argon2 并发许可。
+///
+/// Argon2 的内存占用与档位成正比（19 / 64 / 256 MiB）。并发上限按最小档
+/// （8 × 19 MiB）估算；256 MiB 档必须按 4 份额度计费，否则 8 个并发请求
+/// 会瞬时占用 2 GiB，足以打爆小内存 VPS。
+pub(crate) async fn acquire_argon2_weighted(
+    state: &AppState,
+    permits: u32,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    let permits = permits.clamp(1, 8);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.login_semaphore.clone().acquire_many_owned(permits),
+    )
+    .await
+    .map_err(|_| ApiError::TooManyRequests("crypto work queue saturated".into()))?
+    .map_err(|_| ApiError::Internal("crypto work queue closed".into()))
+}
+
 async fn register(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
@@ -107,11 +141,7 @@ async fn register(
 
     // P0-C：注册也要限制并发 Argon2（否则并发注册可耗尽 19GB 内存）。
     // 复用 login_semaphore（8）——register 频次远低于 login。
-    let _permit = state
-        .login_semaphore
-        .acquire()
-        .await
-        .map_err(|_| ApiError::Internal("register queue closed".into()))?;
+    let _permit = acquire_argon2(&state).await?;
 
     // C-9: 移除 SELECT-then-INSERT TOCTOU，改为 INSERT ... ON CONFLICT DO NOTHING
     // + 事务包裹 accounts / members 双写，避免半提交
@@ -233,17 +263,25 @@ async fn login(
     Json(req): Json<LoginReq>,
 ) -> Result<Json<LoginResp>, ApiError> {
     // P0-2：并发 Argon2 限制（每请求 19MiB，8 并发 = 152MiB 上限）。
-    let _permit = state
-        .login_semaphore
-        .acquire()
-        .await
-        .map_err(|_| ApiError::Internal("login queue closed".into()))?;
+    let _permit = acquire_argon2(&state).await?;
 
     // P0-A 修复：失败计数检查必须在 semaphore 之后——否则并发 100 个请求
     // 全部通过检查才排队，semaphore 出来后不再复查 → 5 次锁完全失效。
     // 失败计数按 (login_id, 来源 IP) 隔离：否则任意人连发 5 次错误密码
     // 就能把已知账号锁死 15 分钟。
     let ip = client_ip(&headers, peer);
+
+    // 同一来源 IP 的登录总速率上限：防止用海量不存在的 login_id 触发
+    // Argon2（每个 19 MiB / 20ms）把 CPU 打满。
+    //
+    // 阈值刻意放宽到 20/s burst 200：NAT/公司出口后可能有很多正常用户，
+    // 且并发 Argon2 已由 semaphore(8) 限制，内存上限仍有界。
+    if !state.check_rate_key(&format!("ip:{ip}:login"), 20.0, 200.0) {
+        state.metrics.rate_limited();
+        return Err(ApiError::TooManyRequests(
+            "login rate limited from this address".into(),
+        ));
+    }
     let failure_key = (req.login_id.clone(), ip);
     {
         let mut failures = state
@@ -351,6 +389,15 @@ async fn publish_keypackages(
     Json(req): Json<PublishKpReq>,
 ) -> Result<StatusCode, ApiError> {
     let uid = authenticate(&state, &headers).await?;
+
+    // 限流：单次最多 100 包 × (CBOR 解析 + DB INSERT)，非好友批量可耗尽 CPU
+    // 与 SQLite 写锁。0.2/s burst 3 = 突发 3 次，稳态 5 秒一次。
+    if !state.check_rate_scoped(&uid, "publish_kp", 0.2, 3.0) {
+        state.metrics.rate_limited();
+        return Err(ApiError::TooManyRequests(
+            "keypackage publish rate limited".into(),
+        ));
+    }
 
     if req.packages.is_empty() || req.packages.len() > 100 {
         return Err(ApiError::BadRequest("packages count 1..=100".into()));
@@ -462,7 +509,7 @@ async fn fetch_keypackage(
 
     if !is_friend {
         // 防抽干第二层：per-target 全局限流（防多账号轮换）。
-        if !state.check_kp_fetch(&login_id) {
+        if !state.check_kp_fetch(uid.as_str(), &login_id) {
             state.metrics.rate_limited();
             tracing::warn!(
                 "keypackage fetch throttled: target={} requester={}",
@@ -597,30 +644,65 @@ pub(crate) async fn authenticate_session(
     Ok((UserId::new(login_id), session_id))
 }
 
-/// 取客户端 IP。
+/// 可信反向代理列表。`KAEDE_TRUSTED_PROXIES` 为逗号分隔的 IP / CIDR。
 ///
-/// 反向代理部署时 `ConnectInfo` 是代理地址；只有在 peer 本身是回环/私网
-/// （即预期的本机或容器内代理）时才信任 `X-Forwarded-For`，避免公网直连
-/// 时伪造 header 绕过注册限流/登录失败计数。
-fn client_ip(headers: &HeaderMap, peer: std::net::SocketAddr) -> std::net::IpAddr {
+/// 默认只信任 loopback（本机 Caddy/Nginx/SSH 隧道）。容器部署时反向代理位于
+/// Docker bridge，必须显式把它所在的网段加入该变量，否则所有用户会被归并成
+/// 同一个代理 IP —— 登录失败计数与注册限流会变成全站共享。
+///
+/// **不要**默认信任整个 RFC1918：同 VPC 内攻击者/SSRF 可以伪造 XFF 绕过
+/// 基于 `(uid, ip)` 的登录限流。
+fn trusted_proxies() -> &'static [ipnet::IpNet] {
+    static TRUSTED: std::sync::OnceLock<Vec<ipnet::IpNet>> = std::sync::OnceLock::new();
+    TRUSTED.get_or_init(|| {
+        let raw = std::env::var("KAEDE_TRUSTED_PROXIES").unwrap_or_default();
+        let mut nets: Vec<ipnet::IpNet> = raw
+            .split(',')
+            .filter_map(|s| s.trim().parse::<ipnet::IpNet>().ok())
+            .collect();
+        if nets.is_empty() {
+            nets.push("127.0.0.0/8".parse().expect("static loopback cidr"));
+            nets.push("::1/128".parse().expect("static loopback cidr"));
+        }
+        nets
+    })
+}
+
+fn is_trusted_proxy(ip: std::net::IpAddr) -> bool {
+    trusted_proxies().iter().any(|net| net.contains(&ip))
+}
+
+/// 取真实客户端 IP。
+///
+/// - peer 不在可信代理列表 → 直接用 peer，忽略任何转发头。
+/// - peer 是可信代理 → 从 `X-Forwarded-For` **右往左**跳过可信代理，
+///   第一个不可信地址就是客户端。取第一个等于信任客户端自己塞的值。
+/// - 整条链都可信（伪造 loopback）→ 退回 peer，避免被伪造成本机。
+pub(crate) fn client_ip(headers: &HeaderMap, peer: std::net::SocketAddr) -> std::net::IpAddr {
     let peer_ip = peer.ip();
-    let trusted_proxy = match peer_ip {
-        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
-        std::net::IpAddr::V6(v6) => v6.is_loopback(),
-    };
-    if !trusted_proxy {
+    if !is_trusted_proxy(peer_ip) {
         return peer_ip;
     }
-    let forwarded = headers
+    let chain: Vec<std::net::IpAddr> = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .and_then(|s| s.trim().parse().ok());
-    let real_ip = headers
+        .map(|s| {
+            s.split(',')
+                .filter_map(|part| part.trim().parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    for ip in chain.iter().rev() {
+        if !is_trusted_proxy(*ip) {
+            return *ip;
+        }
+    }
+    headers
         .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse().ok());
-    forwarded.or(real_ip).unwrap_or(peer_ip)
+        .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+        .filter(|ip| !is_trusted_proxy(*ip))
+        .unwrap_or(peer_ip)
 }
 
 fn validate_login_id(s: &str) -> Result<(), ApiError> {
@@ -691,11 +773,16 @@ struct MessagesResp {
     messages: Vec<MessageRecord>,
 }
 
+#[derive(Serialize)]
+struct PostMessageResp {
+    ts: i64,
+}
+
 async fn post_message(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<PostMessageReq>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<PostMessageResp>, ApiError> {
     // C1：用 auth uid 覆盖客户端自报的 sender，防止冒充
     let uid = authenticate(&state, &headers).await?;
 
@@ -800,6 +887,18 @@ async fn post_message(
         .bind(uid.as_str())
         .fetch_all(&state.pool)
         .await?;
+        // 与 WS 路径一致：成本 = 密文大小 × 收件人数。缺少这一步时，
+        // 私密频道可用一条 4 MiB 消息对数百成员做扇出放大。
+        if !state.try_reserve_broadcast(ct.len(), members.len()) {
+            state.metrics.broadcast_budget_rejected();
+            tracing::warn!(
+                "private channel fanout budget exceeded (channel={}, bytes={}, recipients={}); message persisted only",
+                req.channel_id,
+                ct.len(),
+                members.len()
+            );
+            return Ok(Json(PostMessageResp { ts }));
+        }
         for (member,) in members {
             let target = UserId::new(member);
             let delivered = state.send_to(
@@ -833,7 +932,9 @@ async fn post_message(
         }
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    // 返回服务器权威 ts：客户端用它落本地“自己发出的消息”，
+    // 否则重载时本地客户端 ts 与服务端 ts 不一致会产生重复消息。
+    Ok(Json(PostMessageResp { ts }))
 }
 
 async fn get_messages(
@@ -901,4 +1002,45 @@ async fn get_messages(
 struct GetMessagesQuery {
     before_ts: Option<i64>,
     limit: Option<i64>,
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn headers(xff: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", HeaderValue::from_str(xff).unwrap());
+        h
+    }
+
+    fn peer(ip: &str) -> std::net::SocketAddr {
+        std::net::SocketAddr::new(ip.parse().unwrap(), 443)
+    }
+
+    #[test]
+    fn untrusted_peer_ignores_forwarded_headers() {
+        assert_eq!(
+            client_ip(&headers("203.0.113.9"), peer("198.51.100.7")),
+            "198.51.100.7".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn loopback_proxy_uses_rightmost_untrusted_hop() {
+        // 左边是客户端伪造的地址，右边才是代理看到的直连地址。
+        assert_eq!(
+            client_ip(&headers("1.2.3.4, 203.0.113.9"), peer("127.0.0.1")),
+            "203.0.113.9".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn spoofed_trusted_hop_falls_back_to_peer() {
+        assert_eq!(
+            client_ip(&headers("127.0.0.1"), peer("127.0.0.1")),
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
 }

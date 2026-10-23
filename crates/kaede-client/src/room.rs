@@ -731,7 +731,9 @@ impl RoomSession {
     }
 
     fn ensure_snapshot_ok(&self) -> Result<(), ClientError> {
-        if self.snapshot_broken.load(Ordering::Acquire) {
+        // 主群与 DM / 私密频道 group 的持久化失败都闭锁发送：
+        // 任一 group 的 epoch / ratchet 已前进但没落盘，重启后都会回退到旧状态。
+        if self.snapshot_broken.load(Ordering::Acquire) || self.conn.snapshot_broken() {
             return Err(ClientError::Storage(
                 "MLS snapshot persistence is broken; refusing to send".into(),
             ));
@@ -773,13 +775,14 @@ impl RoomSession {
 
     /// 私密频道没有本地 group 时必须拒绝，绝不能退回主群加密。
     fn ensure_channel_sendable(&self, channel_id: &str) -> Result<(), ClientError> {
+        // 所有频道路径（含私密频道 group）都要先确认本地密钥状态已成功持久化：
+        // 私密频道 group 的成员变更同样会推进 epoch，落盘失败后继续发送
+        // 会让重启后的 group 状态回退。
+        self.ensure_snapshot_ok()?;
         if self.is_private_channel(channel_id) && !self.conn.channel_has_group(channel_id) {
             return Err(ClientError::Protocol(
                 "private channel key missing; re-join the channel before sending".into(),
             ));
-        }
-        if !self.conn.channel_has_group(channel_id) {
-            self.ensure_snapshot_ok()?;
         }
         Ok(())
     }
@@ -1692,7 +1695,6 @@ impl RoomSession {
         let bytes = payload
             .to_bytes()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
-        let local_ts = payload.ts;
         // 私密频道必须用 channel group key（0x03），不能退回主群；
         // 服务端会拒绝主群密文，避免私密内容被全服解密。
         let ciphertext = if self.conn.channel_has_group(channel_id) {
@@ -1713,11 +1715,11 @@ impl RoomSession {
             .post_message(channel_id, now_ms(), self.uid.as_str(), &ciphertext)
             .await
         {
-            Ok(()) => {
+            Ok(server_ts) => {
                 // 私密频道的历史用频道密钥可重复解密，不需要本地副本；
                 // 再存一份本地消息会在重载后与服务器记录重复。
                 if !self.conn.channel_has_group(channel_id) {
-                    self.persist_local_message(channel_id, local_ts, &bytes)
+                    self.persist_local_message(channel_id, server_ts, &bytes)
                         .await;
                 }
             }
@@ -1779,7 +1781,6 @@ impl RoomSession {
         let bytes = payload
             .to_bytes()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
-        let local_ts = payload.ts;
 
         // 私密频道：走 channel group 的 AES-GCM key（首字节 0x03 标记）
         let ciphertext = if self.conn.channel_has_group(channel_id) {
@@ -1799,9 +1800,11 @@ impl RoomSession {
             .post_message(channel_id, now_ms(), self.uid.as_str(), &ciphertext)
             .await
         {
-            Ok(()) => {
+            Ok(server_ts) => {
                 if !self.conn.channel_has_group(channel_id) {
-                    self.persist_local_message(channel_id, local_ts, &bytes)
+                    // 用服务器权威 ts 落本地自消息：客户端乐观 ts 与服务端 ts
+                    // 哪怕差 1ms，重载后也会被当成两条不同消息。
+                    self.persist_local_message(channel_id, server_ts, &bytes)
                         .await;
                 }
             }
@@ -1965,6 +1968,9 @@ impl RoomSession {
         if !self.conn.dm_has_group(conv_id) {
             self.dm_ensure_group(conv_id).await?;
         }
+        // DM group 的建立/推进同样写入 snapshot：落盘失败时继续发送，
+        // 重启后会回退到旧 group（generation 落后）。与主群保持同一闭锁语义。
+        self.ensure_snapshot_ok()?;
 
         let mut payload = crate::payload::MessagePayload::new(
             conv_id,
@@ -2521,12 +2527,48 @@ pub async fn open_default_store(path: &str) -> Result<Arc<Store>, ClientError> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let url = format!("sqlite://{}?mode=rwc", path);
+        // 桌面沿用相对路径；移动端 cwd 可能是只读的 "/"，需要落到 App 私有目录。
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let path = mobile_writable_dir().join(path);
+        #[cfg(all(
+            not(target_arch = "wasm32"),
+            not(target_os = "android"),
+            not(target_os = "ios")
+        ))]
+        let path = std::path::PathBuf::from(path);
+
+        let url = format!("sqlite://{}?mode=rwc", path.display());
         let s = kaede_storage::SqliteStore::connect(&url)
             .await
             .map_err(|e| ClientError::Storage(e.to_string()))?;
         Ok(Arc::new(Store::Sqlite(s)))
     }
+}
+
+/// 移动端可写的 App 私有目录。
+///
+/// 依次尝试 `KAEDE_HOME`、当前目录、系统临时目录（Android 后端通常是 App cache），
+/// 用真实写探针筛选，避免把 SQLite 放进只读 cwd。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn mobile_writable_dir() -> std::path::PathBuf {
+    let candidates = [
+        std::env::var("KAEDE_HOME")
+            .ok()
+            .map(std::path::PathBuf::from),
+        std::env::current_dir().ok(),
+        Some(std::env::temp_dir()),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if std::fs::create_dir_all(&candidate).is_err() {
+            continue;
+        }
+        let probe = candidate.join(".kaede-write-probe");
+        if std::fs::write(&probe, b"ok").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            return candidate;
+        }
+    }
+    std::env::temp_dir()
 }
 
 #[cfg(test)]

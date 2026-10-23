@@ -60,6 +60,19 @@ pub async fn connect_voice(
         .attach_remote_videos_to("kaede-remote-videos")
         .map_err(|e| format!("attach_remote_videos: {}", e))?;
 
+    // 关闭/刷新页面时服务端收不到 /leave，媒体 seed 会保留到 8h TTL，
+    // 重进时可能复用同一 E2EE key（LiveKit ratchet 归零）。pagehide 里用
+    // keepalive fetch 尽力通知服务端，缩短 seed 复用窗口。
+    if let Some(token) = room.session_token() {
+        let http_url = room
+            .server_url()
+            .split("::")
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        register_pagehide_leave(&http_url, &token, &channel_id);
+    }
+
     SESSION.with(|s| *s.borrow_mut() = Some(Rc::new(session)));
     tracing::info!(
         "[voice-web] connected channel={} room={} (e2ee={})",
@@ -68,6 +81,33 @@ pub async fn connect_voice(
         true
     );
     Ok(())
+}
+
+/// 注册一次 pagehide 钩子，用 keepalive fetch 尽力调用 `/api/livekit/leave`。
+///
+/// 仅覆盖正常关闭/刷新/前进后退；进程崩溃仍依赖服务端 TTL。
+fn register_pagehide_leave(http_url: &str, session_token: &str, channel_id: &str) {
+    let url = format!("{}/api/livekit/leave", http_url.trim_end_matches('/'));
+    let js = format!(
+        r#"(function(){{
+  window.__kaedeLeave = {{ u: {u:?}, t: {t:?}, c: {c:?} }};
+  if (window.__kaedeLeaveHooked) return;
+  window.__kaedeLeaveHooked = true;
+  window.addEventListener('pagehide', function(){{
+    try {{
+      var s = window.__kaedeLeave;
+      if (!s) return;
+      fetch(s.u, {{ method: 'POST', keepalive: true,
+        headers: {{ 'Authorization': 'Bearer ' + s.t, 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ channel_id: s.c }}) }});
+    }} catch (e) {{}}
+  }});
+}})();"#,
+        u = url,
+        t = session_token,
+        c = channel_id
+    );
+    let _ = dioxus::document::eval(&js);
 }
 
 fn current_session() -> Result<Rc<LiveKitWebSession>, String> {

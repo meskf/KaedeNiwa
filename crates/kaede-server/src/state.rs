@@ -186,7 +186,6 @@ impl AppState {
         let login_failures_clone = login_failures.clone();
         let room_media_seeds = Arc::new(Mutex::new(HashMap::<String, RoomMedia>::new()));
         let room_media_clone = room_media_seeds.clone();
-        let pool_clone = pool.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(300));
             tick.tick().await;
@@ -212,9 +211,8 @@ impl AppState {
                     let mut m = room_media_clone.lock().unwrap_or_else(|e| e.into_inner());
                     prune_media_rooms(&mut m, MEDIA_PARTICIPANT_TTL, Duration::from_secs(3600));
                 }
-                if let Err(e) = crate::db::cleanup_expired(&pool_clone).await {
-                    tracing::warn!("cleanup_expired failed: {}", e);
-                }
+                // 注意：DB 侧过期数据清理只在 main.rs 的每小时任务里做。
+                // 这里再跑一遍会造成两套清理调度互相干扰（同一张表被两个周期扫）。
             }
         });
         Self {
@@ -236,25 +234,58 @@ impl AppState {
         }
     }
 
-    /// 某个 target 的 KeyPackage 是否还可以被拉取。
+    /// KeyPackage 拉取限流（P1-11 双桶）。
     ///
-    /// 限流目的：防止任意登录用户把别人的 KeyPackage 队列抽干
-    /// （每个 KP 只能消费一次）。10 次/分钟对一个 target 足够宽松。
-    pub fn check_kp_fetch(&self, target: &str) -> bool {
-        const LIMIT: u32 = 10;
+    /// 原实现只按 target 限流：任意 10 个账号轮换即可把某个 target 的
+    /// 额度打满，让正常用户（房主邀请、新成员进群）拿不到 KP。
+    /// 现在同时检查两个维度：
+    ///   - caller 维度（每分钟最多 20 次，不限目标）：防多账号轮换；
+    ///   - target 维度（每分钟最多 10 次，不限来源）：防集中抽干。
+    ///
+    /// 好友（friends.is_friend）在 http.rs 层豁免，不进本函数——
+    /// 所以合法的高频邀请场景不受影响。
+    pub fn check_kp_fetch(&self, caller: &str, target: &str) -> bool {
+        const CALLER_LIMIT: u32 = 20;
+        const TARGET_LIMIT: u32 = 10;
         const WINDOW: Duration = Duration::from_secs(60);
         let mut m = self
             .kp_fetch_budget
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let entry = m.entry(target.to_string()).or_insert((0, Instant::now()));
-        if entry.1.elapsed() > WINDOW {
-            *entry = (0, Instant::now());
+        let caller_key = format!("kfc:{}", caller);
+        let target_key = format!("kft:{}", target);
+
+        // 阶段 1：重置 caller 桶（如过期）并检查
+        {
+            let now = Instant::now();
+            let c = m.entry(caller_key.clone()).or_insert((0, now));
+            if c.1.elapsed() > WINDOW {
+                *c = (0, now);
+            }
+            if c.0 >= CALLER_LIMIT {
+                return false;
+            }
         }
-        if entry.0 >= LIMIT {
-            return false;
+
+        // 阶段 2：重置 target 桶（如过期）并检查
+        {
+            let now = Instant::now();
+            let t = m.entry(target_key.clone()).or_insert((0, now));
+            if t.1.elapsed() > WINDOW {
+                *t = (0, now);
+            }
+            if t.0 >= TARGET_LIMIT {
+                return false;
+            }
         }
-        entry.0 += 1;
+
+        // 阶段 3：两个桶都通过，一起 +1
+        if let Some(c) = m.get_mut(&caller_key) {
+            c.0 = c.0.saturating_add(1);
+        }
+        if let Some(t) = m.get_mut(&target_key) {
+            t.0 = t.0.saturating_add(1);
+        }
         true
     }
 
@@ -443,6 +474,64 @@ impl AppState {
             .len()
     }
 
+    /// 参与者离开媒体房间（HTTP `/leave` 或 LiveKit webhook）。
+    ///
+    /// 最后一人离开后立刻丢弃 seed，保证下一次会话一定是新 key。
+    pub fn media_participant_left(&self, room: &str, uid: &str) {
+        let mut seeds = self
+            .room_media_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = seeds.get_mut(room) {
+            entry.participants.remove(uid);
+            entry.last_used = Instant::now();
+            if entry.participants.is_empty() {
+                seeds.remove(room);
+                tracing::info!("[livekit] media session ended, seed dropped room={}", room);
+            }
+        }
+    }
+
+    /// 整个媒体房间结束（LiveKit `room_finished`），无条件丢弃 seed。
+    pub fn media_room_finished(&self, room: &str) {
+        let mut seeds = self
+            .room_media_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if seeds.remove(room).is_some() {
+            tracing::info!("[livekit] room finished, seed dropped room={}", room);
+        }
+    }
+
+    /// 把某用户从**所有**媒体房间中移除，返回受影响的 LiveKit 房间名列表。
+    ///
+    /// 用于封禁 / 踢人：这两个场景拿不到具体频道，但必须吊销该账号的媒体访问，
+    /// 否则已建立的 LiveKit 连接会一直有效到 token 过期（6 小时）。
+    ///
+    /// 房间内没有其他参与者时直接销毁 seed，下一次进入会生成全新 e2ee key。
+    pub fn media_revoke_user(&self, uid: &str) -> Vec<String> {
+        let mut rooms = Vec::new();
+        let mut seeds = self
+            .room_media_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        seeds.retain(|room, entry| {
+            if entry.participants.remove(uid).is_some() {
+                rooms.push(room.clone());
+            }
+            entry.last_used = Instant::now();
+            !entry.participants.is_empty()
+        });
+        if !rooms.is_empty() {
+            tracing::info!(
+                "[livekit] revoked media access for uid={} in {} room(s)",
+                uid,
+                rooms.len()
+            );
+        }
+        rooms
+    }
+
     /// 主动清除某个 uid 的所有限流桶（如踢人时）。
     pub fn clear_rate(&self, uid: &UserId) {
         let prefix = format!("{}:", uid.as_str());
@@ -541,9 +630,9 @@ mod tests {
             session_ttl_hours: 1,
             livekit_api_key: "testkey".into(),
             livekit_api_secret: "testsecret".into(),
-            livekit_ws_url: "ws://localhost:7880".into(),
+            livekit_ws_url: "ws://localhost:18082".into(),
             admin_enabled: false,
-            admin_bind: "127.0.0.1:3001".into(),
+            admin_bind: "127.0.0.1:18081".into(),
             admin_token: String::new(),
         };
         AppState::new(pool, cfg)
@@ -825,6 +914,81 @@ mod tests {
         assert!(
             rooms.is_empty(),
             "stale media room/seed must be dropped after participant TTL"
+        );
+    }
+
+    /// 封禁 / 踢人：必须吊销目标账号在所有媒体房间的访问。
+    #[tokio::test]
+    async fn media_revoke_user_drops_only_target() {
+        let state = mk_state().await;
+
+        let now = Instant::now();
+        {
+            let mut seeds = state
+                .room_media_seeds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            seeds.insert(
+                "kaede-general".into(),
+                RoomMedia {
+                    seed: [1u8; 32],
+                    participants: HashMap::from([
+                        ("alice".to_string(), now),
+                        ("bob".to_string(), now),
+                    ]),
+                    last_used: now,
+                },
+            );
+            seeds.insert(
+                "kaede-voice".into(),
+                RoomMedia {
+                    seed: [2u8; 32],
+                    participants: HashMap::from([("alice".to_string(), now)]),
+                    last_used: now,
+                },
+            );
+        }
+
+        let mut affected = state.media_revoke_user("alice");
+        affected.sort();
+        assert_eq!(affected, vec!["kaede-general", "kaede-voice"]);
+
+        let seeds = state
+            .room_media_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // alice 独占的房间被销毁；还有 bob 的房间保留但已剔除 alice。
+        assert!(!seeds.contains_key("kaede-voice"));
+        let general = seeds.get("kaede-general").expect("room kept");
+        assert!(!general.participants.contains_key("alice"));
+        assert!(general.participants.contains_key("bob"));
+    }
+
+    /// 用户不在任何房间时不应误删 seed。
+    #[tokio::test]
+    async fn media_revoke_unknown_user_is_noop() {
+        let state = mk_state().await;
+        let now = Instant::now();
+        state
+            .room_media_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                "kaede-general".into(),
+                RoomMedia {
+                    seed: [3u8; 32],
+                    participants: HashMap::from([("bob".to_string(), now)]),
+                    last_used: now,
+                },
+            );
+
+        assert!(state.media_revoke_user("alice").is_empty());
+        assert!(
+            state
+                .room_media_seeds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key("kaede-general")
         );
     }
 

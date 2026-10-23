@@ -39,6 +39,15 @@ impl Collector {
     }
 }
 
+/// Round 6（Signal 模型）：主群 Welcome **不再自动入群**，必须由用户确认
+/// （UI 里是确认弹窗）。端到端测试里没有 UI，这里直接接受所有 pending welcome。
+fn accept_pending_welcomes(room: &RoomSession) {
+    let conn = room.connection();
+    for info in conn.pending_welcome_info() {
+        let _ = conn.accept_pending_welcome(&info.sender_login_id);
+    }
+}
+
 struct Trio {
     alice: RoomSession,
     bob: RoomSession,
@@ -97,6 +106,8 @@ async fn setup_trio() -> Trio {
 
     // 等所有成员都 MlsReady 且成员数一致
     for _ in 0..120 {
+        accept_pending_welcomes(&bob);
+        accept_pending_welcomes(&carol);
         if alice.is_mls_ready()
             && bob.is_mls_ready()
             && carol.is_mls_ready()

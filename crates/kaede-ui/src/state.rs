@@ -4,7 +4,7 @@ use crate::theme::Mode;
 use dioxus::prelude::*;
 use kaede_client::http::{DmConversation, Friend};
 use kaede_client::{ClientState, RoomSession};
-use kaede_protocol::{Attachment, Channel, Member, Reaction, ReplyRef};
+use kaede_protocol::{Attachment, Channel, Member, Reaction, ReplyRef, UserId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -248,7 +248,6 @@ pub enum LayoutMode {
     Desktop,
     #[allow(dead_code)] // M3 平板双栏启用
     Tablet,
-    #[allow(dead_code)] // wasm 下通过 innerWidth 检测构造，native 不构造
     Mobile,
 }
 
@@ -316,6 +315,8 @@ pub struct UiState {
     pub search_open: Signal<bool>,
     /// 附件上传进度：(文件名, 已发送百分比 0..=100)。
     pub upload_progress: Signal<Option<(String, u32)>>,
+    /// Round 7：等待用户确认的主群 Welcome。按 Vec 顺序排队展示。
+    pub pending_welcomes: Signal<Vec<PendingWelcomeUi>>,
 }
 
 /// 成员选择器的使用场景。
@@ -341,7 +342,12 @@ impl UiState {
             server_modal_open: Signal::new(false),
             server_modal_selected: Signal::new(None),
             main_tab: Signal::new(MainTab::default()),
-            layout_mode: Signal::new(LayoutMode::default()),
+            // 原生移动端默认走 MobileShell；Web 端在 app.rs 里按窗口宽度检测。
+            layout_mode: Signal::new(if cfg!(any(target_os = "android", target_os = "ios")) {
+                LayoutMode::Mobile
+            } else {
+                LayoutMode::default()
+            }),
             mobile_detail: Signal::new(None),
             mobile_detail_kind: Signal::new(None),
             voice_sheet_open: Signal::new(false),
@@ -362,6 +368,7 @@ impl UiState {
             channel_members_open: Signal::new(None),
             search_open: Signal::new(false),
             upload_progress: Signal::new(None),
+            pending_welcomes: Signal::new(Vec::new()),
         }
     }
 
@@ -405,11 +412,11 @@ pub struct VoiceState {
     /// 局部 Signal。否则组件重渲染会 drop handle 断流。
     ///
     /// wasm 下不存在该字段（`kaede-media-session` 是 native-only 依赖）。
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
     pub handle: Signal<Option<std::sync::Arc<kaede_media_session::NativeHandle>>>,
     /// C16: 持有 attach_audio 返回的 ConsumerHandle。
     /// 原实现直接 drop 会导致后台 task 泄漏，同时无法在离开频道/对方断开时主动停止。
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
     pub media_consumers: Signal<
         Vec<(
             kaede_media_session::TrackId,
@@ -430,9 +437,9 @@ impl VoiceState {
     pub fn new() -> Self {
         Self {
             active_channel: Signal::new(None),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
             handle: Signal::new(None),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
             media_consumers: Signal::new(Vec::new()),
             current_profile: Signal::new(kaede_protocol::DEFAULT_VIDEO_PROFILE),
             current_bitrate: Signal::new(kaede_protocol::DEFAULT_VIDEO_BITRATE),
@@ -501,8 +508,8 @@ impl AppState {
             UiServer {
                 id: sid.clone(),
                 name: "本地服务器".into(),
-                http_url: "http://localhost:8080".into(),
-                ws_url: "ws://localhost:8080".into(),
+                http_url: "http://localhost:18080".into(),
+                ws_url: "ws://localhost:18080".into(),
                 state: kaede_client::ClientState::MlsReady,
                 epoch: 1,
                 account_mode: AccountMode::Common,
@@ -677,4 +684,16 @@ mod tests {
         assert_eq!(list.len(), MAX_CACHED_MESSAGES);
         assert_eq!(list.first().map(|m| m.ts), Some(0));
     }
+}
+
+/// Round 7：UI 层展示用的 pending 主群 Welcome 条目。
+///
+/// 相比 `kaede_client::PendingWelcomeInfo`，这里带 `server_id` 和
+/// `from: UserId`，便于 UI 显示发送者昵称与区分不同 server 的请求。
+#[derive(Clone, PartialEq, Debug)]
+pub struct PendingWelcomeUi {
+    pub server_id: String,
+    pub sender_login_id: String,
+    pub from: UserId,
+    pub is_rebuild: bool,
 }

@@ -9,6 +9,7 @@ use crate::state::{UiState, VoiceControls, VoiceState};
 ///
 /// 正在屏幕共享时执行 unpublish → publish（Web 为 stop → start），
 /// 让新分辨率立即生效；未共享时只更新信号，下次共享生效。
+#[allow(unused_variables, clippy::needless_return)]
 fn apply_profile(voice: VoiceState, controls: VoiceControls, mut ui: UiState) {
     if !*controls.screen_on.read() {
         ui.toast
@@ -16,7 +17,7 @@ fn apply_profile(voice: VoiceState, controls: VoiceControls, mut ui: UiState) {
         return;
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
     {
         let profile = *voice.current_profile.read();
         let bitrate = *voice.current_bitrate.read();

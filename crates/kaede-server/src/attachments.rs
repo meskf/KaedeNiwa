@@ -1,9 +1,11 @@
 //! 附件上传 / 下载。
 //!
 //! 存储：`<data_dir>/attachments/<id>`。
-//! 明文（与 Discord 一致）。
+//! **服务端只存密文**：附件由客户端用 MLS exporter 派生的 File key 加密
+//! （`0x04` 包装），服务端既看不到内容也看不到文件名/MIME。
 //!
-//! **单文件上限**：32 MiB（8K60 视频帧不走这里，走媒体流）。
+//! **单文件上限**：32 MiB（8K60 视频帧不走这里，走媒体流）；
+//! 全局 5 GiB / 单用户 512 MiB 配额由 `attachments` 表在事务内预占。
 
 use std::path::PathBuf;
 
@@ -27,26 +29,13 @@ use crate::state::AppState;
 pub const MAX_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
 
 /// 附件目录总容量上限，防止任意登录用户持续上传把磁盘写满。
-const MAX_TOTAL_ATTACHMENT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES: i64 = 5 * 1024 * 1024 * 1024;
 
 /// 单用户附件总容量上限（含所有频道/DM）。
-const MAX_USER_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_USER_ATTACHMENT_BYTES: i64 = 512 * 1024 * 1024;
 
-/// 统计附件目录当前占用（只统计普通文件）。
-async fn dir_size(dir: &std::path::Path) -> u64 {
-    let mut total = 0u64;
-    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
-        return 0;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if let Ok(meta) = entry.metadata().await
-            && meta.is_file()
-        {
-            total = total.saturating_add(meta.len());
-        }
-    }
-    total
-}
+/// 孤儿清理的宽限期：早于该时长的孤儿才会被回收，避免删掉正在上传的文件。
+const ORPHAN_GRACE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -116,60 +105,77 @@ async fn upload(
         authorize_target(&state, uid.as_str(), t).await?;
     }
 
-    // 每用户配额：防止单个账号占满全站附件空间。
-    let (user_used,): (i64,) =
-        sqlx::query_as("SELECT COALESCE(SUM(size), 0) FROM attachments WHERE owner = ?")
-            .bind(uid.as_str())
-            .fetch_one(&state.pool)
-            .await?;
-    if (user_used.max(0) as u64).saturating_add(body.len() as u64) > MAX_USER_ATTACHMENT_BYTES {
-        return Err(ApiError::BadRequest(format!(
-            "user attachment quota exceeded (max {} MiB)",
-            MAX_USER_ATTACHMENT_BYTES / 1024 / 1024
-        )));
-    }
-
-    // 用 SHA256 前 16 字节 + 时间戳保证唯一
-    let id = format!("att_{}", &db::random_token()[..22]);
-
+    // 每用户 + 全站配额：在同一个事务里"检查 + 预占"。
+    //
+    // 不能只 SELECT 再 INSERT（并发上传可同时通过检查），也不能每次上传
+    // 去遍历整个附件目录做统计（O(文件数) 的 syscall，是上传路径上的热点）。
+    // SQLite 写事务串行，因此事务内 SUM + INSERT 即可保证不超额。
     let dir = attachments_dir();
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| ApiError::Internal(format!("mkdir: {}", e)))?;
 
-    // 全局磁盘配额：避免单个账号反复上传 32 MiB 文件耗尽磁盘。
-    let used = dir_size(&dir).await;
-    if used.saturating_add(body.len() as u64) > MAX_TOTAL_ATTACHMENT_BYTES {
-        return Err(ApiError::BadRequest(
-            "attachment storage quota exceeded".into(),
-        ));
+    // 随机 id：URL-safe 字母表，与 download 的 id 白名单一致。
+    let id = format!("att_{}", &db::random_token()[..22]);
+
+    let size = body.len() as i64;
+    {
+        let mut tx = state.pool.begin().await?;
+        let (global_used,): (i64,) =
+            sqlx::query_as("SELECT COALESCE(SUM(size), 0) FROM attachments")
+                .fetch_one(&mut *tx)
+                .await?;
+        if global_used.saturating_add(size) > MAX_TOTAL_ATTACHMENT_BYTES {
+            tx.rollback().await?;
+            return Err(ApiError::BadRequest(
+                "attachment storage quota exceeded".into(),
+            ));
+        }
+        let (user_used,): (i64,) =
+            sqlx::query_as("SELECT COALESCE(SUM(size), 0) FROM attachments WHERE owner = ?")
+                .bind(uid.as_str())
+                .fetch_one(&mut *tx)
+                .await?;
+        if user_used.saturating_add(size) > MAX_USER_ATTACHMENT_BYTES {
+            tx.rollback().await?;
+            return Err(ApiError::BadRequest(format!(
+                "user attachment quota exceeded (max {} MiB)",
+                MAX_USER_ATTACHMENT_BYTES / 1024 / 1024
+            )));
+        }
+        sqlx::query(
+            "INSERT INTO attachments (id, owner, target_id, size, created_at) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(uid.as_str())
+        .bind(target.as_deref())
+        .bind(size)
+        .bind(db::now_ms())
+        .execute(&mut *tx)
+        .await?;
+        // 先提交：配额已占，后续并发上传会看到这一行。
+        tx.commit().await?;
     }
 
-    // P2-7: 先写 .tmp 再 rename——磁盘满/进程崩溃时不会留下半写文件
+    // 配额占好之后写盘。失败必须回滚 DB 行，否则会永久占用配额。
+    // P2-7: 先写 .tmp 再 rename——磁盘满/进程崩溃时不会留下半写文件。
     let final_path = dir.join(&id);
     let tmp_path = dir.join(format!(".{}.tmp", id));
-    tokio::fs::write(&tmp_path, &body)
-        .await
-        .map_err(|e| ApiError::Internal(format!("write tmp: {}", e)))?;
-    tokio::fs::rename(&tmp_path, &final_path)
-        .await
-        .map_err(|e| ApiError::Internal(format!("rename: {}", e)))?;
-
-    // 元数据落库失败时必须回滚文件，避免留下无记录的孤儿 blob。
-    if let Err(e) = sqlx::query(
-        "INSERT INTO attachments (id, owner, target_id, size, created_at) \
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(uid.as_str())
-    .bind(target.as_deref())
-    .bind(body.len() as i64)
-    .bind(db::now_ms())
-    .execute(&state.pool)
-    .await
-    {
-        let _ = tokio::fs::remove_file(&final_path).await;
-        return Err(ApiError::Internal(format!("attachment meta: {e}")));
+    if let Err(e) = tokio::fs::write(&tmp_path, &body).await {
+        let _ = sqlx::query("DELETE FROM attachments WHERE id = ?")
+            .bind(&id)
+            .execute(&state.pool)
+            .await;
+        return Err(ApiError::Internal(format!("write tmp: {}", e)));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        let _ = sqlx::query("DELETE FROM attachments WHERE id = ?")
+            .bind(&id)
+            .execute(&state.pool)
+            .await;
+        return Err(ApiError::Internal(format!("rename: {}", e)));
     }
 
     let att = Attachment {
@@ -209,16 +215,22 @@ async fn download(
 
     // 授权：附件必须存在元数据，且当前用户有权访问其频道/DM 上下文。
     // 仅“已登录 + 知道随机 id”不足以读取私密频道/DM 的密文。
-    let meta: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT target_id FROM attachments WHERE id = ?")
+    let meta: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT target_id, owner FROM attachments WHERE id = ?")
             .bind(&id)
             .fetch_optional(&state.pool)
             .await?;
-    let Some((target_id,)) = meta else {
+    let Some((target_id, owner)) = meta else {
         return Err(ApiError::NotFound("attachment".into()));
     };
-    if let Some(target) = target_id.as_deref() {
-        authorize_target(&state, uid.as_str(), target).await?;
+    match target_id.as_deref() {
+        Some(target) => authorize_target(&state, uid.as_str(), target).await?,
+        // 未绑定频道的附件没有人人可以共享它，只允许上传者自己读取；
+        // 否则“知道随机 id”就等于读取权限。
+        None if owner != uid.as_str() => {
+            return Err(ApiError::Forbidden("not the attachment owner".into()));
+        }
+        None => {}
     }
 
     let path = attachments_dir().join(&id);
@@ -244,6 +256,20 @@ fn is_valid_attachment_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// 就绪探针：确认附件目录可创建且可写。
+///
+/// 只检查 DB 会让 `/ready` 在上传路径坏掉（只读卷、磁盘满、权限错误）时
+/// 仍然返回 200，负载均衡器继续把写请求打进来。
+pub(crate) fn storage_ready() -> Result<(), String> {
+    let dir = attachments_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("attachments dir {}: {}", dir.display(), e))?;
+    let probe = dir.join(".ready-probe");
+    std::fs::write(&probe, b"ok").map_err(|e| format!("attachments dir not writable: {}", e))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
 /// 清理上传上下文（频道/DM id）：去控制字符、限长。只用于配额与回收。
 fn sanitize_target(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
@@ -255,6 +281,112 @@ fn sanitize_target(raw: Option<&str>) -> Option<String> {
                 .collect::<String>()
         })
         .filter(|s| !s.is_empty())
+}
+
+/// 对账附件 DB 行与磁盘文件，清理两类孤儿数据。
+///
+/// 上传路径改成"先占配额、后写盘"以后，进程在两者之间崩溃会留下：
+///   1. DB 有行、磁盘无文件 → 会永久占用配额（且下载 404）
+///   2. 磁盘有文件、DB 无行 → 文件系统里不可见的磁盘占用
+///
+/// 两者都只在超过 [`ORPHAN_GRACE`]（24h）后才回收，避免误删正在上传的文件。
+/// 该函数由小时级维护任务调用；**不要**放在上传热路径上。
+///
+/// 返回 `(删除的孤儿文件数, 删除的孤儿行数)`。
+pub async fn sweep_orphans(pool: &sqlx::SqlitePool) -> (usize, usize) {
+    let dir = attachments_dir();
+    if tokio::fs::create_dir_all(&dir).await.is_err() {
+        return (0, 0);
+    }
+    let now = std::time::SystemTime::now();
+
+    // 已知 id 集合，用于判断磁盘文件是否有 DB 行。
+    let known: std::collections::HashSet<String> =
+        match sqlx::query_as::<_, (String,)>("SELECT id FROM attachments")
+            .fetch_all(pool)
+            .await
+        {
+            Ok(v) => v.into_iter().map(|(id,)| id).collect(),
+            Err(e) => {
+                tracing::warn!("[attachments] sweep: list rows failed: {}", e);
+                return (0, 0);
+            }
+        };
+
+    // ---- 1. 磁盘文件 → DB 行缺失或文件缺失 ----
+    let mut removed_files = 0usize;
+    let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
+    match tokio::fs::read_dir(&dir).await {
+        Ok(mut entries) => {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Ok(meta) = entry.metadata().await else {
+                    continue;
+                };
+                if !meta.is_file() {
+                    continue;
+                }
+                let old_enough = meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| now.duration_since(m).ok())
+                    .is_some_and(|age| age >= ORPHAN_GRACE);
+                if !old_enough {
+                    // 新文件（含上传中的 .tmp 与就绪探针）不动。
+                    present.insert(name);
+                    continue;
+                }
+                // 非附件命名 / 没有 DB 行的文件都是孤儿。
+                if is_valid_attachment_id(&name) && known.contains(&name) {
+                    present.insert(name);
+                    continue;
+                }
+                if tokio::fs::remove_file(entry.path()).await.is_ok() {
+                    removed_files += 1;
+                    tracing::warn!("[attachments] removed orphan file {}", name);
+                }
+            }
+        }
+        Err(e) => tracing::warn!("[attachments] sweep: read_dir failed: {}", e),
+    }
+
+    // ---- 2. DB 行 → 磁盘文件缺失（超宽限期）----
+    let mut removed_rows = 0usize;
+    let cutoff = db::now_ms() - ORPHAN_GRACE.as_millis() as i64;
+    let stale: Vec<(String, i64)> =
+        match sqlx::query_as("SELECT id, created_at FROM attachments WHERE created_at < ?")
+            .bind(cutoff)
+            .fetch_all(pool)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("[attachments] sweep: query stale rows failed: {}", e);
+                return (removed_files, 0);
+            }
+        };
+    for (id, _) in stale {
+        if !is_valid_attachment_id(&id) {
+            continue;
+        }
+        if present.contains(&id) {
+            continue;
+        }
+        if tokio::fs::try_exists(dir.join(&id)).await.unwrap_or(true) {
+            continue;
+        }
+        if sqlx::query("DELETE FROM attachments WHERE id = ?")
+            .bind(&id)
+            .execute(pool)
+            .await
+            .is_ok()
+        {
+            removed_rows += 1;
+            tracing::warn!("[attachments] removed orphan row {} (file missing)", id);
+        }
+    }
+
+    (removed_files, removed_rows)
 }
 
 /// 删除某个频道/DM 下的所有附件 blob 与元数据（频道删除时调用）。

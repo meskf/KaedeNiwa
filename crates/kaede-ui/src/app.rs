@@ -11,6 +11,7 @@ use crate::member_picker::MemberPickerModal;
 use crate::members::MemberContextMenu;
 use crate::mobile_shell::MobileShell;
 use crate::observer::{UiObserver, apply_event};
+use crate::pending_welcome_modal::PendingWelcomeModal;
 use crate::search::SearchModal;
 use crate::server_modal::ServerModal;
 use crate::settings_modal::SettingsModal;
@@ -102,6 +103,7 @@ pub fn App() -> Element {
                 }
             }
             ServerModal {}
+            PendingWelcomeModal {}
             CreateChannelModal {}
             JoinChannelModal {}
             ChannelContextMenu {}
@@ -150,12 +152,19 @@ fn UploadProgressBar() -> Element {
 fn ToastContainer() -> Element {
     let mut ui = use_context::<UiState>();
     // 每条 toast 一个自增 token；旧定时器不能清掉新提示。
-    let mut toast_seq = use_signal(|| 0u64);
+    //
+    // 必须用**非响应式**计数器：如果这里读写 Signal，effect 会因为自己写入
+    // 的依赖变化而反复重跑（无限循环 + 定时器风暴）。
+    let toast_seq = use_hook(|| std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)));
 
-    use_effect(move || {
-        if ui.toast.read().is_some() {
-            let my_seq = *toast_seq.read() + 1;
-            toast_seq.set(my_seq);
+    use_effect({
+        let toast_seq = toast_seq.clone();
+        move || {
+            if ui.toast.read().is_none() {
+                return;
+            }
+            let my_seq = toast_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let seq = toast_seq.clone();
             spawn(async move {
                 // M52: wasm 上 document::eval 是同步返回，必须 await 返回的 Promise
                 // 才能真等 3s。之前注入 setTimeout 但立即返回，toast 一闪而过。
@@ -168,7 +177,7 @@ fn ToastContainer() -> Element {
                 {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 }
-                if *toast_seq.read() == my_seq {
+                if seq.load(std::sync::atomic::Ordering::SeqCst) == my_seq {
                     ui.toast.set(None);
                 }
             });

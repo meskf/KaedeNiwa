@@ -693,6 +693,17 @@ async fn handle_message(
                 });
                 return Ok(());
             }
+            // 协议约定 payload 首字节 = 0x04 (Welcome) | 0x05 (Commit)。
+            // 拒绝其他前缀能防止恶意客户端发送服务端无法解析、收件方
+            // 客户端会 fail-closed 的 payload，也保证 deliver_pending
+            // 补投时的语义一致。
+            if !matches!(payload.first().copied(), Some(0x04) | Some(0x05)) {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "channel sync payload must start with 0x04 or 0x05".into(),
+                });
+                return Ok(());
+            }
             // 安全校验：发送者必须是频道成员
             let is_member: Option<(i64,)> = sqlx::query_as(
                 "SELECT 1 FROM channel_members WHERE channel_id = ? AND login_id = ?",
@@ -932,15 +943,36 @@ async fn handle_message(
                 });
                 return Ok(());
             }
-            // 主群 Welcome 只能由 host（op5）发送。
+            // Round 6（Signal 模型）：服务器允许任何已加入成员发 Welcome。
             //
-            // 客户端在本地已有主群时会用 Welcome 里的 group_id 判断是否重建；
-            // 若任意成员都能发 Welcome，攻击者只需拉取目标 KP + 自建 group，
-            // 就能把目标拉进攻击者控制的群（读走其后续所有公开频道消息）。
-            if sender_op(state, &from).await?.as_deref() != Some("op5") {
+            // 安全性由**客户端用户确认**保证：收到 Welcome 时不再自动入群，
+            // 而是弹确认框（见 kaede_client::ClientEvent::PendingWelcome）。
+            // 用户看到 "X 想把你加入服务器"，主动接受才入群。
+            //
+            // 这消除了"房主离线 = 新人进不来"的单点。代价：
+            // - 新人首次需要多点一次确认
+            // - 恶意 Welcome 会出现在 UI 里（用户拒绝即可，不影响状态）
+            //
+            // 保留的防御：
+            // - MAX_MLS_ENVELOPE_BYTES 限制防止超大 Welcome
+            // - target 存在性校验防止向不存在的 uid 塞离线信封
+            // - 发送者必须已 join（ensure_joined 已在上方校验）
+            //
+            // 任何成员可发 Welcome 之后必须限流：否则一个账号可以给全服
+            // 每个人反复塞 256 KiB 的离线信封，刷爆目标存储与客户端确认队列。
+            if !state.check_rate_scoped(&from, "mls_welcome", 0.5, 10.0) {
+                state.metrics.rate_limited();
                 let _ = tx.try_send(ServerMessage::Error {
-                    code: ErrorCode::TargetNotFound,
-                    message: "only the room host (op5) may send MLS welcomes".into(),
+                    code: ErrorCode::RateLimited,
+                    message: "welcome rate limited".into(),
+                });
+                return Ok(());
+            }
+            if !state.check_rate_key(&format!("welcome_to:{}", to), 0.2, 10.0) {
+                state.metrics.rate_limited();
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::RateLimited,
+                    message: "target welcome budget exceeded".into(),
                 });
                 return Ok(());
             }
@@ -951,9 +983,11 @@ async fn handle_message(
                     .fetch_optional(&state.pool)
                     .await?;
             if target_exists.is_none() {
+                // 固定字符串，不把目标 uid 回显给发送方（防用户枚举面，
+                // 也为未来放开 op4 权限时不暴露"某 uid 是否存在"）。
                 let _ = tx.try_send(ServerMessage::Error {
                     code: ErrorCode::TargetNotFound,
-                    message: to.0,
+                    message: "target user not found".into(),
                 });
                 return Ok(());
             }
@@ -1195,9 +1229,15 @@ async fn handle_message(
 
         ClientMessage::SetPresence { status } => {
             let uid = ensure_joined(state, my_uid, my_session_id)?;
-            let valid = matches!(status.as_str(), "online" | "idle" | "dnd");
-            if !valid {
-                return Err(anyhow::anyhow!("invalid status"));
+            if !matches!(status.as_str(), "online" | "idle" | "dnd") {
+                // 显式返回 MalformedMessage，不再冒泡 Err——
+                // 否则外层 run_socket 会把任何 Err 报成 NotJoined，
+                // 导致客户端无法区分"输入非法"和"session 失效"。
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::MalformedMessage,
+                    message: "invalid presence status".into(),
+                });
+                return Ok(());
             }
             state.set_presence(&uid, status);
             let snapshot = state.snapshot_presence();

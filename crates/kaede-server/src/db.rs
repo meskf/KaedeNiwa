@@ -7,13 +7,32 @@ pub async fn init(url: &str) -> Result<SqlitePool> {
     let pool = SqlitePoolOptions::new()
         .after_connect(|conn, _meta| {
             Box::pin(async move {
+                // &mut *conn 是 reborrow：直接把 &mut SqliteConnection
+                // 传给 execute 会 move（非 Copy），第二次调用无法使用。
                 sqlx::query("PRAGMA foreign_keys = ON;")
-                    .execute(conn)
+                    .execute(&mut *conn)
+                    .await?;
+                // SQLITE_BUSY 等待时间：SQLite 默认立即返回 BUSY。
+                // 5000ms 与主流框架一致，避免高并发写时频繁报
+                // "database is locked"。
+                sqlx::query("PRAGMA busy_timeout = 5000;")
+                    .execute(&mut *conn)
+                    .await?;
+                // synchronous 是**连接级**设置，必须放在 after_connect；
+                // 只在池上执行一次的话，其余连接会保持默认 FULL。
+                sqlx::query("PRAGMA synchronous = NORMAL;")
+                    .execute(&mut *conn)
                     .await?;
                 Ok(())
             })
         })
-        .max_connections(10)
+        // SQLite 写是单锁串行。10 个连接不会提升写吞吐，只会增加
+        // BUSY 概率和锁升级开销。4 个足够覆盖并发读 + 少量写。
+        .max_connections(4)
+        // 池耗尽时不要无限 await：5s 内拿不到连接直接报 PoolTimedOut，
+        // 让上层能返回 503 而不是卡死 handler。
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .idle_timeout(std::time::Duration::from_secs(300))
         .connect(url)
         .await?;
 
@@ -21,9 +40,6 @@ pub async fn init(url: &str) -> Result<SqlitePool> {
         .execute(&pool)
         .await?;
     sqlx::query("PRAGMA foreign_keys = ON;")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA synchronous = NORMAL;")
         .execute(&pool)
         .await?;
 
@@ -88,10 +104,6 @@ pub async fn enqueue_envelope(
     // 单事务完成 INSERT + 双重配额裁剪：
     //   1. 按条数保留最新 MAX_PENDING_PER_USER 条
     //   2. 按字节总量从最旧开始删，直到 <= MAX_PENDING_BYTES
-    //
-    // 原实现是 SELECT 全部 + 逐行 DELETE，非原子且 O(n)；并发入队时可能
-    // 删到新插入的行，高频场景下成为瓶颈。窗口函数需要 SQLite 3.25+，
-    // sqlx bundled 3.45 满足。
     let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO pending_envelopes (to_uid, from_uid, kind, channel_id, payload, created_at) \
@@ -120,7 +132,7 @@ pub async fn enqueue_envelope(
     .execute(&mut *tx)
     .await?;
 
-    // 按字节裁剪：按 id DESC 累加 payload 长度，累加值超出预算的行全部删除
+    // 按字节裁剪
     sqlx::query(
         "DELETE FROM pending_envelopes WHERE id IN ( \
            SELECT id FROM ( \
@@ -139,7 +151,7 @@ pub async fn enqueue_envelope(
     Ok(())
 }
 
-/// 读取信封但**不删除**（投递成功后再删）。
+/// 读取信封但不删除（投递成功后再删）。
 pub async fn list_envelopes(
     pool: &SqlitePool,
     to_uid: &str,
@@ -169,8 +181,6 @@ pub async fn delete_envelopes(pool: &SqlitePool, ids: &[i64]) -> Result<(), sqlx
 type PendingRow = (i64, String, String, Option<String>, Vec<u8>);
 
 /// 取出并按入队顺序删除某个用户的所有离线信封。
-///
-/// 返回 `(from_uid, kind, channel_id, payload)`。
 pub async fn take_envelopes(
     pool: &SqlitePool,
     to_uid: &str,
@@ -206,7 +216,7 @@ pub async fn take_envelopes(
         .collect())
 }
 
-/// 清理过期数据（session / KeyPackage / 离线信封）。
+/// 清理过期数据（session / KeyPackage / 离线信封 / Commit 历史 / 审计 / 孤儿附件）。
 pub async fn cleanup_expired(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let now = now_ms();
     sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
@@ -226,25 +236,54 @@ pub async fn cleanup_expired(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
 
+    // mls_commits 保留最近 1024 条。
+    // 按 rowid 保留而非 epoch 值——epoch 受客户端控制，按值排序会被
+    // epoch 注入清空。
+    sqlx::query(
+        "DELETE FROM mls_commits WHERE rowid NOT IN \
+         (SELECT rowid FROM mls_commits ORDER BY rowid DESC LIMIT 1024)",
+    )
+    .execute(pool)
+    .await?;
+
+    // admin_audit 保留最近 180 天。
+    sqlx::query("DELETE FROM admin_audit WHERE ts < ?")
+        .bind(now - 180i64 * 24 * 3600 * 1000)
+        .execute(pool)
+        .await?;
+
+    // P1-13：清理孤儿 attachments 行。
+    //
+    // 两种孤儿来源：
+    //   1. 文件写成功但进程崩溃在 INSERT 之前（正常路径有回滚，崩溃路径无）
+    //   2. 频道删除时 purge_target 删 DB 但删文件时文件已不存在/权限错误
+    //
+    // 保守策略：只删"7 天前"且 target_id 指向不存在的频道（不含 DM）。
+    // 不按文件系统状态判断——文件可能在冷存储/迁移盘上，误删代价大。
+    sqlx::query(
+        "DELETE FROM attachments \
+         WHERE created_at < ? \
+           AND target_id IS NOT NULL \
+           AND target_id NOT IN (SELECT id FROM channels) \
+           AND target_id NOT LIKE 'dm:%'",
+    )
+    .bind(now - 7 * 24 * 3600 * 1000)
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 
 /// 单个账号的消息密文累计上限（终身）。
-///
-/// 512 MiB 与附件配额对齐；消息没有单文件 32 MiB 的限制，
-/// 没有这个配额时单个账号可持续写入直到磁盘耗尽。
 pub const MAX_USER_MESSAGE_BYTES: i64 = 512 * 1024 * 1024;
 
-/// 在事务内预占消息字节配额。返回 `false` 表示超额。
-///
-/// 调用方必须把消息 INSERT 和本函数放在同一个事务里；INSERT 失败时
-/// 配额会随事务一起回滚。
+/// 在事务内预占消息字节配额。返回 false 表示超额。
 pub async fn reserve_message_bytes(
     conn: &mut sqlx::SqliteConnection,
     login_id: &str,
     bytes: i64,
 ) -> Result<bool, sqlx::Error> {
-    // 单条 UPSERT 完成“检查 + 预占”，避免 SELECT 后再 INSERT 的锁升级
+    // 单条 UPSERT 完成"检查 + 预占"，避免 SELECT 后再 INSERT 的锁升级
     // 死锁（SQLite 并发写事务常见问题）。超额时 WHERE 不成立，无行返回。
     let row: Option<(i64,)> = sqlx::query_as(
         "INSERT INTO message_usage (login_id, bytes) VALUES (?, ?) \

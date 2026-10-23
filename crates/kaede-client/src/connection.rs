@@ -70,6 +70,12 @@ pub struct ServerConnection {
     /// **必须**在每次 `create_message` / `process_message` / commit merge 后置位：
     /// 否则重启后会回退 sender ratchet，导致 MLS 层 AES-GCM nonce 复用。
     main_dirty: AtomicBool,
+    /// 任何 MLS snapshot 持久化失败后置位：DM / 私密频道 group 的 epoch 与
+    /// sender ratchet 可能已前进但没有落盘，此时继续发送会在重启后回退到旧状态。
+    ///
+    /// 与主群的 [`RoomSession::snapshot_broken`] 语义一致，但覆盖 DM / 频道路径
+    /// （这些 snapshot 由 [`ServerConnection::flush_dirty_snapshots`] 负责写盘）。
+    snapshot_broken: AtomicBool,
     /// 当前用户是否是主群 host（op5）。由 RoomSession 注入。
     is_host: AtomicBool,
     /// DM / 私密频道 v2 密文的 in-memory 重放窗口。
@@ -81,6 +87,16 @@ pub struct ServerConnection {
     /// 频道成员校验来源。生产由 `RoomSession` 注入；用于在加入/推进频道 group
     /// 前对照服务端 `channel_members`，拒绝把群外成员带进 MLS group。
     http: Mutex<Option<HttpApi>>,
+    /// Round 6：等待用户确认的主群 Welcome。key = sender login_id。
+    ///
+    /// 收到 MlsWelcome 时不立即入群，而是存这里并 emit `PendingWelcome`。
+    /// 用户通过 UI 调 `accept_pending_welcome(sender)` 或
+    /// `reject_pending_welcome(sender)` 决定。
+    ///
+    /// **为什么是 HashMap 而不是 Option**：攻击者可以反复发恶意 Welcome，
+    /// 用 Option 会让后来的合法 Welcome 覆盖先前的恶意 Welcome（或反之）。
+    /// HashMap 允许并存，UI 层负责限流展示。
+    pending_main_welcomes: Mutex<std::collections::HashMap<String, PendingMainWelcome>>,
 }
 
 type ReplayEntry = (HashSet<[u8; 16]>, VecDeque<[u8; 16]>);
@@ -148,11 +164,13 @@ impl ServerConnection {
             dirty_dm_groups: Mutex::new(std::collections::HashSet::new()),
             dirty_channel_groups: Mutex::new(std::collections::HashSet::new()),
             main_dirty: AtomicBool::new(false),
+            snapshot_broken: AtomicBool::new(false),
             is_host: AtomicBool::new(false),
             dm_replay: Mutex::new(ReplayGuard::default()),
             channel_replay: Mutex::new(ReplayGuard::default()),
             private_channels: Mutex::new(HashSet::new()),
             http: Mutex::new(None),
+            pending_main_welcomes: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -216,6 +234,38 @@ impl ServerConnection {
     /// 保存失败时把标志放回去，下一条消息会再次尝试。
     pub fn restore_main_dirty(&self) {
         self.main_dirty.store(true, Ordering::Release);
+    }
+
+    /// 是否有 MLS snapshot 处于“持久化失败”状态。
+    ///
+    /// 为 true 时调用方必须暂停发送：group epoch / sender ratchet 已前进但
+    /// 没有落盘，重启会回退到旧状态并复用密钥流。
+    pub fn snapshot_broken(&self) -> bool {
+        self.snapshot_broken.load(Ordering::Acquire)
+    }
+
+    /// 标记 snapshot 持久化失败并向 UI 报错（只在状态翻转时 emit 一次）。
+    pub fn mark_snapshot_broken(&self, detail: &str) {
+        if !self.snapshot_broken.swap(true, Ordering::AcqRel) {
+            tracing::error!("[snapshot] persistence broken: {}", detail);
+            self.emit(ClientEvent::MlsSyncError {
+                server_id: self.server_id.clone(),
+                user_message: "本地密钥状态保存失败；为避免 nonce 复用，已暂停发送。\
+                               请检查磁盘/存储空间后重新登录"
+                    .into(),
+                recoverable: false,
+                detail: detail.to_string(),
+            });
+        } else {
+            tracing::warn!("[snapshot] persistence still broken: {}", detail);
+        }
+    }
+
+    /// 一次完整落盘成功后清除失败状态，恢复发送能力。
+    pub fn clear_snapshot_broken(&self) {
+        if self.snapshot_broken.swap(false, Ordering::AcqRel) {
+            tracing::info!("[snapshot] persistence recovered; sending re-enabled");
+        }
     }
 
     /// 设置当前用户是否是 host。
@@ -1177,6 +1227,10 @@ impl ServerConnection {
         };
         let cipher = crate::keystore::device_cipher(&hook.uid, &hook.server_url);
 
+        // 本次落盘是否出现不可忽略的失败。任何失败都意味着内存里的 MLS 状态
+        // 比磁盘更新：此时必须闭锁发送，等下一次成功落盘再恢复。
+        let mut failures: Vec<String> = Vec::new();
+
         // 主群状态优先落盘：发送/接收消息都会推进 ratchet，
         // 不保存会导致重启后 generation/nonce 复用。
         if self.take_main_dirty() {
@@ -1190,12 +1244,14 @@ impl ServerConnection {
                         Err(e) => {
                             tracing::warn!("[main-persist] put failed: {} (will retry)", e);
                             self.restore_main_dirty();
+                            failures.push(format!("main: {e}"));
                         }
                     }
                 }
                 Err(e) => {
                     tracing::warn!("[main-persist] snapshot failed: {}", e);
                     self.restore_main_dirty();
+                    failures.push(format!("main: {e}"));
                 }
             }
         }
@@ -1224,19 +1280,21 @@ impl ServerConnection {
                                 conv_id,
                                 e
                             );
+                            failures.push(format!("dm {conv_id}: {e}"));
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "[aux-persist] dm {} snapshot failed: {} (dropping dirty)",
-                        conv_id,
-                        e
-                    );
+                // group 已不存在（本地已 drop）：dirty 无意义，直接剔除。
+                Err(e) if is_missing_group(&e) => {
                     self.dirty_dm_groups
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .remove(&conv_id);
+                }
+                // 其余失败必须保留 dirty 并闭锁：epoch/ratchet 已前进但没落盘。
+                Err(e) => {
+                    tracing::warn!("[aux-persist] dm {} snapshot failed: {}", conv_id, e);
+                    failures.push(format!("dm {conv_id}: {e}"));
                 }
             }
         }
@@ -1265,19 +1323,23 @@ impl ServerConnection {
                                 channel_id,
                                 e
                             );
+                            failures.push(format!("channel {channel_id}: {e}"));
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "[aux-persist] channel {} snapshot failed: {} (dropping dirty)",
-                        channel_id,
-                        e
-                    );
+                Err(e) if is_missing_group(&e) => {
                     self.dirty_channel_groups
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .remove(&channel_id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[aux-persist] channel {} snapshot failed: {}",
+                        channel_id,
+                        e
+                    );
+                    failures.push(format!("channel {channel_id}: {e}"));
                 }
             }
         }
@@ -1310,8 +1372,15 @@ impl ServerConnection {
                         conv_id,
                         e
                     );
+                    failures.push(format!("dm_meta {conv_id}: {e}"));
                 }
             }
+        }
+
+        if failures.is_empty() {
+            self.clear_snapshot_broken();
+        } else {
+            self.mark_snapshot_broken(&failures.join("; "));
         }
     }
 
@@ -1804,68 +1873,74 @@ impl ServerConnection {
 
             // ---- MLS 握手 ----
             ServerMessage::MlsWelcome { from, payload } => {
-                // 未就绪 → 正常加入；已就绪但 group_id 不同 → 重建主群。
+                // Round 6（Signal 模型）：收到 Welcome 时不立即入群。
+                // 服务器允许任何已加入成员发 Welcome，客户端通过用户确认
+                // 决定是否信任。见 PendingWelcome 事件和
+                // accept_pending_welcome / reject_pending_welcome 方法。
                 let was_ready = self.mls_is_ready();
-                let (gid, welcome) = unpack_welcome_payload(&payload);
-                match self.mls_join_or_reset_welcome(welcome, gid, from.as_str()) {
-                    Ok(false) => {
+                let (gid, _welcome) = unpack_welcome_payload(&payload);
+                // 已就绪 + group_id 相同 = 服务器重复投递，直接忽略，
+                // 不弹确认框（避免每次重连都问一遍）。
+                if was_ready && let Some(incoming_gid) = gid {
+                    let is_same = {
+                        let guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
+                        guard
+                            .as_ref()
+                            .and_then(|s| s.group_id())
+                            .map(|cur| cur == incoming_gid)
+                            .unwrap_or(false)
+                    };
+                    if is_same {
                         tracing::debug!(
-                            "[client:{}] duplicate welcome from {} ignored",
+                            "[client:{}] duplicate welcome from {} (same group_id) ignored",
                             self.server_id,
                             from
                         );
-                    }
-                    Ok(true) => {
-                        if was_ready {
-                            tracing::warn!(
-                                "[client:{}] main group rebuilt from welcome by {}; \
-                                 old group history is no longer decryptable",
-                                self.server_id,
-                                from
-                            );
-                            self.emit(ClientEvent::MlsSyncError {
-                                server_id: self.server_id.clone(),
-                                user_message:
-                                    "服务器主群已重建，本地旧群的历史消息不可恢复；请继续使用新群"
-                                        .into(),
-                                recoverable: true,
-                                detail: format!("reset main group via welcome from {}", from),
-                            });
-                        }
-                        // 未 join 过时先补一次 MlsJoining，再进 MlsReady。
-                        if self.state() == ClientState::Authenticated
-                            && let Err(e) = self.transition(ClientState::MlsJoining)
-                        {
-                            tracing::warn!(
-                                "[client:{}] → MlsJoining failed: {}",
-                                self.server_id,
-                                e
-                            );
-                        }
-                        if let Err(e) = self.transition(ClientState::MlsReady) {
-                            // MlsReady → MlsReady 会失败（重连场景已就绪），预期行为
-                            tracing::debug!(
-                                "[client:{}] → MlsReady skipped: {}",
-                                self.server_id,
-                                e
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "[client:{}] welcome from {} failed: {}",
-                            self.server_id,
-                            from,
-                            e
-                        );
-                        self.emit(ClientEvent::MlsSyncError {
-                            server_id: self.server_id.clone(),
-                            user_message: "无法通过 Welcome 加入主群，请重连服务器".into(),
-                            recoverable: true,
-                            detail: e.to_string(),
-                        });
+                        return Ok(());
                     }
                 }
+                // 存 pending（覆盖同 sender 的旧 welcome：同一人重复发，
+                // 我们只保留最新一份，避免 pending 无限增长）。
+                let sender_key = from.as_str().to_string();
+                {
+                    let mut map = self
+                        .pending_main_welcomes
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    // 每个 sender 只保留最新一份；同时设置总量上限，防止
+                    // 多账号批量发 Welcome 把内存撑爆（服务端也有限流兜底）。
+                    const MAX_PENDING_MAIN_WELCOMES: usize = 16;
+                    if !map.contains_key(&sender_key)
+                        && map.len() >= MAX_PENDING_MAIN_WELCOMES
+                        && let Some(oldest) = map
+                            .iter()
+                            .min_by_key(|(_, p)| p.received_at)
+                            .map(|(k, _)| k.clone())
+                    {
+                        map.remove(&oldest);
+                    }
+                    map.insert(
+                        sender_key.clone(),
+                        PendingMainWelcome {
+                            payload,
+                            from: from.clone(),
+                            is_rebuild: was_ready,
+                            received_at: std::time::Instant::now(),
+                        },
+                    );
+                }
+                tracing::info!(
+                    "[client:{}] pending welcome from {} (is_rebuild={}); awaiting user confirmation",
+                    self.server_id,
+                    from,
+                    was_ready
+                );
+                self.emit(ClientEvent::PendingWelcome {
+                    server_id: self.server_id.clone(),
+                    from,
+                    is_rebuild: was_ready,
+                    sender_login_id: sender_key,
+                });
             }
 
             ServerMessage::MlsCommit {
@@ -2459,6 +2534,11 @@ impl ServerConnection {
     /// 调用方负责 spawn：native 用 `tokio::spawn`，wasm 用
     /// `wasm_bindgen_futures::spawn_local`。返回即连接关闭。
     pub async fn run_event_loop(self: Arc<Self>) {
+        // 快照写盘做尾随去抖：每条消息都整包加密重写 MLS 状态代价很高
+        // （群状态 + 最多 64 个 past epoch）。发送路径仍在广播前显式落盘，
+        // 这里只负责接收侧/成员变更的最终持久化。
+        let flush_interval = std::time::Duration::from_millis(250);
+        let mut last_flush = std::time::Instant::now();
         let reason = loop {
             match self.transport.recv().await {
                 Ok(msg) => {
@@ -2468,9 +2548,10 @@ impl ServerConnection {
                         tracing::warn!("[client:{}] handle failed: {}", self.server_id, e);
                         break e.to_string();
                     }
-                    // B3+: 每条消息处理完后就 flush 一次 dirty snapshot，
-                    // 避免 DM Welcome 到达 / dm_join_group 后延迟写盘。
-                    self.flush_dirty_snapshots().await;
+                    if last_flush.elapsed() >= flush_interval {
+                        self.flush_dirty_snapshots().await;
+                        last_flush = std::time::Instant::now();
+                    }
                 }
                 Err(ClientError::Closed) => {
                     tracing::info!("[client:{}] ws closed", self.server_id);
@@ -2482,6 +2563,9 @@ impl ServerConnection {
                 }
             }
         };
+
+        // 退出前补一次落盘，避免最后 250ms 内的成员变更丢失。
+        self.flush_dirty_snapshots().await;
 
         // 主动关闭 transport（服务端可能还挂着，需要我们这端发 Close 帧）
         let _ = self.transport.close().await;
@@ -2509,6 +2593,14 @@ const WELCOME_FRAME_MAGIC: u8 = 0x4b;
 
 /// DM Welcome 信封 magic。
 const DM_WELCOME_MAGIC: u8 = 0x4b;
+
+/// snapshot 失败是否只是“本地 group 已不存在”。
+///
+/// `dm_drop_group` / `channel_drop_group` 之后 dirty 标记可能还在，但内存里
+/// 已经没有该 group，没有任何状态需要落盘 —— 这类失败不应闭锁发送。
+fn is_missing_group(err: &ClientError) -> bool {
+    matches!(err, ClientError::Mls(msg) if msg.contains("not found"))
+}
 
 /// 拆出 DM Welcome 信封的 `(generation, welcome)`。
 ///
@@ -3185,5 +3277,143 @@ mod tests {
             ServerConnection::ensure_channel_group_members(&missing_self, &allowed, "alice", "ch")
                 .is_err()
         );
+    }
+}
+
+// ============================================================
+// Round 6：Pending Main Welcome（Signal 模型）
+// ============================================================
+
+/// 等待用户确认的主群 Welcome。
+pub(crate) struct PendingMainWelcome {
+    /// 服务器投递的原始 payload（含 group_id 前缀 + Welcome bytes）。
+    payload: Vec<u8>,
+    /// 发送者。
+    from: UserId,
+    /// 收到时本地是否已有主群。true 表示接受会重建主群（丢旧历史）。
+    is_rebuild: bool,
+    /// 收到时间，用于 UI 排序和可选超时清理。
+    received_at: std::time::Instant,
+}
+
+/// 给 UI 展示用的只读视图。
+#[derive(Debug, Clone)]
+pub struct PendingWelcomeInfo {
+    pub sender_login_id: String,
+    pub is_rebuild: bool,
+    pub age_secs: u64,
+}
+
+impl ServerConnection {
+    /// 列出所有 pending 主群 Welcome。UI 层用来渲染确认对话框。
+    pub fn pending_welcome_info(&self) -> Vec<PendingWelcomeInfo> {
+        let map = self
+            .pending_main_welcomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.iter()
+            .map(|(sender, p)| PendingWelcomeInfo {
+                sender_login_id: sender.clone(),
+                is_rebuild: p.is_rebuild,
+                age_secs: p.received_at.elapsed().as_secs(),
+            })
+            .collect()
+    }
+
+    /// 用户确认接受某个 sender 的 Welcome。
+    ///
+    /// 成功：从 pending 移除 + 应用 Welcome + 迁移状态 + emit
+    /// `PendingWelcomeResolved { accepted: true }`。
+    ///
+    /// 失败（Welcome 解析失败 / 成员校验失败）：
+    /// - pending 保留（用户仍可拒绝）
+    /// - emit `MlsSyncError`
+    pub fn accept_pending_welcome(&self, sender_login_id: &str) -> Result<(), ClientError> {
+        let pending = {
+            let mut map = self
+                .pending_main_welcomes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.remove(sender_login_id)
+        };
+        let Some(pending) = pending else {
+            return Err(ClientError::Mls(format!(
+                "no pending welcome from {}",
+                sender_login_id
+            )));
+        };
+
+        let was_ready = self.mls_is_ready();
+        let (gid, welcome) = unpack_welcome_payload(&pending.payload);
+        let result = self.mls_join_or_reset_welcome(welcome, gid, pending.from.as_str());
+        match result {
+            Ok(false) => {
+                // 重复（理论上收到时已过滤，但用户可能在 pending 存活期间
+                // 通过其他路径入群）
+                tracing::debug!(
+                    "[client:{}] accept_pending_welcome: duplicate, ignored",
+                    self.server_id
+                );
+            }
+            Ok(true) => {
+                if was_ready {
+                    tracing::warn!(
+                        "[client:{}] main group rebuilt via accepted welcome from {}",
+                        self.server_id,
+                        pending.from
+                    );
+                }
+                if self.state() == ClientState::Authenticated
+                    && let Err(e) = self.transition(ClientState::MlsJoining)
+                {
+                    tracing::warn!("[client:{}] -> MlsJoining failed: {}", self.server_id, e);
+                }
+                if let Err(e) = self.transition(ClientState::MlsReady) {
+                    tracing::debug!("[client:{}] -> MlsReady skipped: {}", self.server_id, e);
+                }
+            }
+            Err(e) => {
+                // 失败时把 pending 放回去，用户还能拒绝
+                {
+                    let mut map = self
+                        .pending_main_welcomes
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    map.insert(sender_login_id.to_string(), pending);
+                }
+                self.emit(ClientEvent::MlsSyncError {
+                    server_id: self.server_id.clone(),
+                    user_message: "无法应用 Welcome，请重试或拒绝".into(),
+                    recoverable: true,
+                    detail: e.to_string(),
+                });
+                return Err(e);
+            }
+        }
+        self.emit(ClientEvent::PendingWelcomeResolved {
+            server_id: self.server_id.clone(),
+            sender_login_id: sender_login_id.to_string(),
+            accepted: true,
+        });
+        Ok(())
+    }
+
+    /// 用户拒绝某个 sender 的 Welcome。仅从 pending 移除，不影响 MLS 状态。
+    pub fn reject_pending_welcome(&self, sender_login_id: &str) {
+        let removed = {
+            let mut map = self
+                .pending_main_welcomes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.remove(sender_login_id)
+        };
+        if removed.is_none() {
+            return;
+        }
+        self.emit(ClientEvent::PendingWelcomeResolved {
+            server_id: self.server_id.clone(),
+            sender_login_id: sender_login_id.to_string(),
+            accepted: false,
+        });
     }
 }

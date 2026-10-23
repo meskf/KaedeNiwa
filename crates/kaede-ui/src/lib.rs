@@ -16,6 +16,7 @@ mod mobile_pages;
 mod mobile_shell;
 mod mobile_voice;
 mod observer;
+mod pending_welcome_modal;
 mod search;
 mod server_modal;
 mod settings_modal;

@@ -78,8 +78,8 @@ pub fn ServerModal() -> Element {
                             let new = UiServer {
                                 id: id.clone(),
                                 name: format!("服务器 {}", n),
-                                http_url: "http://localhost:8080".into(),
-                                ws_url: "ws://localhost:8080".into(),
+                                http_url: "http://localhost:18080".into(),
+                                ws_url: "ws://localhost:18080".into(),
                                 ..Default::default()
                             };
                             srvs.insert(id.clone(), new);
@@ -201,7 +201,7 @@ fn ServerForm(server_id: String) -> Element {
                 label { class: "form-label", "HTTP URL" }
                 input {
                     class: "form-input",
-                    placeholder: "http://localhost:8080",
+                    placeholder: "http://localhost:18080",
                     value: "{http}",
                     oninput: move |e| http.set(e.value()),
                 }
@@ -210,7 +210,7 @@ fn ServerForm(server_id: String) -> Element {
                 label { class: "form-label", "WebSocket URL" }
                 input {
                     class: "form-input",
-                    placeholder: "ws://localhost:8080",
+                    placeholder: "ws://localhost:18080",
                     value: "{ws}",
                     oninput: move |e| ws.set(e.value()),
                 }

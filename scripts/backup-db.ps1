@@ -71,6 +71,17 @@ if ($Mode -eq 'backup') {
 if (-not $Backup) { throw '恢复模式需要 -Backup <备份文件路径>' }
 if (-not (Test-Path -LiteralPath $Backup)) { throw "备份文件不存在: $Backup" }
 
+# 有 .sha256 sidecar 时先校验，避免恢复被截断/损坏的备份。
+$hashFile = "$Backup.sha256"
+if (Test-Path -LiteralPath $hashFile) {
+    $expected = ((Get-Content -LiteralPath $hashFile -Raw) -split '\s+')[0].Trim().ToLowerInvariant()
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Backup).Hash.ToLowerInvariant()
+    if ($expected -and $actual -ne $expected) {
+        throw "备份 SHA256 不匹配（expected=$expected actual=$actual），拒绝恢复"
+    }
+    Write-Host 'SHA256 校验通过' -ForegroundColor Green
+}
+
 Assert-Integrity $Backup
 
 if (-not $Force) {

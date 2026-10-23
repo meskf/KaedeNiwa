@@ -399,6 +399,12 @@ async fn remove_member(
         }
     }
 
+    // 踢人后必须吊销媒体访问：只删账号/断 WS 不会中断已经建立的 LiveKit
+    // 连接，被踢者仍能在 token 有效期内继续收听语音/屏幕共享。
+    for room in state.media_revoke_user(&target) {
+        crate::livekit::spawn_remove_participant(state.clone(), room, target.clone());
+    }
+
     state.broadcast_all(ServerMessage::MemberRemoved { login_id: target });
 
     Ok(StatusCode::NO_CONTENT)

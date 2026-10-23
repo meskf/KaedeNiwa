@@ -39,7 +39,7 @@ const EVENTS_CHANNEL_CAPACITY: usize = 64;
 /// LiveKit 连接配置。
 #[derive(Clone)]
 pub struct LiveKitConfig {
-    /// LiveKit 信令 WS URL，例如 `ws://localhost:7880`。
+    /// LiveKit 信令 WS URL，例如 `ws://localhost:18082`。
     pub ws_url: String,
     /// 服务端签发的 JWT。
     pub token: String,

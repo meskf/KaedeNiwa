@@ -7,6 +7,54 @@ use kaede_server::{
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+/// 随服务端一起拉起的 LiveKit 子进程。`Drop` 时回收，避免早退路径留下孤儿进程。
+struct LivekitChild(Option<std::process::Child>);
+
+impl Drop for LivekitChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// 同目录存在 `livekit-server.exe` 时自动拉起，实现单目录开箱即用。
+///
+/// 只在**服务端配置校验通过、监听成功后**调用：配置错误不会留下孤儿进程。
+/// `--dev` 使用 LiveKit 的默认 devkey/secret，因此只绑回环，避免把无认证的
+/// 开发实例暴露到局域网/公网。
+fn spawn_bundled_livekit() -> LivekitChild {
+    let Some(exe_path) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join("livekit-server.exe")))
+        .filter(|p| p.exists())
+    else {
+        return LivekitChild(None);
+    };
+    tracing::info!("starting bundled LiveKit server from {:?}", exe_path);
+    match std::process::Command::new(&exe_path)
+        .args([
+            "--dev",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            "18082",
+            "--rtc-tcp-port",
+            "18083",
+            "--rtc-udp-port",
+            "18084",
+        ])
+        .spawn()
+    {
+        Ok(child) => LivekitChild(Some(child)),
+        Err(e) => {
+            tracing::error!("failed to spawn livekit-server: {}", e);
+            LivekitChild(None)
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // 共享 log buffer：subscriber 写、admin /api/logs 读
@@ -103,7 +151,7 @@ async fn main() -> Result<()> {
             .merge(ws::router(state.clone())),
     );
 
-    // 管理面板：独立 task + 独立 listener（默认 127.0.0.1:3001）
+    // 管理面板：独立 task + 独立 listener（默认 127.0.0.1:18081）
     if state.cfg.admin_enabled {
         let admin_state = state.clone();
         let admin_bind = state.cfg.admin_bind.clone();
@@ -131,11 +179,21 @@ async fn main() -> Result<()> {
                 if let Err(e) = kaede_server::db::cleanup_expired(&pool).await {
                     tracing::warn!("periodic cleanup failed: {}", e);
                 }
+                // 附件表与磁盘文件对账（上传/删除崩溃残留的孤儿）。
+                let (files, rows) = kaede_server::attachments::sweep_orphans(&pool).await;
+                if files > 0 || rows > 0 {
+                    tracing::info!("[attachments] swept {} file(s), {} row(s)", files, rows);
+                }
             }
         });
     }
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
+
+    // 端口绑定成功后才拉起 LiveKit：配置/绑定失败不会留下孤儿进程。
+    // guard 在 main 返回（含提前 `?`）时统一回收子进程。
+    let _livekit = spawn_bundled_livekit();
+
     tracing::info!("listening on http://{}", listener.local_addr()?);
     // CORS 已由 `with_middleware` 统一配置（KAEDE_CORS_ORIGINS）。
     // 这里**不能**再叠加一层 allow_origin(Any)，否则响应会出现两条

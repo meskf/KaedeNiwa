@@ -7,7 +7,7 @@ use std::path::Path;
 
 #[derive(Clone)]
 pub struct Config {
-    /// 监听地址，例如 `0.0.0.0:8080`。
+    /// 监听地址，例如 `0.0.0.0:18080`。
     pub bind: String,
     /// SQLite 连接串。
     pub database_url: String,
@@ -21,7 +21,7 @@ pub struct Config {
     pub livekit_ws_url: String,
     /// 是否启用管理面板（默认关）。
     pub admin_enabled: bool,
-    /// 管理面板绑定地址（默认 127.0.0.1:3001，仅本机）。
+    /// 管理面板绑定地址（默认 127.0.0.1:18081，仅本机）。
     pub admin_bind: String,
     /// 管理面板 token（为空则 admin_enabled 时由 main 生成一次）。
     pub admin_token: String,
@@ -30,7 +30,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
-            bind: env::var("KAEDE_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
+            bind: env::var("KAEDE_BIND").unwrap_or_else(|_| "0.0.0.0:18080".into()),
             database_url: env::var("KAEDE_DB")
                 .unwrap_or_else(|_| "sqlite://kaede.db?mode=rwc".into()),
             session_ttl_hours: env::var("KAEDE_SESSION_TTL_HOURS")
@@ -40,11 +40,11 @@ impl Config {
             livekit_api_key: env::var("LIVEKIT_API_KEY").unwrap_or_default(),
             livekit_api_secret: env::var("LIVEKIT_API_SECRET").unwrap_or_default(),
             livekit_ws_url: env::var("LIVEKIT_WS_URL")
-                .unwrap_or_else(|_| "ws://localhost:7880".into()),
+                .unwrap_or_else(|_| "ws://localhost:18082".into()),
             admin_enabled: env::var("KAEDE_ADMIN_ENABLED")
                 .map(|s| s == "1" || s == "true")
                 .unwrap_or(false),
-            admin_bind: env::var("KAEDE_ADMIN_BIND").unwrap_or_else(|_| "127.0.0.1:3001".into()),
+            admin_bind: env::var("KAEDE_ADMIN_BIND").unwrap_or_else(|_| "127.0.0.1:18081".into()),
             admin_token: env::var("KAEDE_ADMIN_TOKEN").unwrap_or_default(),
         })
     }
@@ -141,14 +141,14 @@ mod tests {
 
     fn base() -> Config {
         Config {
-            bind: "127.0.0.1:8080".into(),
+            bind: "127.0.0.1:18080".into(),
             database_url: "sqlite::memory:".into(),
             session_ttl_hours: 168,
             livekit_api_key: "k".into(),
             livekit_api_secret: "s".into(),
-            livekit_ws_url: "ws://localhost:7880".into(),
+            livekit_ws_url: "ws://localhost:18082".into(),
             admin_enabled: false,
-            admin_bind: "127.0.0.1:3001".into(),
+            admin_bind: "127.0.0.1:18081".into(),
             admin_token: String::new(),
         }
     }
@@ -183,7 +183,7 @@ mod tests {
     fn public_admin_without_token_is_rejected() {
         let mut cfg = base();
         cfg.admin_enabled = true;
-        cfg.admin_bind = "0.0.0.0:3001".into();
+        cfg.admin_bind = "0.0.0.0:18081".into();
         cfg.admin_token.clear();
         assert!(cfg.validate().is_err());
     }
@@ -192,7 +192,7 @@ mod tests {
     fn public_admin_with_token_passes() {
         let mut cfg = base();
         cfg.admin_enabled = true;
-        cfg.admin_bind = "0.0.0.0:3001".into();
+        cfg.admin_bind = "0.0.0.0:18081".into();
         cfg.admin_token = "x".repeat(32);
         cfg.validate().expect("token-protected admin should pass");
     }

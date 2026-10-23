@@ -1,0 +1,26 @@
+[package]
+license.workspace = true
+name = "kaede-mobile"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "kaede-mobile"
+path = "src/main.rs"
+
+[features]
+# 默认：Dioxus 原生移动 UI（文字 / DM / 附件，不含桌面媒体栈）。
+default = []
+# 可选：内嵌网页版客户端的壳模式。网页版提供完整语音/屏幕共享观看。
+web-shell = ["dep:dioxus-desktop"]
+
+[dependencies]
+kaede-client = { workspace = true, features = ["native"] }
+kaede-ui = { workspace = true, default-features = false, features = ["mobile"] }
+dioxus = { workspace = true, features = ["mobile"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dioxus-desktop = { workspace = true, optional = true }

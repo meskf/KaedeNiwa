@@ -30,7 +30,7 @@ pub fn LoginView() -> Element {
 
     let mut username = use_signal(String::new);
     let mut password = use_signal(String::new);
-    let mut server_url = use_signal(|| "http://localhost:8080".to_string());
+    let mut server_url = use_signal(|| "http://localhost:18080".to_string());
     let mut error = use_signal(|| Option::<String>::None);
     let mut connecting = use_signal(|| false);
     // 登出回到登录页时清空密码输入，避免共享设备上残留凭据。
@@ -158,12 +158,20 @@ pub fn LoginView() -> Element {
                 return;
             }
         };
-        let _ = tx.try_send(LoginMsg::Connect {
-            http: endpoint.http_url,
-            ws: endpoint.ws_url,
-            user: u,
-            pass: p,
-        });
+        // 必须在入队前就置位：否则连点/回车会在 future 收到消息前重复入队，
+        // 串行建立两个 RoomSession（双 WS、双 event loop）。
+        connecting.set(true);
+        if tx
+            .try_send(LoginMsg::Connect {
+                http: endpoint.http_url,
+                ws: endpoint.ws_url,
+                user: u,
+                pass: p,
+            })
+            .is_err()
+        {
+            connecting.set(false);
+        }
     };
 
     let is_connecting = *connecting.read();

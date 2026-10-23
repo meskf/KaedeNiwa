@@ -172,4 +172,28 @@ pub enum ClientEvent {
         recoverable: bool,
         detail: String,
     },
+
+    /// 收到一条主群 Welcome，等待用户显式确认入群。
+    ///
+    /// **为什么需要确认**：服务器不再限制谁能发 Welcome（Signal 模型），
+    /// 客户端通过用户确认决定是否信任。这样任何成员都能拉人，攻击者
+    /// 伪造的 Welcome 会被用户拒绝。
+    ///
+    /// `is_rebuild == true` 表示当前已有一个主群，接受会**丢失旧群历史**
+    /// （旧 epoch 密钥不再保留）。UI 必须显式说明这一点。
+    PendingWelcome {
+        server_id: String,
+        from: UserId,
+        is_rebuild: bool,
+        /// 与 pending 列表配对的 stable id（= sender login_id），
+        /// 避免 UI 用 UserId 做 key 时多个 welcome 互相覆盖。
+        sender_login_id: String,
+    },
+
+    /// PendingWelcome 被用户接受或拒绝后触发，UI 应关闭对应对话框。
+    PendingWelcomeResolved {
+        server_id: String,
+        sender_login_id: String,
+        accepted: bool,
+    },
 }

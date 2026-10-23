@@ -35,7 +35,7 @@ pub mod room;
 pub mod state;
 pub mod transport;
 
-pub use connection::ServerConnection;
+pub use connection::{PendingWelcomeInfo, ServerConnection};
 pub use endpoint::{EndpointError, ServerEndpoint, parse_server_url};
 pub use error::ClientError;
 pub use event::ClientEvent;

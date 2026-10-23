@@ -16,6 +16,7 @@ pub fn MobileGroupsPage() -> Element {
     let app = use_context::<AppState>();
     let mut ui = use_context::<UiState>();
     let mut voice = use_context::<VoiceState>();
+    #[allow(unused_variables)]
     let controls = use_context::<VoiceControls>();
 
     let channels: Vec<kaede_protocol::Channel> = {
@@ -82,7 +83,10 @@ pub fn MobileGroupsPage() -> Element {
                                             }
                                         });
                                     }
-                                    #[cfg(not(target_arch = "wasm32"))]
+                                    #[cfg(all(
+                                        not(target_arch = "wasm32"),
+                                        feature = "desktop-media"
+                                    ))]
                                     {
                                         let mut ui_h = ui;
                                         let cid = ch_id2.clone();
@@ -97,6 +101,23 @@ pub fn MobileGroupsPage() -> Element {
                                                     .set(Some((format!("语音连接失败: {}", e), true)));
                                                 voice.active_channel.set(None);
                                             }
+                                        });
+                                    }
+                                    // 移动端原生构建不包含 GStreamer/LiveKit 原生栈：
+                                    // 语音与屏幕共享请使用网页版或 web-shell 构建。
+                                    #[cfg(all(
+                                        not(target_arch = "wasm32"),
+                                        not(feature = "desktop-media")
+                                    ))]
+                                    {
+                                        let mut ui_h = ui;
+                                        voice.active_channel.set(None);
+                                        spawn(async move {
+                                            ui_h.toast.set(Some((
+                                                "当前移动端构建不含语音/屏幕共享，请使用网页版或 web-shell"
+                                                    .into(),
+                                                true,
+                                            )));
                                         });
                                     }
                                     return;

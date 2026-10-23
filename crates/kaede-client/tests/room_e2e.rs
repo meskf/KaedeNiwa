@@ -55,6 +55,18 @@ impl Collector {
     }
 }
 
+/// Round 6（Signal 模型）：主群 Welcome **不再自动入群**，必须由用户确认
+/// （UI 里是确认弹窗）。端到端测试里没有 UI，这里直接接受所有 pending welcome。
+///
+/// 不这样做的话，guest 永远停在 "等确认" 状态，`member_count()` 恒为 0。
+fn accept_pending_welcomes(room: &RoomSession) {
+    let conn = room.connection();
+    for info in conn.pending_welcome_info() {
+        // 失败（例如同一 Welcome 已被处理）不影响测试流程，继续重试即可。
+        let _ = conn.accept_pending_welcome(&info.sender_login_id);
+    }
+}
+
 async fn setup_two_users() -> (RoomSession, RoomSession, Arc<Collector>, Arc<Collector>) {
     let addr = kaede_server::spawn_test_server().await.unwrap();
     let http = format!("http://{}", addr);
@@ -118,6 +130,7 @@ async fn full_mls_chat_flow() {
 
     // --- 等 Bob 收到 Welcome 并进入 MlsReady ---
     for _ in 0..60 {
+        accept_pending_welcomes(&bob);
         if bob.is_mls_ready() && bob.member_count() == 2 {
             break;
         }
@@ -192,6 +205,7 @@ async fn sframe_key_agrees_between_members() {
     alice.host_add_peer(&UserId::from("bob")).await.unwrap();
 
     for _ in 0..60 {
+        accept_pending_welcomes(&bob);
         if bob.is_mls_ready() && bob.member_count() == 2 {
             break;
         }
@@ -343,6 +357,7 @@ async fn attachment_roundtrip_with_integrity_hash() {
         .expect("alice add bob");
 
     for _ in 0..60 {
+        accept_pending_welcomes(&bob);
         if bob.is_mls_ready() && alice.member_count() == 2 && bob.member_count() == 2 {
             break;
         }
