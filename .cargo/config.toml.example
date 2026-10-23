@@ -1,0 +1,5 @@
+# KaedeNiwa 本地开发配置样例（拷到用户级 ~/.cargo/config.toml 或项目级 .cargo/config.local.toml）
+# 路径必须是**绝对路径**——webrtc-sys build.rs 不接受相对路径。
+# 首次 clone 后运行 pwsh scripts/setup-dev.ps1 可自动探测。
+[env]
+LK_CUSTOM_WEBRTC = "D:\\dev2\\kaedeniwa\\_webrtc"
