@@ -1,0 +1,48 @@
+﻿[package]
+license.workspace = true
+name = "kaede-ui"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Desktop（Wry）默认带原生语音/屏幕共享（GStreamer + LiveKit Rust SDK）。
+default = ["desktop-media"]
+desktop-media = ["dep:kaede-media", "dep:kaede-capture", "dep:kaede-media-session"]
+# 移动端：不编译桌面媒体栈；语音/屏幕共享走 web-shell 或网页版。
+mobile = []
+
+[dependencies]
+kaede-client   = { workspace = true }
+kaede-protocol = { workspace = true }
+dioxus         = { workspace = true }
+dioxus-i18n-json = "0.0.5"
+tracing        = { workspace = true }
+async-channel  = "2"
+zeroize        = { workspace = true }
+chrono         = "0.4"
+base64         = "0.22"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dioxus = { workspace = true, features = ["desktop"] }
+tokio = { workspace = true }
+kaede-media   = { path = "../kaede-media", version = "0.0.2", optional = true }
+kaede-capture = { path = "../kaede-capture", version = "0.0.2", optional = true }
+kaede-media-session = { path = "../kaede-media-session", version = "0.0.2", optional = true }
+kaede-crypto  = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = [
+    "Window", "Storage", "Document",
+    "Blob", "ImageBitmap", "HtmlCanvasElement", "CanvasRenderingContext2d",
+    # D1: 拖拽 / 粘贴桥接
+    "Element", "HtmlElement", "Event", "EventTarget",
+    "DragEvent", "DataTransfer", "File", "FileList", "DomTokenList",
+    "DataTransferItem", "DataTransferItemList",
+    "ClipboardEvent",
+] }
+kaede-livekit-web = { workspace = true }
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+gloo-timers = { version = "0.3", features = ["futures"] }
