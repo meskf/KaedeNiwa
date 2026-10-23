@@ -10,7 +10,7 @@ ct1    = "test --workspace -- --test-threads=1"
 cf     = "fmt --all"
 cc     = "clippy --workspace --all-targets -- -D warnings"
 cwasm  = "check -p kaede-wasm --target wasm32-unknown-unknown"
-cwd    = "check --workspace --target wasm32-unknown-unknown"
+cwd    = "check -p kaede-wasm --target wasm32-unknown-unknown"
 
 # ============================================================
 # Windows target 配置

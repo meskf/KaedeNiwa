@@ -1,4 +1,4 @@
-﻿/target/
+/target/
 **/target/
 /dist/
 **/dist/
@@ -90,3 +90,9 @@ crates/*/data/
 deploy/.env
 backups/
 *.db.sha256
+
+# ---- 修复过程 / 临时产物（永久本地保留，不入库）----
+_scratch/
+
+# ---- PWA 打包产物（本地保留）----
+kaede-web-public.zip

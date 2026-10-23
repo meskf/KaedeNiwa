@@ -1,26 +1,28 @@
-# cargo-deny 配置（0.20 语法）。
-# P0-2：0.20 把 unmaintained / unsound 从 "warn"|"deny" 改为 scope 枚举。
-# P0-2：[licenses] allow = [] 会拒绝所有有 license 的 crate（Rust 生态 99% 是 MIT/Apache）。
-
 [advisories]
 yanked = "warn"
-unmaintained = "warn"
-unsound = "warn"
+unmaintained = "all"
+unsound = "all"
+unused-ignored-advisory = "warn"
 ignore = [
-    # zip 0.6.6：webrtc-sys-build 的 build-only 依赖，输入是 GitHub 官方 release，
-    # 3 条 advisory 都需要解压 attacker-controlled ZIP 才能触发，本项目不成立。
-    { id = "RUSTSEC-2026-0367", reason = "zip build-only (webrtc-sys-build), trusted input" },
-    { id = "RUSTSEC-2026-0368", reason = "zip build-only (webrtc-sys-build), trusted input" },
-    { id = "RUSTSEC-2026-0369", reason = "zip build-only (webrtc-sys-build), trusted input" },
+    # build-time proc-macro only（不进入运行时二进制）
+    { id = "RUSTSEC-2026-0173", reason = "hax-lib-macros via hpke-rs; build-time only" },
+    { id = "RUSTSEC-2024-0436", reason = "paste via image->exr->pulp; build-time only" },
+    { id = "RUSTSEC-2026-0097", reason = "rand 0.7 via phf_codegen; build-time only" },
+    { id = "RUSTSEC-2026-0367", reason = "zip 0.6.6 via webrtc-sys-build; input is LiveKit release" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 0.6.6 via webrtc-sys-build; input is LiveKit release" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 0.6.6 via webrtc-sys-build; input is LiveKit release" },
+    # Linux desktop GTK 栈 only（Windows/macOS/Web 二进制不含）
+    { id = "RUSTSEC-2024-0429", reason = "glib 0.18 via gtk-rs 0.18; Linux desktop only" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error via glib-macros; Linux desktop build-time" },
+    # atty via nnnoiseless->clap3（Windows 仅自定义 allocator 时触发）
+    { id = "RUSTSEC-2021-0145", reason = "atty via nnnoiseless->clap3; system HeapAlloc unaffected" },
+    { id = "RUSTSEC-2024-0375", reason = "atty unmaintained via nnnoiseless->clap3" },
+    # wry -> kuchikiki
+    { id = "RUSTSEC-2025-0057", reason = "fxhash via wry->kuchikiki; build-time hashmap" },
 ]
 
 [licenses]
-allow = [
-    "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0",
-    "Zlib", "MPL-2.0", "CC0-1.0", "Unlicense", "BSL-1.0",
-    "NCSA", "CDLA-Permissive-2.0",
-]
+allow = ["MIT","Apache-2.0","Apache-2.0 WITH LLVM-exception","BSD-2-Clause","BSD-3-Clause","ISC","Unicode-3.0","Zlib","MPL-2.0","CC0-1.0","Unlicense","BSL-1.0","NCSA","CDLA-Permissive-2.0"]
 confidence-threshold = 0.8
 
 [bans]
