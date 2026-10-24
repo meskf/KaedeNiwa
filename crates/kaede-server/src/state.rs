@@ -1102,6 +1102,7 @@ mod tests {
         let msg = ServerMessage::MlsCommit {
             from: sender.clone(),
             epoch: 1,
+            channel_id: None, // 主群
             payload: b"test".to_vec(),
         };
 
@@ -1161,6 +1162,7 @@ mod tests {
         let msg = ServerMessage::MlsCommit {
             from: sender.clone(),
             epoch: 1,
+            channel_id: None, // 主群
             payload: b"important".to_vec(),
         };
 
@@ -1207,6 +1209,7 @@ mod tests {
         let msg = ServerMessage::MlsCommit {
             from: sender.clone(),
             epoch: 1,
+            channel_id: None, // 主群
             payload: b"fast".to_vec(),
         };
 

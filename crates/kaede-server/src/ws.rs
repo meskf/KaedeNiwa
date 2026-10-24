@@ -903,6 +903,7 @@ async fn handle_message(
         ClientMessage::ChannelCommit {
             channel_id,
             exclude,
+            epoch,
             payload,
         } => {
             let from = ensure_joined(state, my_uid, my_session_id)?;
@@ -941,6 +942,27 @@ async fn handle_message(
             let mut framed = Vec::with_capacity(1 + payload.len());
             framed.push(0x05u8);
             framed.extend_from_slice(&payload);
+
+            // P0-2：落库以便断线成员补发。epoch = 0 时跳过（老客户端/测试未提供）。
+            if epoch > 0 {
+                let stored = sqlx::query(
+                    "INSERT OR IGNORE INTO mls_commits (channel_id, epoch, from_uid, payload, created_at) \
+                     VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(&channel_id)
+                .bind(epoch as i64)
+                .bind(from.as_str())
+                .bind(&framed)
+                .bind(crate::db::now_ms())
+                .execute(&state.pool)
+                .await;
+                if let Err(e) = stored {
+                    tracing::warn!(
+                        "store channel commit for {} epoch {} failed: {}",
+                        channel_id, epoch, e
+                    );
+                }
+            }
 
             // 【时序修复】广播给所有 online peers，不限于 channel_members。
             // 原因：target 的 HTTP join_channel 可能还没落库，
@@ -1174,19 +1196,18 @@ async fn handle_message(
                     ServerMessage::MlsCommit {
                         from: from.clone(),
                         epoch,
+                        channel_id: None, // 主群 Commit（频道走 ChannelSync 0x05 通道）
                         payload: payload.clone(),
                     },
                 )
                 .await;
         }
 
-        ClientMessage::ReportEpoch { epoch } => {
+        ClientMessage::ReportEpoch { epoch, channel_id: report_channel } => {
             let uid = ensure_joined(state, my_uid, my_session_id)?;
             if epoch > u32::MAX as u64 {
                 return Ok(());
             }
-            // 该请求会读 DB 并把最多 256 条 Commit 写回自己的出站队列，
-            // 必须限流，否则可被反复触发做内存/DB 放大。
             if !state.check_rate_scoped(&uid, "report_epoch", 1.0, 5.0) {
                 state.metrics.rate_limited();
                 let _ = tx.try_send(ServerMessage::Error {
@@ -1195,17 +1216,27 @@ async fn handle_message(
                 });
                 return Ok(());
             }
-            let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
-                "SELECT epoch, from_uid, payload FROM mls_commits \
-                 WHERE epoch > ? ORDER BY epoch ASC LIMIT 256",
-            )
-            .bind(epoch as i64)
-            .fetch_all(&state.pool)
-            .await?;
+            let rows: Vec<(i64, String, Vec<u8>)> = if let Some(ch) = report_channel.as_deref() {
+                sqlx::query_as(
+                    "SELECT epoch, from_uid, payload FROM mls_commits \
+                     WHERE channel_id = ? AND epoch > ? ORDER BY epoch ASC LIMIT 64",
+                )
+                .bind(ch)
+                .bind(epoch as i64)
+                .fetch_all(&state.pool)
+                .await?
+            } else {
+                sqlx::query_as(
+                    "SELECT epoch, from_uid, payload FROM mls_commits \
+                     WHERE channel_id = '' AND epoch > ? ORDER BY epoch ASC LIMIT 256",
+                )
+                .bind(epoch as i64)
+                .fetch_all(&state.pool)
+                .await?
+            };
 
             let mut budget = MAX_REPORT_EPOCH_BYTES;
             for (commit_epoch, from_uid, payload) in rows {
-                // 超出本次预算就停：客户端可稍后再次 ReportEpoch 续拉。
                 if payload.len() > budget {
                     break;
                 }
@@ -1214,6 +1245,7 @@ async fn handle_message(
                     .try_send(ServerMessage::MlsCommit {
                         from: UserId::new(from_uid),
                         epoch: commit_epoch as u64,
+                        channel_id: report_channel.clone(),
                         payload,
                     })
                     .is_err()

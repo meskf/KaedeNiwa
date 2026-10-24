@@ -337,6 +337,7 @@ async fn mls_commit_failure_emits_sync_error() {
     conn.handle_server_message(ServerMessage::MlsCommit {
         from: UserId::new("bob"),
         epoch: 1,
+        channel_id: None,
         payload: vec![0xFF, 0xFF, 0xFF, 0xFF],
     })
     .await

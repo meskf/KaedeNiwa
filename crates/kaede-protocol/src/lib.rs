@@ -219,6 +219,10 @@ pub enum ClientMessage {
         /// 其 Welcome 已经包含该 Commit 的效果，重复处理会报 WrongEpoch）。
         #[serde(default)]
         exclude: Option<UserId>,
+        /// 该 Commit 应用后的 epoch。authority 已知本地状态，服务端据此落库以便补发。
+        /// 0 = 未提供（老客户端/测试），服务端跳过落库但仍广播。
+        #[serde(default)]
+        epoch: u64,
         #[serde(with = "serde_bytes")]
         #[ts(type = "number[]")]
         payload: Vec<u8>,
@@ -262,6 +266,9 @@ pub enum ClientMessage {
     /// 服务器据此补投 `epoch > 上报值` 的最近 Commit（离线期间错过的）。
     ReportEpoch {
         epoch: u64,
+        /// Some(channel_id) = 频道 backfill；None = 主群。
+        #[serde(default)]
+        channel_id: Option<String>,
     },
 
     /// 广播 Proposal。
@@ -553,6 +560,9 @@ pub enum ServerMessage {
         from: UserId,
         #[serde(default)]
         epoch: u64,
+        /// Some(channel_id) = 频道 Commit 补发；None = 主群。
+        #[serde(default)]
+        channel_id: Option<String>,
         #[serde(with = "serde_bytes")]
         #[ts(type = "number[]")]
         payload: Vec<u8>,
@@ -800,6 +810,7 @@ mod tests {
         round_trip_client(ClientMessage::ChannelCommit {
             channel_id: "ch_abc".into(),
             exclude: Some(UserId::new("bob")),
+            epoch: 1,
             payload: vec![0x05, 1, 2, 3],
         });
     }

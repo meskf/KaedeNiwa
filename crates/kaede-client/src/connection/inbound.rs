@@ -131,11 +131,42 @@ impl ServerConnection {
             ServerMessage::MlsCommit {
                 from,
                 epoch,
+                channel_id,
                 payload,
             } => {
-                // 按 epoch 排序/缓冲：并发管理员提交时，落败者需要回滚
-                // 本地 Commit 并跟随服务端胜出者，否则群永久分叉。
-                self.handle_main_commit(&from, epoch, payload).await;
+                if let Some(ch) = channel_id {
+                    // 频道 Commit 补发：payload 可能带 0x05 前缀（补发时保留与实时广播一致），
+                    // 先剥离再交给 MLS。
+                    let commit_bytes: &[u8] = if payload.first() == Some(&0x05) {
+                        &payload[1..]
+                    } else {
+                        &payload[..]
+                    };
+                    match self.channel_process_commit(&ch, commit_bytes).await {
+                        Ok(_) => {
+                            tracing::info!(
+                                "[client:{}] channel commit backfill for {} epoch {} ok",
+                                self.server_id, ch, epoch
+                            );
+                            if let Some(ep) = self.channel_epoch(&ch) {
+                                self.emit(ClientEvent::ChannelEpochChanged {
+                                    server_id: self.server_id.clone(),
+                                    channel_id: ch,
+                                    epoch: ep,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "[client:{}] channel commit backfill for {} epoch {} failed: {}",
+                                self.server_id, ch, epoch, e
+                            );
+                        }
+                    }
+                } else {
+                    // 主群 Commit 走原有缓冲/回滚逻辑。
+                    self.handle_main_commit(&from, epoch, payload).await;
+                }
             }
             ServerMessage::MlsProposal { from: _, payload } => {
                 // C-2: 锁内处理、锁外 emit（避免 emit 阻塞锁）
@@ -341,6 +372,7 @@ impl ServerConnection {
                                 .send(ClientMessage::ChannelCommit {
                                     channel_id: channel_id.clone(),
                                     exclude: Some(requester.clone()),
+                                    epoch: self.channel_epoch(&channel_id).unwrap_or(0),
                                     payload: commit,
                                 })
                                 .await
@@ -446,8 +478,6 @@ impl ServerConnection {
                                     self.server_id,
                                     channel_id
                                 );
-                                // 块 B：私密频道 epoch 变化 → 若正在该频道语音，
-                                // observer 会触发媒体会话重连。
                                 if let Some(epoch) = self.channel_epoch(&channel_id) {
                                     self.emit(ClientEvent::ChannelEpochChanged {
                                         server_id: self.server_id.clone(),
@@ -457,17 +487,22 @@ impl ServerConnection {
                                 }
                             }
                             Err(e) => {
+                                // P0-2：epoch 不连续 / 提前到达 → 主动向服务端请求补发。
+                                // process_handshake 失败不会 mutate group（MLS 保证），
+                                // 所以可以安全地重新走 MlsCommit 补发路径。
+                                let current = self.channel_epoch(&channel_id).unwrap_or(0);
                                 tracing::warn!(
-                                    "[client:{}] process_commit failed for {}: {}",
-                                    self.server_id,
-                                    channel_id,
-                                    e
+                                    "[client:{}] channel commit failed for {} at local epoch {}: {}; requesting backfill",
+                                    self.server_id, channel_id, current, e
                                 );
+                                let _ = self
+                                    .report_channel_epoch(channel_id.clone(), current)
+                                    .await;
                                 self.emit(ClientEvent::MlsSyncError {
                                     server_id: self.server_id.clone(),
                                     user_message: format!(
-                                        "私密频道 {channel_id} 的群成员校验失败，本地频道密钥已丢弃；\
-                                         请重新加入该频道"
+                                        "私密频道 {channel_id} 的 Commit 应用失败（可能落后），\
+                                         已自动请求补发；若仍失败请重新加入该频道"
                                     ),
                                     recoverable: true,
                                     detail: e.to_string(),
@@ -500,6 +535,7 @@ impl ServerConnection {
                             .send(ClientMessage::ChannelCommit {
                                 channel_id: channel_id.clone(),
                                 exclude: None,
+                                epoch: self.channel_epoch(&channel_id).unwrap_or(0),
                                 payload: commit,
                             })
                             .await

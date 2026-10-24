@@ -624,10 +624,27 @@ impl ServerConnection {
             .await
     }
 
-    /// 上报自己当前的主群 epoch，让服务器补投离线期间错过的 Commit。
+    /// 上报主群 epoch，服务器补投离线期间错过的 Commit。
     pub async fn report_epoch(&self, epoch: u64) -> Result<(), ClientError> {
         self.transport
-            .send(ClientMessage::ReportEpoch { epoch })
+            .send(ClientMessage::ReportEpoch {
+                epoch,
+                channel_id: None,
+            })
+            .await
+    }
+
+    /// 上报频道 epoch，服务器从 mls_commits 补投该频道 epoch > 上报值的 Commit。
+    pub async fn report_channel_epoch(
+        &self,
+        channel_id: String,
+        epoch: u64,
+    ) -> Result<(), ClientError> {
+        self.transport
+            .send(ClientMessage::ReportEpoch {
+                epoch,
+                channel_id: Some(channel_id),
+            })
             .await
     }
 

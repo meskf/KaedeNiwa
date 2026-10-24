@@ -426,12 +426,14 @@ impl ServerConnection {
             "[send_channel_commit] ch={} exclude={:?} commit_len={}",
             channel_id, exclude, commit.len()
         ).into());
-        // 注意：0x05 前缀由**服务端**在 ws.rs 的 ChannelCommit 处理器里统一加。
-        // 客户端只传裸 MLS Commit，不能再加一层（否则接收端拿到 [0x05, 0x05, ...]）。
+        // 0x05 前缀由**服务端**统一加，客户端只传裸 MLS Commit。
+        // P0-2：带上本地 epoch，服务端落库以便断线成员补发。
+        let epoch = self.channel_epoch(channel_id).unwrap_or(0);
         self.transport
             .send(ClientMessage::ChannelCommit {
                 channel_id: channel_id.to_string(),
                 exclude,
+                epoch,
                 payload: commit,
             })
             .await
