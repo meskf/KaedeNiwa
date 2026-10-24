@@ -844,7 +844,17 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
                     }
                     continue;
                 }
-                Err(ClientError::Closed) => "网络连接已关闭".to_string(),
+                // P0-1: Closed 不视为断网（可能是主动替换/主动关闭），
+                // 只 log 不 emit Disconnected，避免 JS 层重连触发无限循环。
+                // 真正的断网错误（Timeout/Transport/Connection）才 emit。
+                Err(ClientError::Closed) => {
+                    tracing::info!(
+                        "[client:{}] event loop closed (transport dropped)",
+                        self.server_id
+                    );
+                    self.flush_dirty_snapshots().await;
+                    return;
+                }
                 Err(e) => format!("网络传输错误: {}", e),
             };
             tracing::info!("[client:{}] 事件循环结束: {}", self.server_id, reason);
