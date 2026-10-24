@@ -523,6 +523,7 @@ async fn deliver_pending(state: &AppState, uid: &UserId, tx: &mpsc::Sender<Serve
             }
             _ => ServerMessage::ChannelSync {
                 channel_id: channel_id.unwrap_or_default(),
+                epoch: None,
                 payload,
             },
         };
@@ -783,6 +784,7 @@ async fn handle_message(
                 // 直推：如果 target 已经建立 WS 连接，先推一波（不校验 member）
                 let msg = ServerMessage::ChannelSync {
                     channel_id: channel_id.clone(),
+                    epoch: None,
                     payload: framed_payload,
                 };
                 let direct_ok = state.send_to(&to, msg);
@@ -798,6 +800,7 @@ async fn handle_message(
                 &to,
                 ServerMessage::ChannelSync {
                     channel_id: channel_id.clone(),
+                    epoch: None,
                     payload: payload.clone(),
                 },
             ) {
@@ -990,6 +993,7 @@ async fn handle_message(
                 }
                 let msg = ServerMessage::ChannelSync {
                     channel_id: channel_id.clone(),
+                    epoch: Some(epoch),
                     payload: framed.clone(),
                 };
                 if !state.send_to(&peer_uid, msg) {

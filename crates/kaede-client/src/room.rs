@@ -626,6 +626,8 @@ impl RoomSession {
         self.conn.join().await?;
         if self.conn.mls_is_ready() {
             self.conn.report_epoch(self.conn.mls_epoch()).await?;
+        // P0-2：对所有本地已有 group 的频道也主动请求 backfill（重连后追平频道 epoch）。
+        self.conn.backfill_all_channel_epochs().await;
             // 每个 KeyPackage 只能被消费一次，队列会随使用自然耗尽。
             // 每次登录/重连检查一次，低于水位时补货，避免“再也没人能邀请我”。
             if let Err(e) = self.replenish_key_packages_if_low().await {

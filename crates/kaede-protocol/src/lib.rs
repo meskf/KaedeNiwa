@@ -449,6 +449,10 @@ pub enum ServerMessage {
     /// B2：已加入的成员收到 group 同步包（Welcome / Commit），用于更新本地 channel group。
     ChannelSync {
         channel_id: String,
+        /// Commit 应用后的 epoch（仅 0x05 有意义）。
+        /// 客户端据此检测 gap 并请求补发；None = 兼容老服务端/enqueue 路径。
+        #[serde(default)]
+        epoch: Option<u64>,
         /// 首字节 0x04 = Welcome, 0x05 = Commit
         #[serde(with = "serde_bytes")]
         #[ts(type = "number[]")]

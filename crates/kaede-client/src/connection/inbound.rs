@@ -151,9 +151,40 @@ impl ServerConnection {
                             if let Some(ep) = self.channel_epoch(&ch) {
                                 self.emit(ClientEvent::ChannelEpochChanged {
                                     server_id: self.server_id.clone(),
-                                    channel_id: ch,
+                                    channel_id: ch.clone(),
                                     epoch: ep,
                                 });
+                            }
+                            // P0-2：drain 已缓冲的连续 Commit。
+                            loop {
+                                let next = self.channel_epoch(&ch).unwrap_or(0) + 1;
+                                let Some(pending) = self.take_pending_channel_commit(&ch, next)
+                                else {
+                                    break;
+                                };
+                                if let Err(e) = self
+                                    .channel_process_commit(&ch, &pending)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "[client:{}] drain buffered channel commit epoch {} failed: {}",
+                                        self.server_id, next, e
+                                    );
+                                    break;
+                                }
+                                if let Some(ep) = self.channel_epoch(&ch) {
+                                    self.emit(ClientEvent::ChannelEpochChanged {
+                                        server_id: self.server_id.clone(),
+                                        channel_id: ch.clone(),
+                                        epoch: ep,
+                                    });
+                                }
+                            }
+                            if self.has_pending_channel_commits(&ch) {
+                                let current = self.channel_epoch(&ch).unwrap_or(0);
+                                let _ = self
+                                    .report_channel_epoch(ch.clone(), current)
+                                    .await;
                             }
                         }
                         Err(e) => {
@@ -408,6 +439,7 @@ impl ServerConnection {
 
             ServerMessage::ChannelSync {
                 channel_id,
+                epoch,
                 payload,
             } => {
                 if payload.is_empty() {
@@ -429,6 +461,8 @@ impl ServerConnection {
                                     self.server_id,
                                     channel_id
                                 );
+                                // P0-2：旧 group 的 buffered Commit 已无意义。
+                                self.clear_pending_channel_commits(&channel_id);
                                 let sender = self
                                     .channel_pending_welcomes
                                     .lock()
@@ -471,6 +505,41 @@ impl ServerConnection {
                     }
                     0x05 => {
                         let commit = &payload[1..];
+                        let local = self.channel_epoch(&channel_id).unwrap_or(0);
+                        // P0-2：先用服务端携带的 epoch 元数据做 gap 检测。
+                        match epoch {
+                            Some(server_epoch) if server_epoch > local + 1 => {
+                                // 缺口：buffer 起来，请求补发。process 留给 backfill 路径处理。
+                                if self.buffer_channel_commit(
+                                    &channel_id,
+                                    server_epoch,
+                                    commit.to_vec(),
+                                ) {
+                                    tracing::info!(
+                                        "[client:{}] channel commit gap: local {}, got {}; buffered + request backfill",
+                                        self.server_id, local, server_epoch
+                                    );
+                                    let _ = self
+                                        .report_channel_epoch(channel_id.clone(), local)
+                                        .await;
+                                } else {
+                                    tracing::warn!(
+                                        "[client:{}] channel commit gap buffer full for {} (local {}, got {})",
+                                        self.server_id, channel_id, local, server_epoch
+                                    );
+                                }
+                                return Ok(());
+                            }
+                            Some(server_epoch) if server_epoch <= local => {
+                                // 重复投递或本地已推进到此 epoch，跳过。
+                                tracing::debug!(
+                                    "[client:{}] channel commit epoch {} <= local {}; skip",
+                                    self.server_id, server_epoch, local
+                                );
+                                return Ok(());
+                            }
+                            _ => {} // epoch == local + 1 或 None：直接 process
+                        }
                         match self.channel_process_commit(&channel_id, commit).await {
                             Ok(_) => {
                                 tracing::info!(
@@ -485,11 +554,48 @@ impl ServerConnection {
                                         epoch,
                                     });
                                 }
+                                // P0-2：drain 已缓冲的连续 Commit。
+                                loop {
+                                    let next = self.channel_epoch(&channel_id).unwrap_or(0) + 1;
+                                    let Some(pending) = self.take_pending_channel_commit(
+                                        &channel_id,
+                                        next,
+                                    ) else {
+                                        break;
+                                    };
+                                    if let Err(e) = self
+                                        .channel_process_commit(&channel_id, &pending)
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            "[client:{}] buffered channel commit epoch {} apply failed: {}",
+                                            self.server_id, next, e
+                                        );
+                                        // 应用失败的 Commit 不能再放回（避免死循环）；请求补发。
+                                        let current = self.channel_epoch(&channel_id).unwrap_or(0);
+                                        let _ = self
+                                            .report_channel_epoch(channel_id.clone(), current)
+                                            .await;
+                                        break;
+                                    }
+                                    if let Some(epoch) = self.channel_epoch(&channel_id) {
+                                        self.emit(ClientEvent::ChannelEpochChanged {
+                                            server_id: self.server_id.clone(),
+                                            channel_id: channel_id.clone(),
+                                            epoch,
+                                        });
+                                    }
+                                }
+                                if self.has_pending_channel_commits(&channel_id) {
+                                    let current = self.channel_epoch(&channel_id).unwrap_or(0);
+                                    let _ = self
+                                        .report_channel_epoch(channel_id.clone(), current)
+                                        .await;
+                                }
                             }
                             Err(e) => {
-                                // P0-2：epoch 不连续 / 提前到达 → 主动向服务端请求补发。
-                                // process_handshake 失败不会 mutate group（MLS 保证），
-                                // 所以可以安全地重新走 MlsCommit 补发路径。
+                                // 无法直接应用（可能是 epoch 乱序但服务端未携带 epoch，
+                                // 或 MLS 校验失败）→ 请求 backfill。
                                 let current = self.channel_epoch(&channel_id).unwrap_or(0);
                                 tracing::warn!(
                                     "[client:{}] channel commit failed for {} at local epoch {}: {}; requesting backfill",

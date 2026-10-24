@@ -383,6 +383,8 @@ impl ServerConnection {
             .unwrap_or_else(|e| e.into_inner())
             .insert(channel_id.to_string(), probe);
         self.mark_channel_dirty(channel_id);
+        // P0-2：新 group 已建立，任何旧 epoch 的 buffered Commit 都无意义。
+        self.clear_pending_channel_commits(channel_id);
         #[cfg(target_arch = "wasm32")]
         web_sys::console::log_1(&format!(
             "[channel_join_via_welcome] GROUP INSERTED ch={} epoch={}",
@@ -514,6 +516,8 @@ impl ServerConnection {
     /// 恢复回内存，重新加入时会误判“已有 group”而不走 Welcome，
     /// 导致本地 epoch 永久停留在旧值。
     pub async fn channel_drop_group(&self, channel_id: &str) {
+        // P0-2：group 已丢弃，任何 buffered Commit 都无意义。
+        self.clear_pending_channel_commits(channel_id);
         self.channel_groups
             .lock()
             .unwrap_or_else(|e| e.into_inner())

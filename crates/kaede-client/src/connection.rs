@@ -125,6 +125,9 @@ pub struct ServerConnection {
     commit_backup: Mutex<Option<CommitBackup>>,
     /// epoch 缺失时暂存的 Commit：epoch → payload。上限 32 条。
     pending_commits: Mutex<std::collections::BTreeMap<u64, Vec<u8>>>,
+    /// P0-2：频道 Commit 的 epoch gap 缓冲。channel_id → (epoch → framed payload)。
+    /// 每频道上限 32 条，与主群 pending_commits 一致。
+    channel_pending_commits: Mutex<std::collections::HashMap<String, std::collections::BTreeMap<u64, Vec<u8>>>>,
     /// 上次 `ReportEpoch` 的 (local_epoch, 时间)。
     ///
     /// 防止服务端返回一份无法应用的陈旧 Commit 时，客户端反复重拉同一份
@@ -227,6 +230,7 @@ impl ServerConnection {
             private_channels: Mutex::new(HashSet::new()),
             commit_backup: Mutex::new(None),
             pending_commits: Mutex::new(std::collections::BTreeMap::new()),
+            channel_pending_commits: Mutex::new(std::collections::HashMap::new()),
             last_epoch_report: Mutex::new(None),
             http: Mutex::new(None),
             pending_main_welcomes: Mutex::new(std::collections::HashMap::new()),
@@ -349,6 +353,83 @@ impl ServerConnection {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_empty()
+    }
+
+    /// P0-2：缓冲频道乱序 Commit。返回 false 表示缓冲满且无法淘汰（拒绝）。
+    fn buffer_channel_commit(&self, channel_id: &str, epoch: u64, payload: Vec<u8>) -> bool {
+        const MAX_PER_CHANNEL: usize = 32;
+        let mut buf = self
+            .channel_pending_commits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = buf.entry(channel_id.to_string()).or_default();
+        if entry.contains_key(&epoch) {
+            return true;
+        }
+        if entry.len() >= MAX_PER_CHANNEL {
+            if let Some(oldest) = entry.keys().next().copied() {
+                if oldest < epoch {
+                    entry.remove(&oldest);
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        entry.insert(epoch, payload);
+        true
+    }
+
+    /// P0-2：取出指定 epoch 的 buffered Commit。
+    fn take_pending_channel_commit(&self, channel_id: &str, epoch: u64) -> Option<Vec<u8>> {
+        let mut buf = self
+            .channel_pending_commits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = buf.get_mut(channel_id)?;
+        let r = entry.remove(&epoch);
+        if entry.is_empty() {
+            buf.remove(channel_id);
+        }
+        r
+    }
+
+    /// P0-2：是否还有未消费的频道 Commit。
+    fn has_pending_channel_commits(&self, channel_id: &str) -> bool {
+        self.channel_pending_commits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(channel_id)
+            .map(|m| !m.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// P0-2：清空某频道所有 buffered Commit（重新入群 / drop group 时调用）。
+    pub fn clear_pending_channel_commits(&self, channel_id: &str) {
+        self.channel_pending_commits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(channel_id);
+    }
+
+    /// P0-2：对所有本地有 group 的频道主动请求 epoch backfill（重连时调用）。
+    ///
+    /// 场景：本地从 IndexedDB 恢复了 channel group 的 epoch，但断网期间
+    /// 错过了若干 Commit。恢复 WS 后主动上报每个频道的本地 epoch，服务端
+    /// 从 mls_commits 补投缺口。
+    pub async fn backfill_all_channel_epochs(&self) {
+        let channels: Vec<String> = self
+            .channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        for ch in channels {
+            let epoch = self.channel_epoch(&ch).unwrap_or(0);
+            let _ = self.report_channel_epoch(ch, epoch).await;
+        }
     }
 
     /// 请求服务端补投 epoch > `current` 的 Commit。
