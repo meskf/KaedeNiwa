@@ -269,6 +269,7 @@ async fn authenticated_join_and_app_message_broadcast() {
     send(
         &mut a_ws,
         ClientMessage::MlsAppMessage {
+            channel_id: "general".into(),
             payload: payload.clone(),
         },
     )
@@ -280,7 +281,7 @@ async fn authenticated_join_and_app_message_broadcast() {
     })
     .await
     {
-        ServerMessage::MlsAppMessage { from, payload: got } => {
+        ServerMessage::MlsAppMessage { from, payload: got, .. } => {
             assert_eq!(from, UserId::new("alice"));
             assert_eq!(got, payload);
         }
@@ -575,6 +576,7 @@ async fn p0d_mls_app_message_without_join_dropped() {
     send(
         &mut a_ws,
         ClientMessage::MlsAppMessage {
+            channel_id: "general".into(),
             payload: b"should-be-dropped".to_vec(),
         },
     )
@@ -609,6 +611,7 @@ async fn p0d_mls_app_message_without_join_dropped() {
     send(
         &mut a_ws,
         ClientMessage::MlsAppMessage {
+            channel_id: "general".into(),
             payload: b"after-join".to_vec(),
         },
     )
@@ -619,7 +622,7 @@ async fn p0d_mls_app_message_without_join_dropped() {
     })
     .await
     {
-        ServerMessage::MlsAppMessage { from, payload } => {
+        ServerMessage::MlsAppMessage { from, payload, .. } => {
             assert_eq!(from, UserId::new("p0d-attacker"));
             assert_eq!(payload, b"after-join");
         }

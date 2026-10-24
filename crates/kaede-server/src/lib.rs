@@ -22,7 +22,6 @@ pub mod sessions_api;
 pub mod state;
 pub mod ws;
 
-#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
@@ -31,8 +30,57 @@ use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderValue, Method};
 use tower_http::cors::CorsLayer;
 
-#[cfg(test)]
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 起一个 in-process 测试服务器。返回监听的地址。
+///
+/// 用临时文件 SQLite（`sqlite::memory:` 在 sqlx pool 里 per-connection
+/// 独立，会跟连接池语义冲突）。
+pub async fn spawn_test_server() -> std::io::Result<std::net::SocketAddr> {
+    let pid = std::process::id();
+    let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+    let db_path = std::env::temp_dir().join(format!("kaede_test_{}_{}.db", pid, id));
+    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+
+    let cfg = config::Config {
+        bind: "127.0.0.1:0".into(),
+        database_url: db_url,
+        session_ttl_hours: 1,
+        livekit_api_key: "testkey".into(),
+        livekit_api_secret: "testsecret".into(),
+        livekit_ws_url: "ws://localhost:18082".into(),
+        admin_enabled: false,
+        admin_bind: "127.0.0.1:18081".into(),
+        admin_token: String::new(),
+    };
+    let pool = db::init(&cfg.database_url).await.expect("db init");
+    ensure_default_channels(&pool).await;
+    let state = state::AppState::new(pool, cfg);
+    let app = with_middleware(
+        http::router(state.clone())
+            .merge(attachments::router(state.clone()))
+            .merge(friends::router(state.clone()))
+            .merge(dm::router(state.clone()))
+            .merge(livekit::router(state.clone()))
+            .merge(channels::router(state.clone()))
+            .merge(members::router(state.clone()))
+            .merge(reads::router(state.clone()))
+            .merge(sessions_api::router(state.clone()))
+            .merge(ws::router(state)),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+    Ok(addr)
+}
+
 
 /// 给最终 Router 加上全局中间件：CORS + 请求体上限。
 ///

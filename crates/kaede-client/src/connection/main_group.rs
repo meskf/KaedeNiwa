@@ -186,9 +186,9 @@ impl ServerConnection {
     /// 生产发送路径必须走 [`Self::mls_encrypt_app`] + 落盘 +
     /// [`Self::mls_send_ciphertext`]。
     #[cfg(test)]
-    pub async fn mls_send_app(&self, plaintext: &[u8]) -> Result<Vec<u8>, ClientError> {
+    pub async fn mls_send_app(&self, channel_id: &str, plaintext: &[u8]) -> Result<Vec<u8>, ClientError> {
         let ciphertext = self.mls_encrypt_app(plaintext)?;
-        self.mls_send_ciphertext(ciphertext.clone()).await?;
+        self.mls_send_ciphertext(channel_id.to_string(), ciphertext.clone()).await?;
         Ok(ciphertext)
     }
 

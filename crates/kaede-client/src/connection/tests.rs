@@ -147,12 +147,12 @@ async fn mls_send_app_goes_through_transport() {
     conn.mls_init("alice").unwrap();
     conn.mls_create_group().unwrap();
 
-    let _ct = conn.mls_send_app(b"hello").await.unwrap();
+    let _ct = conn.mls_send_app("general", b"hello").await.unwrap();
 
     // 服务器端应收到一条 MlsAppMessage
     let got = server_t.recv().await.unwrap();
     match got {
-        ClientMessage::MlsAppMessage { payload } => {
+        ClientMessage::MlsAppMessage { payload, .. } => {
             assert!(!payload.is_empty(), "ciphertext should not be empty");
         }
         other => panic!("expected MlsAppMessage, got {:?}", other),
@@ -210,6 +210,7 @@ async fn mls_receive_app_message_decrypts() {
     // 未初始化 MLS，直接送一条 AppMessage
     conn.handle_server_message(ServerMessage::MlsAppMessage {
         from: UserId::new("bob"),
+        channel_id: "general".into(),
         payload: ct.clone(),
     })
     .await
@@ -413,6 +414,7 @@ async fn main_group_message_targeting_private_channel_is_dropped() {
 
     conn.handle_server_message(ServerMessage::MlsAppMessage {
         from: UserId::new("bob"),
+        channel_id: "general".into(),
         payload: ct,
     })
     .await
