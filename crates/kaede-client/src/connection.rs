@@ -110,6 +110,8 @@ pub struct ServerConnection {
     /// 与主群的 [`RoomSession::snapshot_broken`] 语义一致，但覆盖 DM / 频道路径
     /// （这些 snapshot 由 [`ServerConnection::flush_dirty_snapshots`] 负责写盘）。
     snapshot_broken: AtomicBool,
+    /// P0-1: run_event_loop 退出时置 true，heartbeat_loop 检查后停止（防旧 heartbeat 二次 emit Disconnected）
+    shutdown: AtomicBool,
     /// 当前用户是否是主群 host（op5）。由 RoomSession 注入。
     is_host: AtomicBool,
     /// DM / 私密频道 v2 密文的 in-memory 重放窗口。
@@ -226,6 +228,7 @@ impl ServerConnection {
             identity_restored: AtomicBool::new(false),
             snapshot_write: futures_util::lock::Mutex::new(()),
             snapshot_broken: AtomicBool::new(false),
+            shutdown: AtomicBool::new(false),
             is_host: AtomicBool::new(false),
             dm_replay: Mutex::new(ReplayGuard::default()),
             channel_replay: Mutex::new(ReplayGuard::default()),
@@ -853,6 +856,7 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
                         self.server_id
                     );
                     self.flush_dirty_snapshots().await;
+                    self.shutdown.store(true, std::sync::atomic::Ordering::Release);
                     return;
                 }
                 Err(e) => format!("网络传输错误: {}", e),
@@ -864,6 +868,7 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
             });
             // 退出前补一次落盘
             self.flush_dirty_snapshots().await;
+            self.shutdown.store(true, std::sync::atomic::Ordering::Release);
             break;
         }
     }

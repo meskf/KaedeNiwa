@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
-import { getClient } from '../wasm/client'
+import { getClient, scheduleReconnect } from '../wasm/client'
 import { connectMedia, disconnectMedia } from '../lib/livekit'
 import { useMediaState } from '../hooks/useLiveKitRoom'
 import { MediaBar } from './MediaBar'
@@ -88,6 +88,13 @@ export function MainView() {
         let ev = rawEv
         if (typeof rawEv === 'string') {
           try { ev = JSON.parse(rawEv) } catch (e) { return }
+        }
+
+        // P0-1: 断线重连
+        if (ev.Disconnected) {
+          console.log('[MainView] Disconnected: ' + (ev.Disconnected.reason || 'unknown'))
+          scheduleReconnect()
+          return
         }
 
         // 调试事件

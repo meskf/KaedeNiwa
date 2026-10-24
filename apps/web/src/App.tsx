@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAuthStore } from './stores/auth'
-import { initWasm, getClient } from './wasm/client'
+import { initWasm, getClient, recordLoginArgs, stopReconnect, allowReconnect } from './wasm/client'
 import { LoginView } from './components/LoginView'
 import { MainView } from './components/MainView'
 
@@ -22,9 +22,12 @@ export default function App() {
             const client = getClient()
             if (!client) throw new Error('WASM 未初始化')
             await client.login(serverUrl, wsUrl, loginId, token)
+            recordLoginArgs({ serverUrl, wsUrl, loginId, token })
+            allowReconnect()
             console.log('✅ 自动重连成功')
           } catch (e) {
             console.error('自动重连失败，需要重新登录:', e)
+            stopReconnect()
             useAuthStore.getState().logout()
           }
         }
