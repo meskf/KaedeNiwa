@@ -241,7 +241,9 @@ async fn connect_and_load(
     observer: Arc<dyn kaede_client::ClientObserver>,
 ) -> Result<LoadedData, String> {
     #[cfg(target_arch = "wasm32")]
-    let _ = kaede_client::keystore_web::init_web_keystore().await;
+    kaede_client::keystore_web::init_web_keystore()
+        .await
+        .map_err(|e| format!("浏览器端密钥库初始化失败，无法安全保存 MLS 身份: {e}"))?;
 
     let server_id = format!("{}::{}", http, ws);
 

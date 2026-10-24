@@ -16,6 +16,7 @@ use crate::error::MediaError;
 pub struct AudioPlayer {
     pipeline: gst::Pipeline,
     appsrc: AppSrc,
+    volume: gst::Element,
     #[allow(dead_code)]
     sample_rate: u32,
     #[allow(dead_code)]
@@ -49,12 +50,16 @@ impl AudioPlayer {
         let resample = gst::ElementFactory::make("audioresample")
             .build()
             .map_err(|e| MediaError::Capture(format!("audioresample: {:?}", e)))?;
+        let volume = gst::ElementFactory::make("volume")
+            .build()
+            .map_err(|e| MediaError::Capture(format!("volume: {:?}", e)))?;
         let sink = gst::ElementFactory::make("autoaudiosink")
             .build()
             .map_err(|e| MediaError::Capture(format!("autoaudiosink: {:?}", e)))?;
 
         let pipeline = gst::Pipeline::new();
-        let elements: [&gst::Element; 4] = [appsrc.upcast_ref(), &convert, &resample, &sink];
+        let elements: [&gst::Element; 5] =
+            [appsrc.upcast_ref(), &convert, &resample, &volume, &sink];
         pipeline
             .add_many(elements)
             .map_err(|e| MediaError::Capture(format!("add_many: {:?}", e)))?;
@@ -68,6 +73,7 @@ impl AudioPlayer {
         Ok(Self {
             pipeline,
             appsrc,
+            volume,
             sample_rate,
             channels,
             frames_pushed: AtomicU64::new(0),
@@ -102,6 +108,11 @@ impl AudioPlayer {
     #[allow(dead_code)]
     pub fn frames_pushed(&self) -> u64 {
         self.frames_pushed.load(Ordering::Relaxed)
+    }
+
+    /// 静音/恢复远端音频输出（不影响采集与传输）。
+    pub fn set_muted(&self, muted: bool) {
+        self.volume.set_property("mute", muted);
     }
 
     pub fn stop(&self) {

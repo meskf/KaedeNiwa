@@ -40,6 +40,12 @@ icon!(IconVolume2,
     path { d: "M19.07 4.93a10 10 0 0 1 0 14.14" }
 );
 
+icon!(IconMusic,
+    path { d: "M9 18V5l12-2v13" }
+    circle { cx: "6", cy: "18", r: "3" }
+    circle { cx: "18", cy: "16", r: "3" }
+);
+
 icon!(IconMic,
     path { d: "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" }
     path { d: "M19 10v2a7 7 0 0 1-14 0v-2" }

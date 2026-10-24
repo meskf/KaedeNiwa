@@ -650,12 +650,15 @@ impl MediaSession {
         };
 
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+        let sid_for_log = track.sid.clone();
         let handle = tokio::spawn(async move {
             let RemoteTrack::Video(video) = &*remote else {
                 tracing::warn!("[media-session] attach_video: not a video track");
                 return;
             };
             let mut stream = NativeVideoStream::new(video.rtc_track());
+            let attach_started = tokio::time::Instant::now();
+            let mut first_frame = true;
             loop {
                 tokio::select! {
                     _ = &mut stop_rx => break,
@@ -666,6 +669,16 @@ impl MediaSession {
                                 let w = buf.width();
                                 let h = buf.height();
                                 if w == 0 || h == 0 { continue; }
+                                if first_frame {
+                                    first_frame = false;
+                                    tracing::info!(
+                                        "[media-session] first remote video frame {} ({}x{}) after {:?}",
+                                        sid_for_log,
+                                        w,
+                                        h,
+                                        attach_started.elapsed()
+                                    );
+                                }
                                 let i420 = buf.to_i420();
                                 let (y, u, v) = i420.data();
                                 let mut packed =

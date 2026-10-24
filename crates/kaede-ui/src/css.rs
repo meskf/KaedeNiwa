@@ -18,8 +18,11 @@ pub fn global() -> String {
 }
 
 const MOBILE_CSS: &str = r#"
+/* 桌面顶栏包装：桌面端不生成额外盒子，移动端整体隐藏 */
+.desktop-titlebar { display: contents; }
 /* ===== 移动端（<768px） ===== */
 @media (max-width: 767px) {
+  .desktop-titlebar { display: none !important; }
   /* 触控目标最小 44px */
   button, a, [role="button"] { min-height: 44px; min-width: 44px; }
   /* 安全区 */

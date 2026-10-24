@@ -361,12 +361,42 @@ pub mod keyring_store {
     }
 }
 
+/// Web 端“拒绝写盘”cipher。
+///
+/// WebCrypto DEK 不可用时必须暂停落盘/发送，不能退回到由公开信息派生的
+/// key（那会让任何能读 IndexedDB 的人解密快照）。
+#[cfg(all(not(windows), target_arch = "wasm32"))]
+struct UnavailableCipher {
+    message: String,
+}
+
+#[cfg(all(not(windows), target_arch = "wasm32"))]
+impl SnapshotCipher for UnavailableCipher {
+    fn alg_id(&self) -> u8 {
+        kaede_mls::ALG_AES_GCM
+    }
+
+    fn encrypt(&self, _: &[u8]) -> Result<Vec<u8>, kaede_mls::MlsError> {
+        Err(kaede_mls::MlsError::OpenMls(format!(
+            "snapshot persistence unavailable: {}",
+            self.message
+        )))
+    }
+
+    fn decrypt(&self, _: &[u8]) -> Result<Vec<u8>, kaede_mls::MlsError> {
+        Err(kaede_mls::MlsError::OpenMls(format!(
+            "snapshot decryption unavailable: {}",
+            self.message
+        )))
+    }
+}
+
 /// 返回当前平台的 snapshot cipher。
 ///
 /// - Windows → DPAPI
 /// - macOS / Linux Desktop → 系统钥匙串里的随机 key
 /// - Web 且 WebCrypto DEK 已就绪 → WebCrypto DEK（与读取端一致）
-/// - Web 无 DEK → SHA256 派生 AES-GCM（fallback）
+/// - Web 无 DEK → **拒绝写盘**（不再退回公开信息派生 key）
 pub fn device_cipher(uid: &str, server_url: &str) -> Box<dyn SnapshotCipher> {
     #[cfg(windows)]
     {
@@ -375,10 +405,13 @@ pub fn device_cipher(uid: &str, server_url: &str) -> Box<dyn SnapshotCipher> {
     }
     #[cfg(all(not(windows), target_arch = "wasm32"))]
     {
-        if let Some(dek) = crate::keystore_web::cached_dek() {
-            return Box::new(kaede_mls::AesGcmCipher::from_bytes(dek));
+        let _ = (uid, server_url);
+        match crate::keystore_web::cached_dek() {
+            Some(dek) => Box::new(kaede_mls::AesGcmCipher::from_bytes(dek)),
+            None => Box::new(UnavailableCipher {
+                message: "WebCrypto DEK not initialized".into(),
+            }),
         }
-        Box::new(fallback::cipher(uid, server_url))
     }
     // 移动端：当前没有可用的系统 Keystore 绑定。使用与 Web 相同的
     // 公开信息派生 key；snapshot 位于 App 私有沙箱内。威胁模型与 Web 一致

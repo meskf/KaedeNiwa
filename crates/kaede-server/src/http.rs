@@ -381,6 +381,9 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Me
 struct PublishKpReq {
     /// base64(URL-safe, no pad) 的 KeyPackage 列表。
     packages: Vec<String>,
+    /// 身份重建后首次上传时置 true：先清空该账号的旧 KP 队列。
+    #[serde(default)]
+    replace: bool,
 }
 
 async fn publish_keypackages(
@@ -404,6 +407,14 @@ async fn publish_keypackages(
     }
 
     let now = db::now_ms();
+    // 身份重建：旧 KP 属于已销毁的本地身份，先整体清空，避免 host 取到
+    // stale KP 后 Welcome/DM 报 NoMatchingKeyPackage。
+    if req.replace {
+        sqlx::query("DELETE FROM key_packages WHERE login_id = ?")
+            .bind(uid.as_str())
+            .execute(&state.pool)
+            .await?;
+    }
     for pkg in &req.packages {
         let bytes = base64_decode(pkg)?;
         if bytes.len() > 8192 {
@@ -656,16 +667,47 @@ fn trusted_proxies() -> &'static [ipnet::IpNet] {
     static TRUSTED: std::sync::OnceLock<Vec<ipnet::IpNet>> = std::sync::OnceLock::new();
     TRUSTED.get_or_init(|| {
         let raw = std::env::var("KAEDE_TRUSTED_PROXIES").unwrap_or_default();
-        let mut nets: Vec<ipnet::IpNet> = raw
-            .split(',')
-            .filter_map(|s| s.trim().parse::<ipnet::IpNet>().ok())
-            .collect();
+        let mut nets: Vec<ipnet::IpNet> = Vec::new();
+        for part in raw.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            match part.parse::<ipnet::IpNet>() {
+                Ok(net) => nets.push(net),
+                // 启动期 Config::validate 已经 fail-fast；这里只是防御性兜底。
+                Err(e) => tracing::error!(
+                    "ignoring invalid KAEDE_TRUSTED_PROXIES entry {:?}: {}",
+                    part,
+                    e
+                ),
+            }
+        }
         if nets.is_empty() {
             nets.push("127.0.0.0/8".parse().expect("static loopback cidr"));
             nets.push("::1/128".parse().expect("static loopback cidr"));
         }
         nets
     })
+}
+
+/// 启动期校验 `KAEDE_TRUSTED_PROXIES`。
+///
+/// 任一条目非法都必须 fail-fast：静默丢弃会让所有用户被归并成同一个
+/// 代理 IP（登录失败计数/注册限流全站共享），也会让伪造 XFF 的同网段
+/// 攻击者获得信任。返回合法条目数（空串 → 0，表示只用 loopback 默认值）。
+pub(crate) fn validate_trusted_proxies(raw: &str) -> Result<usize, String> {
+    let mut count = 0;
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        part.parse::<ipnet::IpNet>()
+            .map_err(|e| format!("invalid KAEDE_TRUSTED_PROXIES entry {:?}: {}", part, e))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn is_trusted_proxy(ip: std::net::IpAddr) -> bool {
@@ -945,6 +987,13 @@ async fn get_messages(
 ) -> Result<Json<MessagesResp>, ApiError> {
     let uid = authenticate(&state, &headers).await?;
 
+    // 历史读取限流：单次响应已按字节封顶，仍需防止并发请求反复分配大缓冲。
+    if !state.check_rate_scoped(&uid, "history_read", 2.0, 10.0) {
+        state.metrics.rate_limited();
+        return Err(ApiError::TooManyRequests(
+            "history read rate limited".into(),
+        ));
+    }
     // 频道必须存在（防信息泄露：区分"频道不存在"和"无权限"）
     let row: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
         .bind(&channel_id)
@@ -972,20 +1021,29 @@ async fn get_messages(
     // 那是旧版本 bug 造成的，所有主群成员都能解；虽然服务端无法重新加密，
     // 至少不再继续下发。
     let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
-        "SELECT ts, sender, ciphertext FROM messages \
-         WHERE channel_id = ? AND ts < ? \
-           AND (? = 0 OR substr(ciphertext, 1, 1) = X'03') \
-         ORDER BY ts DESC LIMIT ?",
+        "WITH recent AS ( \
+           SELECT ts, sender, ciphertext, \
+                  SUM(LENGTH(ciphertext)) OVER (ORDER BY ts DESC) AS run_bytes \
+           FROM ( \
+             SELECT ts, sender, ciphertext FROM messages \
+             WHERE channel_id = ? AND ts < ? \
+               AND (? = 0 OR substr(ciphertext, 1, 1) = X'03') \
+             ORDER BY ts DESC LIMIT ? \
+           ) \
+         ) \
+         SELECT ts, sender, ciphertext FROM recent \
+         WHERE run_bytes <= ? ORDER BY ts ASC",
     )
     .bind(&channel_id)
     .bind(before)
     .bind(is_private_raw)
     .bind(limit)
+    .bind(crate::db::MAX_HISTORY_RESPONSE_BYTES)
     .fetch_all(&state.pool)
     .await?;
 
-    // 反序成时间升序
-    let mut out: Vec<MessageRecord> = rows
+    // SQL 已按时间升序返回
+    let out: Vec<MessageRecord> = rows
         .into_iter()
         .map(|(ts, sender, ct)| MessageRecord {
             ts,
@@ -993,7 +1051,6 @@ async fn get_messages(
             ciphertext: base64_url(&ct),
         })
         .collect();
-    out.reverse();
 
     Ok(Json(MessagesResp { messages: out }))
 }

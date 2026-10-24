@@ -6,7 +6,9 @@ use crate::i18n::use_i18n;
 use dioxus::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 
-use crate::icons::{IconHash, IconLock, IconMic, IconMonitor, IconPlus, IconVolume2, IconX};
+use crate::icons::{
+    IconHash, IconLock, IconMic, IconMonitor, IconMusic, IconPlus, IconVolume2, IconX,
+};
 use crate::state::{
     AppState, MainTab, UiState, VoiceChannel, VoiceControls, VoiceMember, VoiceState,
 };
@@ -260,6 +262,7 @@ fn ChannelRow(channel: kaede_protocol::Channel, display: String) -> Element {
     });
 
     let ch_id_click = ch_id.clone();
+    let ch_id_single = ch_id.clone();
     let ch_id_menu = ch_id.clone();
     let ch_name_click = display.clone();
     let (unread_count, mention_count) = {
@@ -276,6 +279,12 @@ fn ChannelRow(channel: kaede_protocol::Channel, display: String) -> Element {
     rsx! {
         button {
             class: if is_selected() { "channel-row selected" } else { "channel-row" },
+            onclick: move |_| {
+                // 文字频道单击即进入；语音频道仍用双击连接，避免误触开麦。
+                if !is_voice {
+                    ui.selected_channel.set(Some(ch_id_single.clone()));
+                }
+            },
             ondoubleclick: move |_| {
                 if is_voice {
                     // 已在某个语音频道里：忽略（先离开再进新的）
@@ -1064,6 +1073,7 @@ fn VoicePanel() -> Element {
     let mic = *controls.mic_on.read();
     let spk = *controls.speaker_on.read();
     let scr = *controls.screen_on.read();
+    let sys_audio = *controls.system_audio_on.read();
     let profile_label = voice.current_profile.read().label();
 
     // 主群 epoch 变化 → 媒体 E2EE key 已变，自动重建媒体会话。
@@ -1078,6 +1088,7 @@ fn VoicePanel() -> Element {
         {
             let h = voice.handle.write().take();
             let consumers = std::mem::take(&mut *voice.media_consumers.write());
+            voice.audio_players.write().clear();
             let mut ui2 = ui;
             spawn(async move {
                 for (_, c) in consumers {
@@ -1181,7 +1192,7 @@ fn VoicePanel() -> Element {
                                         .inner()
                                         .publish(kaede_media_session::PublishSource::Mic {
                                             sample_rate: 48_000,
-                                            channels: 2,
+                                            channels: 1,
                                             denoise: true,
                                         })
                                         .await;
@@ -1220,7 +1231,37 @@ fn VoicePanel() -> Element {
                     },
                     IconMic { size: 15 }
                 }
-                button { class: if spk { "vp-btn vp-on" } else { "vp-btn vp-off" }, title: "{i18n.t(\"voice.speaker\")}", onclick: move |_| { let v = *controls.speaker_on.read(); controls.speaker_on.set(!v); }, IconVolume2 { size: 15 } }
+                button {
+                    class: if spk { "vp-btn vp-on" } else { "vp-btn vp-off" },
+                    title: "{i18n.t(\"voice.speaker\")}",
+                    onclick: move |_| {
+                        let new_val = !*controls.speaker_on.read();
+                        #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
+                        {
+                            for (_, player) in voice.audio_players.read().iter() {
+                                player.set_muted(!new_val);
+                            }
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            let mut controls_h = controls;
+                            let mut ui_h = ui;
+                            spawn(async move {
+                                if let Err(e) = crate::voice_web::set_speaker(new_val).await {
+                                    tracing::warn!("[voice-web] speaker: {}", e);
+                                    ui_h.toast.set(Some((format!("扬声器: {}", e), true)));
+                                    return;
+                                }
+                                controls_h.speaker_on.set(new_val);
+                            });
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            controls.speaker_on.set(new_val);
+                        }
+                    },
+                    IconVolume2 { size: 15 }
+                }
                 button {
                     class: if scr { "vp-btn vp-on" } else { "vp-btn vp-off" },
                     title: "{i18n.t(\"voice.screen\")}",
@@ -1312,6 +1353,69 @@ fn VoicePanel() -> Element {
                     },
                     IconMonitor { size: 15 }
                 }
+                button {
+                    class: if sys_audio { "vp-btn vp-on" } else { "vp-btn vp-off" },
+                    title: "共享系统声音",
+                    onclick: move |_| {
+                        #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
+                        {
+                            let new_val = !*controls.system_audio_on.read();
+                            let h = voice.handle.read().clone();
+                            let mut ui2 = ui;
+                            spawn(async move {
+                                let Some(handle) = h else {
+                                    ui2.toast.set(Some(("未连接媒体会话".into(), true)));
+                                    return;
+                                };
+                                if new_val {
+                                    match handle
+                                        .inner()
+                                        .publish(kaede_media_session::PublishSource::System {
+                                            sample_rate: 48_000,
+                                            channels: 2,
+                                        })
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            controls.system_audio_on.set(true);
+                                            tracing::info!("system audio share started");
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("system audio publish: {}", e);
+                                            ui2.toast.set(Some((
+                                                format!("系统声音共享失败: {}", e),
+                                                true,
+                                            )));
+                                        }
+                                    }
+                                } else {
+                                    match handle
+                                        .inner()
+                                        .unpublish(kaede_media_session::TrackKind::ScreenAudio)
+                                        .await
+                                    {
+                                        Ok(()) => controls.system_audio_on.set(false),
+                                        Err(e) => {
+                                            tracing::warn!("system audio unpublish: {}", e);
+                                            ui2.toast.set(Some((
+                                                format!("停止系统声音失败: {}", e),
+                                                true,
+                                            )));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        #[cfg(any(target_arch = "wasm32", not(feature = "desktop-media")))]
+                        {
+                            ui.toast.set(Some((
+                                "网页端不支持单独开关系统声音；共享屏幕时会在浏览器选择框中请求音频".into(),
+                                false,
+                            )));
+                        }
+                    },
+                    IconMusic { size: 15 }
+                }
                 div { style: "flex:1;" }
                 button {
                     class: "vp-btn",
@@ -1334,6 +1438,7 @@ fn VoicePanel() -> Element {
                             // H25: 先清空本地状态，再执行异步断开，避免 UI 残留
                             let h = voice.handle.write().take();
                             let consumers = std::mem::take(&mut *voice.media_consumers.write());
+                            voice.audio_players.write().clear();
                             let room = app.room.read().clone();
                             spawn(async move {
                                 for (_, c) in consumers {
@@ -1360,6 +1465,8 @@ fn VoicePanel() -> Element {
                             });
                         }
                         voice.active_channel.set(None);
+                        controls.screen_on.set(false);
+                        controls.system_audio_on.set(false);
                     },
                     IconX { size: 16 }
                 }
@@ -1470,6 +1577,11 @@ pub(crate) async fn connect_voice(
         .await
         .map_err(|e| format!("connect: {}", e))?;
 
+    // 新一轮媒体会话：上一轮的共享/播放器状态全部失效。
+    controls.screen_on.set(false);
+    controls.system_audio_on.set(false);
+    voice.audio_players.write().clear();
+
     tracing::info!(
         "[voice] connected to {} (uid={})",
         handle.room_name(),
@@ -1493,11 +1605,19 @@ pub(crate) async fn connect_voice(
                 }) => match AudioPlayer::new(48_000, 2) {
                     Ok(player) => {
                         let player = Arc::new(player);
-                        match handle_for_loop.inner().attach_audio(track.clone(), player) {
+                        // 扬声器已关闭时，新加入的远端音频也保持静音。
+                        if !*controls.speaker_on.read() {
+                            player.set_muted(true);
+                        }
+                        match handle_for_loop
+                            .inner()
+                            .attach_audio(track.clone(), player.clone())
+                        {
                             Ok(h) => {
                                 tracing::info!("[voice] audio attached");
                                 // C16: 将 handle 存入全局状态，防止泄漏，并支持主动清理
-                                voice.media_consumers.write().push((track, h));
+                                voice.media_consumers.write().push((track.clone(), h));
+                                voice.audio_players.write().push((track, player));
                             }
                             Err(e) => tracing::warn!("[voice] attach_audio: {}", e),
                         }
@@ -1536,6 +1656,15 @@ pub(crate) async fn connect_voice(
                         spawn(async move {
                             h.stop().await;
                         });
+                    }
+                    // 同步移除音频播放器，避免扬声器开关继续操作已断开的 track。
+                    let audio_pos = {
+                        let players = voice.audio_players.read();
+                        players.iter().position(|(id, _)| *id == track)
+                    };
+                    if let Some(pos) = audio_pos {
+                        let (_, player) = voice.audio_players.write().remove(pos);
+                        player.stop();
                     }
                 }
                 Ok(MediaEvent::PeerJoined { uid }) => {

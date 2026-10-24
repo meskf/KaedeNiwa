@@ -172,6 +172,22 @@ async fn update_member(
         if target_rank > my_rank || (!is_self && target_rank >= my_rank) {
             return Err(ApiError::Unauthorized);
         }
+        // 唯一性：同一时刻只允许一个 op5（房主）。
+        // 与 admin 接口保持一致；两个 op5 会各自持有主群 group state，
+        // 后续 Welcome 指向不同 group_id，导致成员永久分裂。
+        if new_op_str == "op5" {
+            let existing: Option<(String,)> =
+                sqlx::query_as("SELECT login_id FROM members WHERE op = 'op5' AND login_id != ?")
+                    .bind(&target)
+                    .fetch_optional(&state.pool)
+                    .await?;
+            if let Some((existing,)) = existing {
+                return Err(ApiError::Conflict(format!(
+                    "another op5 exists ({}); demote it first",
+                    existing
+                )));
+            }
+        }
     }
 
     // op 只能 op4+ 改

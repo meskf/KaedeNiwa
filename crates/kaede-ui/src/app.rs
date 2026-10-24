@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use std::sync::Arc;
 
-use crate::content::EmojiPicker;
+use crate::content::{EmojiPicker, MsgContextMenu};
 use crate::css;
 use crate::i18n::I18n;
 use crate::login::LoginView;
@@ -24,6 +24,31 @@ use crate::video_picker::VideoProfilePicker;
 
 #[derive(Clone)]
 pub struct ObserverRef(pub Arc<UiObserver>);
+
+/// 根据当前窗口宽度更新布局模式（wasm 专用）。
+#[cfg(target_arch = "wasm32")]
+fn apply_window_layout(mut ui: UiState) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(inner) = window.inner_width() else {
+        return;
+    };
+    let Some(width) = inner.as_f64() else {
+        return;
+    };
+    let new_mode = if width < 768.0 {
+        LayoutMode::Mobile
+    } else if width < 1200.0 {
+        LayoutMode::Tablet
+    } else {
+        LayoutMode::Desktop
+    };
+    if *ui.layout_mode.peek() != new_mode {
+        tracing::info!("[layout] width={} -> {:?}", width, new_mode);
+        ui.layout_mode.set(new_mode);
+    }
+}
 
 #[component]
 pub fn App() -> Element {
@@ -56,25 +81,21 @@ pub fn App() -> Element {
     let view = *ui.view.read();
     let layout = *ui.layout_mode.read();
 
-    // wasm 下根据窗口宽度自动切换 LayoutMode（M1 简化：只在挂载时检测一次）
+    // wasm 下根据窗口宽度自动切换 LayoutMode。
+    // 用原生 resize 事件而不是轮询：平板旋转/窗口缩放必须立即重新布局。
     #[cfg(target_arch = "wasm32")]
     {
-        use_effect(move || {
-            if let Some(w) = web_sys::window()
-                && let Ok(inner) = w.inner_width()
-                && let Some(w) = inner.as_f64()
-            {
-                let new_mode = if w < 768.0 {
-                    LayoutMode::Mobile
-                } else if w < 1200.0 {
-                    LayoutMode::Tablet
-                } else {
-                    LayoutMode::Desktop
-                };
-                if new_mode != layout {
-                    ui.layout_mode.set(new_mode);
-                }
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::closure::Closure;
+
+        apply_window_layout(ui);
+        use_hook(move || {
+            let cb = Closure::<dyn FnMut()>::new(move || apply_window_layout(ui));
+            if let Some(window) = web_sys::window() {
+                let _ = window.set_onresize(Some(cb.as_ref().unchecked_ref()));
             }
+            // 回调需要活到页面关闭；App 是根组件，泄漏一份可接受。
+            cb.forget();
         });
     }
     let css_text = use_memo(css::global);
@@ -83,6 +104,7 @@ pub fn App() -> Element {
         style { dangerous_inner_html: "{css_text}" }
         div {
             "data-theme": mode.as_attr(),
+            "data-layout": format!("{:?}", layout),
             style: "
                 height: 100%; width: 100%;
                 display: flex; flex-direction: column;
@@ -90,7 +112,9 @@ pub fn App() -> Element {
                 background: var(--outer-bg);
                 color: var(--fg);
             ",
-            TitleBar {}
+            // 移动端由 MobileShell 提供自己的顶栏。这里始终挂载 TitleBar，
+            // 由 CSS 媒体查询在窄屏隐藏，避免依赖信号 diff 更新子树。
+            div { class: "desktop-titlebar", TitleBar {} }
             div {
                 style: if view == View::Login { "flex: 1; min-height: 0; display: flex; flex-direction: column;" } else { "display: none;" },
                 LoginView {}
@@ -110,6 +134,7 @@ pub fn App() -> Element {
             ChannelMembersModal {}
             SearchModal {}
             EmojiPicker {}
+            MsgContextMenu {}
             UploadProgressBar {}
             ToastContainer {}
             SettingsModal {}

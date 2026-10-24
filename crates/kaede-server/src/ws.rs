@@ -3,9 +3,10 @@
 use axum::{
     Router,
     extract::{
-        State,
+        ConnectInfo, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::HeaderMap,
     response::IntoResponse,
     routing::get,
 };
@@ -123,7 +124,24 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // 单 IP 并发连接上限：覆盖未完成认证的握手阶段，防止单一来源
+    // 用大量空连接占满全局 permit。
+    let ip = crate::http::client_ip(&headers, peer);
+    let Some(ip_guard) = state.try_acquire_ws_ip(ip) else {
+        state.metrics.ws_rejected();
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::TOO_MANY_REQUESTS)
+            .body(axum::body::Body::from(
+                "too many connections from this address",
+            ))
+            .unwrap();
+    };
     // P1-10：总连接数限制。
     let permit = match state.ws_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
@@ -141,6 +159,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
         .on_upgrade(move |socket| async move {
             handle_socket(socket, state).await;
             drop(permit);
+            drop(ip_guard);
         })
 }
 
@@ -168,9 +187,9 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
         std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // ---- 握手 ----
-    let first = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next())
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
         .await
-        .map_err(|_| anyhow::anyhow!("hello timeout (10s)"))?
+        .map_err(|_| anyhow::anyhow!("hello timeout (5s)"))?
         .ok_or_else(|| anyhow::anyhow!("client closed before hello"))??;
     let bytes = extract_bytes(first)?;
     let hello = ClientMessage::decode(&bytes)?;
@@ -1069,7 +1088,8 @@ async fn handle_message(
             if epoch > 0 {
                 // 同一 epoch 只保留第一份 Commit：后到的同 epoch commit
                 // 属于并发分支，覆盖会让已跟随前一份的客户端更混乱。
-                if let Err(e) = sqlx::query(
+                // **不广播落败者**——落败的发送者会收到胜出者的广播并回滚本地分支。
+                let stored = match sqlx::query(
                     "INSERT OR IGNORE INTO mls_commits (epoch, from_uid, payload, created_at) \
                      VALUES (?, ?, ?, ?)",
                 )
@@ -1080,7 +1100,24 @@ async fn handle_message(
                 .execute(&state.pool)
                 .await
                 {
-                    tracing::warn!("store mls commit failed: {}", e);
+                    Ok(r) => r.rows_affected() > 0,
+                    Err(e) => {
+                        // 落库失败时不能广播：否则在线成员前进了，离线成员永远追不上。
+                        tracing::warn!("store mls commit failed: {}", e);
+                        let _ = tx.try_send(ServerMessage::Error {
+                            code: ErrorCode::InternalError,
+                            message: "failed to persist MLS commit".into(),
+                        });
+                        return Ok(());
+                    }
+                };
+                if !stored {
+                    tracing::info!(
+                        "[mls] epoch {} already has a winning commit; dropping duplicate from {}",
+                        epoch,
+                        from
+                    );
+                    return Ok(());
                 }
                 // 只保留最近 256 条 Commit。
                 // 不能按 MAX(epoch) 保留——epoch 受客户端控制，一个超大值
@@ -1244,6 +1281,97 @@ async fn handle_message(
             state.broadcast_all(ServerMessage::PresenceUpdated { presence: snapshot });
         }
 
+        ClientMessage::Typing { channel_id } => {
+            let from = ensure_joined(state, my_uid, my_session_id)?;
+            // typing 是纯元数据（不落盘、不补投）：每 2 秒 1 条、突发 2 条足够跟手。
+            // 超限静默丢——typing 丢了无所谓，发 Error 反而会刷屏打扰正常输入。
+            if !state.check_rate_scoped(&from, "typing", 0.5, 2.0) {
+                return Ok(());
+            }
+
+            // DM 会话：只发对端。解析失败/非会话成员一律静默丢，
+            // 不向客户端回 Error（否则等于泄露"会话是否存在/你是否是成员"）。
+            if channel_id.starts_with("dm:") {
+                let Some((a, b)) = crate::dm::parse_conv_id(&channel_id) else {
+                    return Ok(());
+                };
+                if !crate::dm::is_member(&channel_id, from.as_str()) {
+                    return Ok(());
+                }
+                let peer = if a == from.as_str() { b } else { a };
+                // 离线即丢，不暂存——typing 没有补投价值。
+                state.send_to(
+                    &UserId::new(peer),
+                    ServerMessage::Typing {
+                        channel_id,
+                        uid: from,
+                    },
+                );
+                return Ok(());
+            }
+
+            let meta: Option<(i64,)> =
+                sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+                    .bind(&channel_id)
+                    .fetch_optional(&state.pool)
+                    .await?;
+            let Some((is_private,)) = meta else {
+                // 不存在的频道：静默丢（同上，不泄露频道存在性）。
+                return Ok(());
+            };
+
+            if is_private == 0 {
+                // 公开频道：全房间广播（除发送者）。
+                // Typing 只有几十字节，但仍计入房间广播预算——否则大量账号
+                // 可以把 0.5 条/s 的扇出放大成 O(在线人数²) 的带宽。
+                let msg_len = 64 + channel_id.len() + from.as_str().len();
+                let recipients = state.peer_count().saturating_sub(1);
+                if !state.try_reserve_broadcast(msg_len, recipients) {
+                    state.metrics.broadcast_budget_rejected();
+                    return Ok(());
+                }
+                let msg = ServerMessage::Typing {
+                    channel_id,
+                    uid: from.clone(),
+                };
+                state.broadcast_except(&from, msg);
+                return Ok(());
+            }
+
+            // 私密频道：成员校验 + 定向扇出（除发送者）。非成员静默丢。
+            let is_member: Option<(i64,)> = sqlx::query_as(
+                "SELECT 1 FROM channel_members WHERE channel_id = ? AND login_id = ?",
+            )
+            .bind(&channel_id)
+            .bind(from.as_str())
+            .fetch_optional(&state.pool)
+            .await?;
+            if is_member.is_none() {
+                return Ok(());
+            }
+            let members: Vec<(String,)> = sqlx::query_as(
+                "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ?",
+            )
+            .bind(&channel_id)
+            .bind(from.as_str())
+            .fetch_all(&state.pool)
+            .await?;
+            let msg_len = 64 + channel_id.len() + from.as_str().len();
+            if !state.try_reserve_broadcast(msg_len, members.len()) {
+                state.metrics.broadcast_budget_rejected();
+                return Ok(());
+            }
+            for (member,) in members {
+                state.send_to(
+                    &UserId::new(member),
+                    ServerMessage::Typing {
+                        channel_id: channel_id.clone(),
+                        uid: from.clone(),
+                    },
+                );
+            }
+        }
+
         ClientMessage::Ping { nonce } => {
             let _ = tx.try_send(ServerMessage::Pong { nonce });
         }
@@ -1375,5 +1503,210 @@ mod p1l_tests {
     fn p1l_should_revalidate_nothing_just_before() {
         let last = Instant::now() - Duration::from_millis(50);
         assert!(!should_revalidate(last, Duration::from_millis(100)));
+    }
+}
+
+// ============================================================================
+// Typing（v7）路由 / 限流回归测试
+// ============================================================================
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+    use crate::config::Config;
+    use std::sync::atomic::AtomicU64;
+
+    /// 内存 sqlite + 最小 schema（Typing 路由只查 channels / channel_members）。
+    async fn mk_state() -> AppState {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE channels (\
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, \
+                position INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, \
+                is_private INTEGER NOT NULL DEFAULT 0, password_hash TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE channel_members (\
+                channel_id TEXT NOT NULL, login_id TEXT NOT NULL, joined_at INTEGER NOT NULL, \
+                PRIMARY KEY (channel_id, login_id))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let cfg = Config {
+            bind: "127.0.0.1:0".into(),
+            database_url: "sqlite::memory:".into(),
+            session_ttl_hours: 1,
+            livekit_api_key: "testkey".into(),
+            livekit_api_secret: "testsecret".into(),
+            livekit_ws_url: "ws://localhost:18082".into(),
+            admin_enabled: false,
+            admin_bind: "127.0.0.1:18081".into(),
+            admin_token: String::new(),
+        };
+        AppState::new(pool, cfg)
+    }
+
+    /// 模拟已 Join 的连接：add_peer + 返回 handle_message 所需的上下文。
+    /// 返回 (my_uid, my_session_id, 自身出站 tx, 自身出站 rx)。
+    fn join(
+        state: &AppState,
+        uid: &str,
+        session_id: u64,
+    ) -> (
+        Option<UserId>,
+        AtomicU64,
+        mpsc::Sender<ServerMessage>,
+        mpsc::Receiver<ServerMessage>,
+    ) {
+        let (tx, rx) = mpsc::channel::<ServerMessage>(16);
+        state.add_peer(PeerHandle {
+            uid: UserId::new(uid),
+            tx: tx.clone(),
+            session_id,
+            http_session_id: String::new(),
+        });
+        (Some(UserId::new(uid)), AtomicU64::new(session_id), tx, rx)
+    }
+
+    /// A 发 DM typing：B 收到且 uid==A，第三方 C 收不到，A 自身无回显。
+    #[tokio::test]
+    async fn typing_dm_routes_to_peer_only() {
+        let state = mk_state().await;
+        let (mut uid_a, sid_a, tx_a, mut rx_a) = join(&state, "a", 1);
+        let (_uid_b, _sid_b, _tx_b, mut rx_b) = join(&state, "b", 2);
+        let (_uid_c, _sid_c, _tx_c, mut rx_c) = join(&state, "c", 3);
+
+        handle_message(
+            ClientMessage::Typing {
+                channel_id: "dm:a:b".into(),
+            },
+            &state,
+            &mut uid_a,
+            &sid_a,
+            "",
+            &tx_a,
+        )
+        .await
+        .unwrap();
+
+        match rx_b.try_recv() {
+            Ok(ServerMessage::Typing { channel_id, uid }) => {
+                assert_eq!(channel_id, "dm:a:b");
+                assert_eq!(uid, UserId::new("a"));
+            }
+            other => panic!("B should receive Typing, got {:?}", other),
+        }
+        assert!(rx_b.try_recv().is_err(), "B should receive exactly one");
+        assert!(rx_c.try_recv().is_err(), "C must not receive DM typing");
+        assert!(rx_a.try_recv().is_err(), "no echo / no error to sender");
+    }
+
+    /// 私密频道的非成员发 typing：成员收不到，发送者也不收 Error。
+    #[tokio::test]
+    async fn typing_non_member_private_channel_dropped() {
+        let state = mk_state().await;
+        sqlx::query(
+            "INSERT INTO channels (id, name, kind, created_at, is_private) \
+             VALUES ('ch1', 'secret', 'text', 0, 1)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO channel_members (channel_id, login_id, joined_at) \
+             VALUES ('ch1', 'b', 0)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let (mut uid_a, sid_a, tx_a, mut rx_a) = join(&state, "a", 1);
+        let (_uid_b, _sid_b, _tx_b, mut rx_b) = join(&state, "b", 2);
+
+        handle_message(
+            ClientMessage::Typing {
+                channel_id: "ch1".into(),
+            },
+            &state,
+            &mut uid_a,
+            &sid_a,
+            "",
+            &tx_a,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            rx_b.try_recv().is_err(),
+            "member must not receive typing from non-member"
+        );
+        assert!(rx_a.try_recv().is_err(), "silent drop: no error to sender");
+    }
+
+    /// 连发 5 条（间隔≈0）：限流容量 2 + 0.5/s 补充，对端只收到前 2~3 条。
+    #[tokio::test]
+    async fn typing_rate_limited() {
+        let state = mk_state().await;
+        let (mut uid_a, sid_a, tx_a, _rx_a) = join(&state, "a", 1);
+        let (_uid_b, _sid_b, _tx_b, mut rx_b) = join(&state, "b", 2);
+
+        for _ in 0..5 {
+            handle_message(
+                ClientMessage::Typing {
+                    channel_id: "dm:a:b".into(),
+                },
+                &state,
+                &mut uid_a,
+                &sid_a,
+                "",
+                &tx_a,
+            )
+            .await
+            .unwrap();
+        }
+
+        let mut n = 0;
+        while let Ok(msg) = rx_b.try_recv() {
+            assert!(
+                matches!(msg, ServerMessage::Typing { .. }),
+                "B should only receive Typing, got {:?}",
+                msg
+            );
+            n += 1;
+        }
+        assert!(
+            (2..=3).contains(&n),
+            "expected 2~3 typings to pass the rate limiter, got {}",
+            n
+        );
+    }
+
+    /// 不存在的 channel_id：静默成功，不 panic、不回 Error。
+    #[tokio::test]
+    async fn typing_unknown_channel_dropped() {
+        let state = mk_state().await;
+        let (mut uid_a, sid_a, tx_a, mut rx_a) = join(&state, "a", 1);
+
+        let res = handle_message(
+            ClientMessage::Typing {
+                channel_id: "ch-no-such".into(),
+            },
+            &state,
+            &mut uid_a,
+            &sid_a,
+            "",
+            &tx_a,
+        )
+        .await;
+        assert!(res.is_ok(), "unknown channel must be silently dropped");
+        assert!(rx_a.try_recv().is_err(), "no error message to sender");
     }
 }

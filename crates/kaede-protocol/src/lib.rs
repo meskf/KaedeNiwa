@@ -95,13 +95,14 @@ where
 /// v4：DM/私密频道密文升级为 v2（AAD 绑定发送者/接收者/消息 id，0x05 前缀）。
 /// v5：新增 `ServerMessage::FriendsChanged`；移除 SDP/ICE/SfuToken 遗留变体。
 /// v6：新增私密频道表情反应（`ChannelReaction` 双向变体）。
-pub const PROTOCOL_VERSION: u16 = 6;
+/// v7：新增 `Typing` 双向变体（输入中指示）。
+pub const PROTOCOL_VERSION: u16 = 7;
 
 /// 服务器接受的最低协议版本。
 ///
-/// DM 密文格式与私密频道 reaction 不兼容旧客户端，必须整体升级，
-/// 避免旧客户端静默解密失败或丢弃 reaction。
-pub const MIN_SUPPORTED_VERSION: u16 = 6;
+/// v7：旧客户端（v6）收到 `Typing` 变体时 CBOR 反序列化会失败并断开，
+/// 与其让旧客户端随机掉线，不如握手时明确拒绝并提示升级。
+pub const MIN_SUPPORTED_VERSION: u16 = 7;
 
 /// 单条线消息的硬上限。
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
@@ -274,6 +275,17 @@ pub enum ClientMessage {
     SetPresence {
         /// `"online"` | `"idle"` | `"dnd"`。
         status: String,
+    },
+
+    /// 输入中指示（v7）。
+    ///
+    /// `channel_id` 可以是公开频道、私密频道或 DM 会话 id（`dm:a:b`）。
+    /// 纯元数据、不落盘、不补投；服务端按 uid 限流后定向扇出：
+    /// - DM → 仅对端
+    /// - 私密频道 → 在线成员（除发送者）
+    /// - 公开频道 → 全房间广播（除发送者，可走丢弃语义的通道）
+    Typing {
+        channel_id: String,
     },
 
     // ---- 保活 ----
@@ -472,6 +484,14 @@ pub enum ServerMessage {
         presence: Vec<Presence>,
     },
 
+    /// 输入中指示（v7）。
+    ///
+    /// 服务端不持久化、不离线补投；客户端 UI 应本地设置数秒超时自动消失。
+    Typing {
+        channel_id: String,
+        uid: UserId,
+    },
+
     /// 成员被踢。
     MemberRemoved {
         login_id: String,
@@ -647,6 +667,8 @@ impl ClientMessage {
             | Self::ChannelCommit { .. }
             | Self::ChannelReaction { .. }
             | Self::SetPresence { .. }
+            // Typing：服务端自己处理（限流 + 定向扇出），不走通用转发。
+            | Self::Typing { .. }
             | Self::Ping { .. } => None,
         }
     }

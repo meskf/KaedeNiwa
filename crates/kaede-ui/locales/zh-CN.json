@@ -16,7 +16,14 @@
     "reply": "回复",
     "react": "表情",
     "cancel": "取消",
-    "selected": "已选中 {author}：{text}"
+    "selected": "已选中 {author}：{text}",
+    "edit": "编辑",
+    "delete": "删除",
+    "edited": "（已编辑）",
+    "editHint": "Enter 保存 · Esc 取消",
+    "editFailed": "编辑失败：{err}",
+    "deleteFailed": "删除失败：{err}",
+    "typing": "{names} 正在输入…"
   },
   "member": {
     "online": "在线 — {count}",

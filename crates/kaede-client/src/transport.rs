@@ -249,19 +249,28 @@ mod wasm_ws {
             ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
 
             // onmessage
+            let ws_for_msg = ws.clone();
             let onmessage = Closure::<dyn FnMut(MessageEvent)>::new({
                 let in_tx = in_tx.clone();
                 move |e: MessageEvent| {
                     let data = e.data();
-                    if let Ok(ab) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
-                        let arr = js_sys::Uint8Array::new(&ab);
-                        let _ = in_tx.try_send(Ok(arr.to_vec()));
+                    let payload = if let Ok(ab) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
+                        Ok(js_sys::Uint8Array::new(&ab).to_vec())
                     } else if let Some(s) = data.as_string() {
                         let preview: String = s.chars().take(64).collect();
-                        let _ = in_tx.try_send(Err(format!(
+                        Err(format!(
                             "text frames not supported; use binary CBOR (got: {})",
                             preview
-                        )));
+                        ))
+                    } else {
+                        return;
+                    };
+                    if in_tx.try_send(payload).is_err() {
+                        // 队列满时不能静默丢帧（可能丢 Commit/DM，导致 epoch 永久落后）。
+                        // 关闭连接让上层重连并从服务端补齐。
+                        tracing::warn!("[wasm-ws] inbound queue full; closing for resync");
+                        let _ = ws_for_msg.close();
+                        in_tx.close();
                     }
                 }
             });

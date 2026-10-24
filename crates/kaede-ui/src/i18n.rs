@@ -11,26 +11,43 @@ type Bundle = HashMap<String, String>;
 fn flatten(out: &mut Bundle, prefix: &str, v: &Value) {
     match v {
         Value::Object(map) => {
-            if map.contains_key("other") && (map.contains_key("one") || map.contains_key("zero") || map.contains_key("few") || map.contains_key("many") || map.contains_key("two")) {
+            if map.contains_key("other")
+                && (map.contains_key("one")
+                    || map.contains_key("zero")
+                    || map.contains_key("few")
+                    || map.contains_key("many")
+                    || map.contains_key("two"))
+            {
                 if let Some(Value::String(s)) = map.get("other") {
                     out.insert(prefix.to_string(), s.clone());
                 }
                 return;
             }
             for (k, v) in map {
-                let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
                 flatten(out, &key, v);
             }
         }
-        Value::String(s) => { out.insert(prefix.to_string(), s.clone()); }
-        Value::Number(n) => { out.insert(prefix.to_string(), n.to_string()); }
-        Value::Bool(b)   => { out.insert(prefix.to_string(), b.to_string()); }
+        Value::String(s) => {
+            out.insert(prefix.to_string(), s.clone());
+        }
+        Value::Number(n) => {
+            out.insert(prefix.to_string(), n.to_string());
+        }
+        Value::Bool(b) => {
+            out.insert(prefix.to_string(), b.to_string());
+        }
         _ => {}
     }
 }
 
 fn parse_bundle(src: &str, locale: &str) -> Bundle {
-    let v: Value = serde_json::from_str(src).unwrap_or_else(|e| panic!("locale {locale}.json 解析失败: {e}"));
+    let v: Value =
+        serde_json::from_str(src).unwrap_or_else(|e| panic!("locale {locale}.json 解析失败: {e}"));
     let mut out = HashMap::new();
     flatten(&mut out, "", &v);
     out
@@ -38,8 +55,14 @@ fn parse_bundle(src: &str, locale: &str) -> Bundle {
 
 fn bundles() -> HashMap<String, Bundle> {
     let mut m = HashMap::new();
-    m.insert("zh-CN".to_string(), parse_bundle(include_str!("../locales/zh-CN.json"), "zh-CN"));
-    m.insert("en".to_string(),    parse_bundle(include_str!("../locales/en.json"),    "en"));
+    m.insert(
+        "zh-CN".to_string(),
+        parse_bundle(include_str!("../locales/zh-CN.json"), "zh-CN"),
+    );
+    m.insert(
+        "en".to_string(),
+        parse_bundle(include_str!("../locales/en.json"), "en"),
+    );
     m
 }
 
@@ -52,24 +75,42 @@ pub struct I18n {
 impl I18n {
     pub fn new() -> Self {
         let b: &'static HashMap<String, Bundle> = Box::leak(Box::new(bundles()));
-        Self { locale: Signal::new("zh-CN".to_string()), bundles: Signal::new(b) }
+        Self {
+            locale: Signal::new("zh-CN".to_string()),
+            bundles: Signal::new(b),
+        }
     }
     pub fn t(&self, key: &str) -> String {
         let b = *self.bundles.read();
         let l = self.locale.read().clone();
-        b.get(&l).and_then(|x| x.get(key)).cloned().unwrap_or_else(|| key.to_string())
+        b.get(&l)
+            .and_then(|x| x.get(key))
+            .cloned()
+            .unwrap_or_else(|| key.to_string())
     }
     pub fn tf(&self, key: &str, vars: &[(&str, &str)]) -> String {
         let mut s = self.t(key);
-        for (k, v) in vars { s = s.replace(&format!("{{{k}}}"), v); }
+        for (k, v) in vars {
+            s = s.replace(&format!("{{{k}}}"), v);
+        }
         s
     }
-    pub fn set_locale(&mut self, l: &str) { self.locale.set(l.to_string()); }
-    pub fn locale(&self) -> String { self.locale.read().clone() }
+    pub fn set_locale(&mut self, l: &str) {
+        self.locale.set(l.to_string());
+    }
+    pub fn locale(&self) -> String {
+        self.locale.read().clone()
+    }
 }
 
-impl Default for I18n { fn default() -> Self { Self::new() } }
-pub fn use_i18n() -> I18n { use_context::<I18n>() }
+impl Default for I18n {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+pub fn use_i18n() -> I18n {
+    use_context::<I18n>()
+}
 
 #[cfg(test)]
 mod tests {
@@ -77,14 +118,16 @@ mod tests {
     #[test]
     fn flatten_nested() {
         let v: Value = serde_json::from_str(r#"{"a":{"b":"x"},"c":"y"}"#).unwrap();
-        let mut o = HashMap::new(); flatten(&mut o, "", &v);
+        let mut o = HashMap::new();
+        flatten(&mut o, "", &v);
         assert_eq!(o.get("a.b"), Some(&"x".into()));
         assert_eq!(o.get("c"), Some(&"y".into()));
     }
     #[test]
     fn flatten_plural() {
         let v: Value = serde_json::from_str(r#"{"k":{"one":"1","other":"many"}}"#).unwrap();
-        let mut o = HashMap::new(); flatten(&mut o, "", &v);
+        let mut o = HashMap::new();
+        flatten(&mut o, "", &v);
         assert_eq!(o.get("k"), Some(&"many".into()));
     }
 }

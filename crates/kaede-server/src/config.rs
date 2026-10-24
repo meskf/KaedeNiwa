@@ -70,6 +70,11 @@ impl Config {
                 self.session_ttl_hours
             );
         }
+        // 可信代理 CIDR 非法必须启动失败，不能静默丢弃（否则真实客户端 IP
+        // 会被归并成代理 IP，登录限流/注册限流全部失真）。
+        if let Ok(raw) = env::var("KAEDE_TRUSTED_PROXIES") {
+            crate::http::validate_trusted_proxies(&raw).map_err(|e| anyhow::anyhow!(e))?;
+        }
         if !self.livekit_ws_url.starts_with("ws://") && !self.livekit_ws_url.starts_with("wss://") {
             bail!(
                 "LIVEKIT_WS_URL must start with ws:// or wss:// (got {})",
@@ -195,5 +200,15 @@ mod tests {
         cfg.admin_bind = "0.0.0.0:18081".into();
         cfg.admin_token = "x".repeat(32);
         cfg.validate().expect("token-protected admin should pass");
+    }
+
+    #[test]
+    fn trusted_proxy_cidr_validation() {
+        assert_eq!(
+            crate::http::validate_trusted_proxies("127.0.0.0/8, ::1/128").unwrap(),
+            2
+        );
+        assert_eq!(crate::http::validate_trusted_proxies("").unwrap(), 0);
+        assert!(crate::http::validate_trusted_proxies("127.0.0.0/8, not-a-cidr").is_err());
     }
 }

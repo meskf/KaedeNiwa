@@ -41,7 +41,10 @@ pub use error::ClientError;
 pub use event::ClientEvent;
 pub use http::HttpApi;
 pub use mls_session::MlsSession;
-pub use payload::{DecodedPayload, MediaMetaPayload, MessagePayload, ReactionPayload, decode};
+pub use payload::{
+    DecodedPayload, DeletePayload, EditPayload, MediaMetaPayload, MessagePayload, ReactionPayload,
+    decode,
+};
 pub use room::{DEFAULT_CHANNEL, HistoryMessage, RoomSession, open_default_store};
 pub use state::{ClientState, ClientStateMachine, TransitionError};
 pub use transport::{MockTransport, Transport};

@@ -72,8 +72,9 @@ pwsh -File scripts/build-mobile.ps1 -WebShell -Release `
 
 ## 已知限制
 
-- **协议版本 v6**：v5 新增好友变更实时事件；v6 新增私密频道表情反应
-  （频道 group key 加密 + 服务端定向 fanout）。需要服务端与客户端同时升级；旧客户端会被拒绝。
+- **协议版本 v7**：v5 新增好友变更实时事件；v6 新增私密频道表情反应
+  （频道 group key 加密 + 服务端定向 fanout）；v7 新增「输入中」指示
+  （纯元数据，不落盘、不补投）。需要服务端与客户端同时升级；旧客户端会被拒绝。
 - **Web 语音 E2EE** 依赖 `livekit-client@2.14.0` 的 e2ee worker；离线 PWA 需缓存该 worker 脚本。
 - **媒体统一走 LiveKit HTTP token**；旧版 SDP/ICE/SfuToken 协议变体已移除。
 - **画质档位（8K/4K/码率）**：native 传入编码器，Web 通过 `getDisplayMedia` 分辨率约束生效；
@@ -115,7 +116,7 @@ cargo build --release -p kaede-server    # target/release/kaede-server
 数据库备份（SQLite WAL 必须用在线备份，不能直接复制文件）：
 
 ```powershell
-pwsh -File scripts/backup-db.ps1 -Db C:\kaede\kaede.db
+pwsh -File scripts/backup-db.ps1 -DbPath C:\kaede\kaede.db
 ```
 
 ## 管理后台

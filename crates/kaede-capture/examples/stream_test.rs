@@ -10,10 +10,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== H.264 码流测试 ===\n");
 
+    let fps = std::env::var("KAEDE_FPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
+    let bitrate_kbps = std::env::var("KAEDE_BITRATE_KBPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8000);
     let config = VideoConfig {
         encoder: EncoderKind::Auto,
-        fps: 60,
-        bitrate_kbps: 8000,
+        fps,
+        bitrate_kbps,
         show_cursor: true,
         display_index: 0,
         width: None, // C-5: Some(W) 时启用 videoscale
@@ -37,6 +45,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 total_bytes += frame.data.len() as u64;
                 if frame.is_keyframe {
                     keyframes += 1;
+                    println!(
+                        "    keyframe #{} at frame {} t={:.2}s size={}B",
+                        keyframes,
+                        frames,
+                        t0.elapsed().as_secs_f64(),
+                        frame.data.len()
+                    );
                 }
             }
             None => {} // 没帧就继续等

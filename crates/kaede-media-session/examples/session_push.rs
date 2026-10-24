@@ -57,20 +57,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    println!("[2] publish screen...");
-    let video_cfg = VideoConfig {
-        encoder: EncoderKind::Auto,
-        fps: 60,
-        bitrate_kbps: 8000,
-        show_cursor: true,
-        display_index: 0,
-        width: None, // C-5: Some(W) 时启用 videoscale
-        height: None,
-    };
-    session
-        .publish(PublishSource::Screen { config: video_cfg })
-        .await?;
-    println!("    已发布");
+    let source_kind = std::env::var("KAEDE_SOURCE").unwrap_or_else(|_| "screen".into());
+    println!("[2] publish source={}", source_kind);
+    let publish_screen = matches!(source_kind.as_str(), "screen" | "all");
+    let publish_system = matches!(source_kind.as_str(), "system" | "all");
+    let publish_mic = matches!(source_kind.as_str(), "mic" | "all");
+
+    if publish_screen {
+        let fps: u32 = std::env::var("KAEDE_FPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
+        let bitrate_kbps: u32 = std::env::var("KAEDE_BITRATE_KBPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8000);
+        println!("    video profile: {}fps / {}kbps", fps, bitrate_kbps);
+        let video_cfg = VideoConfig {
+            encoder: EncoderKind::Auto,
+            fps,
+            bitrate_kbps,
+            show_cursor: true,
+            display_index: 0,
+            width: None, // C-5: Some(W) 时启用 videoscale
+            height: None,
+        };
+        session
+            .publish(PublishSource::Screen { config: video_cfg })
+            .await?;
+        println!("    screen 已发布");
+    }
+    if publish_system {
+        session
+            .publish(PublishSource::System {
+                sample_rate: 48000,
+                channels: 2,
+            })
+            .await?;
+        println!("    system loopback 已发布");
+    }
+    if publish_mic {
+        let denoise = std::env::var("KAEDE_MIC_DENOISE")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        session
+            .publish(PublishSource::Mic {
+                sample_rate: 48000,
+                channels: 1,
+                denoise,
+            })
+            .await?;
+        println!("    mic 已发布 (denoise={})", denoise);
+    }
 
     let secs: u64 = std::env::var("KAEDE_PUSH_SECS")
         .ok()

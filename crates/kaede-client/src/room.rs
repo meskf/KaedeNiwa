@@ -74,6 +74,162 @@ pub struct HistoryMessage {
     pub reply_to: Option<kaede_protocol::ReplyRef>,
     /// @ 提及的 login_id（E2EE 内部字段）。
     pub mentions: Vec<String>,
+    /// 是否被作者编辑过（fold 自历史中的 EditPayload）。
+    pub edited: bool,
+    /// 表情反应（fold 自历史中的 ReactionPayload）。
+    pub reactions: Vec<kaede_protocol::Reaction>,
+}
+
+/// 历史流里的一条记录解析结果：要么是消息，要么是作用于既有消息的操作。
+///
+/// 编辑 / 删除 / 反应作为加密 envelope 内的 payload 与消息共存于同一历史
+/// 端点，加载时按 ts 升序 fold 进消息列表（见 [`fold_history_ops`]）。
+#[derive(Debug)]
+enum HistoryOp {
+    Message(HistoryMessage),
+    /// 作者本人编辑自己的消息。
+    Edit {
+        target_ts: i64,
+        new_text: String,
+        from: String,
+    },
+    /// 作者本人删除自己的消息。
+    Delete {
+        target_ts: i64,
+        from: String,
+    },
+    /// 任何人对自己或他人的消息添加/移除反应。
+    Reaction {
+        target_ts: i64,
+        emoji: String,
+        add: bool,
+        from: String,
+    },
+}
+
+impl HistoryOp {
+    fn ts(&self) -> i64 {
+        match self {
+            HistoryOp::Message(m) => m.ts,
+            HistoryOp::Edit { target_ts, .. }
+            | HistoryOp::Delete { target_ts, .. }
+            | HistoryOp::Reaction { target_ts, .. } => *target_ts,
+        }
+    }
+}
+
+/// 排序键：操作的 ts() 等于其目标消息的 ts，同 ts 时消息必须排在操作之前，
+/// 否则 fold 时操作找不到目标会被丢弃。相同目标的多个操作保持稳定序（后到者胜）。
+fn op_sort_key(op: &HistoryOp) -> (i64, u8) {
+    let rank = match op {
+        HistoryOp::Message(_) => 0,
+        _ => 1,
+    };
+    (op.ts(), rank)
+}
+
+/// 把解密后的历史 payload 解析为消息或操作。
+///
+/// `sender` 必须来自服务端权威字段 / MLS 认证发送者（decrypt_history_record
+/// 已校验一致），**不信任 payload 内的 `u`**——编辑/删除的鉴权只看实际发送者。
+fn decode_history_op(ts: i64, sender: String, bytes: &[u8]) -> Option<HistoryOp> {
+    match crate::payload::decode(bytes) {
+        crate::payload::DecodedPayload::Message(p) => Some(HistoryOp::Message(HistoryMessage {
+            sender,
+            ts,
+            plaintext: p.t,
+            attachments: p.a,
+            reply_to: p.r,
+            mentions: p.m,
+            edited: false,
+            reactions: Vec::new(),
+        })),
+        crate::payload::DecodedPayload::Raw(b) => Some(HistoryOp::Message(HistoryMessage {
+            sender,
+            ts,
+            plaintext: String::from_utf8_lossy(&b).to_string(),
+            attachments: Vec::new(),
+            reply_to: None,
+            mentions: Vec::new(),
+            edited: false,
+            reactions: Vec::new(),
+        })),
+        crate::payload::DecodedPayload::Edit(e) => Some(HistoryOp::Edit {
+            target_ts: e.target_ts,
+            new_text: e.t,
+            from: sender,
+        }),
+        crate::payload::DecodedPayload::Delete(d) => Some(HistoryOp::Delete {
+            target_ts: d.target_ts,
+            from: sender,
+        }),
+        crate::payload::DecodedPayload::Reaction(r) => Some(HistoryOp::Reaction {
+            target_ts: r.target_ts,
+            emoji: r.emoji,
+            add: r.action == "add",
+            from: sender,
+        }),
+        // 媒体信令等不入历史
+        _ => None,
+    }
+}
+
+/// 按 ts 升序 fold：Edit 替换文本并置 edited；Delete 移除消息；Reaction 挂到目标消息。
+///
+/// 编辑/删除仅当操作发送者 == 消息作者时生效（作者只能改自己的消息）；
+/// 目标消息不在当前窗口（更早的分页未加载）时操作被跳过。
+fn fold_history_ops(ops: Vec<HistoryOp>) -> Vec<HistoryMessage> {
+    let mut out: Vec<HistoryMessage> = Vec::with_capacity(ops.len());
+    for op in ops {
+        match op {
+            HistoryOp::Message(m) => out.push(m),
+            HistoryOp::Edit {
+                target_ts,
+                new_text,
+                from,
+            } => {
+                if let Some(m) = out
+                    .iter_mut()
+                    .find(|m| m.ts == target_ts && m.sender == from)
+                {
+                    m.plaintext = new_text;
+                    m.edited = true;
+                }
+            }
+            HistoryOp::Delete { target_ts, from } => {
+                out.retain(|m| !(m.ts == target_ts && m.sender == from));
+            }
+            HistoryOp::Reaction {
+                target_ts,
+                emoji,
+                add,
+                from,
+            } => {
+                let Some(m) = out.iter_mut().find(|m| m.ts == target_ts) else {
+                    continue;
+                };
+                let idx = m.reactions.iter().position(|r| r.emoji == emoji);
+                if add {
+                    if let Some(i) = idx {
+                        if !m.reactions[i].users.contains(&from) {
+                            m.reactions[i].users.push(from.clone());
+                        }
+                    } else {
+                        m.reactions.push(kaede_protocol::Reaction {
+                            emoji,
+                            users: vec![from],
+                        });
+                    }
+                } else if let Some(i) = idx {
+                    m.reactions[i].users.retain(|u| *u != from);
+                    if m.reactions[i].users.is_empty() {
+                        m.reactions.remove(i);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// 本地历史搜索命中。
@@ -106,6 +262,8 @@ pub struct RoomSession {
     snapshot_broken: AtomicBool,
     /// 频道 id → 是否私密。发送路径用它阻止“私密频道无 group 时回退主群”。
     channel_privacy: Mutex<HashMap<String, bool>>,
+    /// channel_id → 上次发送 Typing 的本地时间（ms）。客户端节流用。
+    last_typing: Mutex<HashMap<String, i64>>,
 }
 
 impl RoomSession {
@@ -239,6 +397,7 @@ impl RoomSession {
         if !restored {
             conn.mls_init(uid.clone())?;
         }
+        conn.set_identity_restored(restored);
 
         // B3+: 注入 aux storage hook + 恢复 DM / 私密频道 snapshot
         if let Some(store) = &storage {
@@ -264,6 +423,7 @@ impl RoomSession {
             mls_op_lock: futures_util::lock::Mutex::new(()),
             snapshot_broken: AtomicBool::new(false),
             channel_privacy: Mutex::new(HashMap::new()),
+            last_typing: Mutex::new(HashMap::new()),
         })
     }
 
@@ -370,6 +530,7 @@ impl RoomSession {
         if !restored {
             conn.mls_init(uid.clone())?;
         }
+        conn.set_identity_restored(restored);
 
         // B3+: 注入 aux storage hook + 恢复 DM / 私密频道 snapshot
         if let Some(store) = &storage {
@@ -395,6 +556,7 @@ impl RoomSession {
             mls_op_lock: futures_util::lock::Mutex::new(()),
             snapshot_broken: AtomicBool::new(false),
             channel_privacy: Mutex::new(HashMap::new()),
+            last_typing: Mutex::new(HashMap::new()),
         })
     }
 
@@ -429,24 +591,31 @@ impl RoomSession {
     /// 房主：建 MLS 组 + 上传 KeyPackage 队列。
     pub async fn become_host(&self) -> Result<(), ClientError> {
         self.conn.mls_create_group()?;
-        self.publish_key_packages().await?;
+        self.publish_key_packages(!self.conn.identity_restored())
+            .await?;
         self.save_snapshot().await?;
         Ok(())
     }
 
     /// 新成员：生成 + 上传 KeyPackage 队列。
     pub async fn become_guest(&self) -> Result<(), ClientError> {
-        self.publish_key_packages().await?;
+        if self.conn.identity_restored() {
+            // 同一身份重启：只补货，不覆盖仍可用的旧 KP。
+            self.replenish_key_packages_if_low().await?;
+        } else {
+            // 身份是新建的：旧 KP 对新身份不可解密，必须整体替换。
+            self.publish_key_packages(true).await?;
+        }
         self.save_snapshot().await?;
         Ok(())
     }
 
-    async fn publish_key_packages(&self) -> Result<(), ClientError> {
+    async fn publish_key_packages(&self, replace: bool) -> Result<(), ClientError> {
         let mut kps = Vec::with_capacity(DEFAULT_KP_BATCH_SIZE);
         for _ in 0..DEFAULT_KP_BATCH_SIZE {
             kps.push(self.conn.mls_generate_key_package()?);
         }
-        self.http.publish_key_packages(kps).await
+        self.http.publish_key_packages(kps, replace).await
     }
 
     /// 通知服务器"我进房间了"。
@@ -476,7 +645,7 @@ impl RoomSession {
     async fn replenish_key_packages_if_low(&self) -> Result<(), ClientError> {
         const LOW_WATERMARK: usize = DEFAULT_KP_BATCH_SIZE;
         if self.http.key_package_count().await? < LOW_WATERMARK {
-            self.publish_key_packages().await?;
+            self.publish_key_packages(false).await?;
         }
         Ok(())
     }
@@ -669,14 +838,6 @@ impl RoomSession {
     // 持久化
     // ---------------------------------------------------------------------
 
-    /// 序列化整个 MLS 状态（明文，含签名私钥）。
-    ///
-    /// 兼容 API：保留公开签名供旧调用方使用。新代码请用 `save_snapshot()`。
-    #[allow(deprecated)]
-    pub fn snapshot(&self) -> Result<Vec<u8>, ClientError> {
-        self.conn.mls_snapshot()
-    }
-
     /// 保存快照到 storage（如果有）。
     ///
     /// **加密后存储** —— 用当前平台的 snapshot cipher：
@@ -688,6 +849,9 @@ impl RoomSession {
         let Some(store) = &self.storage else {
             return Ok(());
         };
+        // 与 ServerConnection::flush_dirty_snapshots 串行化：两边写同一个 key，
+        // 必须在锁内重新取快照，避免旧 epoch 后写覆盖新 epoch。
+        let _write_guard = self.conn.lock_snapshot_write().await;
         // 没有变更就不写：避免每条无关消息都重写整包快照。
         // 但 broken 状态下要强制重试一次，存储恢复后能自动解除发送阻断。
         let dirty = self.conn.take_main_dirty();
@@ -841,8 +1005,11 @@ impl RoomSession {
         }
     }
 
-    /// 读取某个频道本地保存的自己的消息（按 ts 升序）。
-    async fn load_local_messages(&self, channel_id: &str) -> Vec<HistoryMessage> {
+    /// 读取某个频道本地保存的自己的消息与操作（按 ts 升序，同 ts 消息先于操作）。
+    ///
+    /// 自己发出的编辑/删除/反应 payload 也在本地副本里（`persist_local_message`），
+    /// 一并解析为 [`HistoryOp`] 交给 fold——否则重载后自己的编辑会丢失。
+    async fn load_local_messages(&self, channel_id: &str) -> Vec<HistoryOp> {
         let Some(store) = &self.storage else {
             return Vec::new();
         };
@@ -869,18 +1036,11 @@ impl RoomSession {
             let Some(bytes) = self.decrypt_cache(&raw) else {
                 continue;
             };
-            if let crate::payload::DecodedPayload::Message(p) = crate::payload::decode(&bytes) {
-                out.push(HistoryMessage {
-                    sender: self.uid.as_str().to_string(),
-                    ts,
-                    plaintext: p.t,
-                    attachments: p.a,
-                    reply_to: p.r,
-                    mentions: p.m,
-                });
+            if let Some(op) = decode_history_op(ts, self.uid.as_str().to_string(), &bytes) {
+                out.push(op);
             }
         }
-        out.sort_by_key(|m| m.ts);
+        out.sort_by_key(op_sort_key);
         out
     }
 
@@ -1026,29 +1186,6 @@ impl RoomSession {
         }
     }
 
-    fn decode_cached(ts: i64, sender: String, bytes: &[u8]) -> Option<HistoryMessage> {
-        match crate::payload::decode(bytes) {
-            crate::payload::DecodedPayload::Message(p) => Some(HistoryMessage {
-                sender,
-                ts,
-                plaintext: p.t,
-                attachments: p.a,
-                reply_to: p.r,
-                mentions: p.m,
-            }),
-            crate::payload::DecodedPayload::Raw(b) => Some(HistoryMessage {
-                sender,
-                ts,
-                plaintext: String::from_utf8_lossy(&b).to_string(),
-                attachments: Vec::new(),
-                reply_to: None,
-                mentions: Vec::new(),
-            }),
-            // 反应 / 媒体信令不入历史
-            _ => None,
-        }
-    }
-
     /// 手动删除快照（例如登出时）。
     pub async fn clear_snapshot(&self) -> Result<(), ClientError> {
         if let Some(store) = &self.storage {
@@ -1121,8 +1258,8 @@ impl RoomSession {
         let mut out = Vec::with_capacity(records.len());
         for r in records {
             if let Some((sender, bytes)) = cached.get(&r.ts) {
-                if let Some(m) = Self::decode_cached(r.ts, sender.clone(), bytes) {
-                    out.push(m);
+                if let Some(op) = decode_history_op(r.ts, sender.clone(), bytes) {
+                    out.push(op);
                 }
                 continue;
             }
@@ -1133,12 +1270,12 @@ impl RoomSession {
             if let Some(pt) = self.decrypt_history_record(channel_id, &r.sender, &ct) {
                 self.persist_cached_history(channel_id, r.ts, &r.sender, &pt)
                     .await;
-                if let Some(m) = Self::decode_cached(r.ts, r.sender.clone(), &pt) {
-                    out.push(m);
+                if let Some(op) = decode_history_op(r.ts, r.sender.clone(), &pt) {
+                    out.push(op);
                 }
             }
         }
-        Ok(out)
+        Ok(fold_history_ops(out))
     }
 
     /// 拉历史 → MLS 解密。返回按时间升序。
@@ -1169,8 +1306,8 @@ impl RoomSession {
         for r in records {
             // 已解密过的消息直接读缓存：SecretTree 不允许同一密文二次解密。
             if let Some((sender, bytes)) = cached.get(&r.ts) {
-                if let Some(m) = Self::decode_cached(r.ts, sender.clone(), bytes) {
-                    out.push(m);
+                if let Some(op) = decode_history_op(r.ts, sender.clone(), bytes) {
+                    out.push(op);
                 }
                 continue;
             }
@@ -1185,8 +1322,8 @@ impl RoomSession {
                 Some(pt) => {
                     self.persist_cached_history(channel_id, r.ts, &r.sender, &pt)
                         .await;
-                    if let Some(m) = Self::decode_cached(r.ts, r.sender.clone(), &pt) {
-                        out.push(m);
+                    if let Some(op) = decode_history_op(r.ts, r.sender.clone(), &pt) {
+                        out.push(op);
                     }
                 }
                 None => {
@@ -1196,10 +1333,12 @@ impl RoomSession {
         }
 
         out.append(&mut local);
-        out.sort_by_key(|m| m.ts);
-        out.dedup_by(|a, b| a.ts == b.ts && a.sender == b.sender && a.plaintext == b.plaintext);
+        // 操作按目标 ts 归位、消息按自身 ts 排序；同 ts 消息先于操作。
+        out.sort_by_key(op_sort_key);
+        let mut folded = fold_history_ops(out);
+        folded.dedup_by(|a, b| a.ts == b.ts && a.sender == b.sender && a.plaintext == b.plaintext);
         self.prune_history_cache(channel_id).await;
-        Ok(out)
+        Ok(folded)
     }
 
     // ---------------------------------------------------------------------
@@ -1418,22 +1557,31 @@ impl RoomSession {
                 });
             };
 
+            // 先 fold 再搜：命中文本 = 界面显示文本（编辑后搜新内容、
+            // 已删除的消息不再命中）。
+            let mut ops: Vec<HistoryOp> = Vec::new();
             for (ts, sender, bytes) in self.load_cached_history(ch).await {
-                if let Some(m) = Self::decode_cached(ts, sender, &bytes) {
-                    push(m.ts, &m.sender, &m.plaintext);
+                if let Some(op) = decode_history_op(ts, sender, &bytes) {
+                    ops.push(op);
                 }
             }
-            for m in self.load_local_messages(ch).await {
+            ops.extend(self.load_local_messages(ch).await);
+            ops.sort_by_key(op_sort_key);
+            for m in fold_history_ops(ops) {
                 push(m.ts, &m.sender, &m.plaintext);
             }
         }
 
         // DM 历史没有 MLS ratchet 限制，加载过的明文会被加密缓存，可直接搜索。
         for conv in dm_conv_ids {
+            let mut ops: Vec<HistoryOp> = Vec::new();
             for (ts, sender, bytes) in self.load_dm_cached_history(conv).await {
-                let Some(m) = Self::decode_cached(ts, sender, &bytes) else {
-                    continue;
-                };
+                if let Some(op) = decode_history_op(ts, sender, &bytes) {
+                    ops.push(op);
+                }
+            }
+            ops.sort_by_key(op_sort_key);
+            for m in fold_history_ops(ops) {
                 if !m.plaintext.to_lowercase().contains(&q) {
                     continue;
                 }
@@ -1858,6 +2006,145 @@ impl RoomSession {
         Ok(())
     }
 
+    // ---- 编辑 / 删除 / Typing ----
+
+    /// 编辑一条已发送的消息（E2EE 应用层操作）。
+    ///
+    /// 编辑不是新的协议消息，而是加密 envelope 内的 [`crate::payload::EditPayload`]
+    /// （与 ReactionPayload 同模式）。按 `channel_id` 形态分流：
+    /// - `dm:` 前缀 → DM v2 seal + POST /api/dm
+    /// - 私密频道 → 0x03 channel-key seal + POST /api/messages
+    /// - 公开频道 → MLS encrypt → 落盘 → 广播 + POST /api/messages
+    ///
+    /// 操作与消息共用同一加密 envelope 与历史端点，接收方从历史或实时流里
+    /// 按 ts 顺序 fold（用 `target_ts` 定位目标消息、`t` 替换文本）即可，
+    /// **服务端不需要任何改动**。
+    pub async fn send_edit(
+        &self,
+        channel_id: &str,
+        target_ts: i64,
+        new_text: &str,
+    ) -> Result<(), ClientError> {
+        let payload =
+            crate::payload::EditPayload::new(channel_id, self.uid.as_str(), target_ts, new_text);
+        let bytes = payload
+            .to_bytes()
+            .map_err(|e| ClientError::Protocol(e.to_string()))?;
+        self.send_op_envelope(channel_id, &bytes).await
+    }
+
+    /// 删除一条已发送的消息（E2EE 应用层操作）。
+    ///
+    /// 与 [`Self::send_edit`] 同模式：加密 envelope 内的
+    /// [`crate::payload::DeletePayload`]，接收方按 ts 顺序 fold 后
+    /// 把 `target_ts` 对应的消息标记为已删除，**服务端零改动**。
+    pub async fn send_delete(&self, channel_id: &str, target_ts: i64) -> Result<(), ClientError> {
+        let payload = crate::payload::DeletePayload::new(channel_id, self.uid.as_str(), target_ts);
+        let bytes = payload
+            .to_bytes()
+            .map_err(|e| ClientError::Protocol(e.to_string()))?;
+        self.send_op_envelope(channel_id, &bytes).await
+    }
+
+    /// 发送「正在输入」指示（协议 v7）。
+    ///
+    /// 客户端节流：同一频道 4 秒内重复调用直接返回 `Ok(())`，不发包。
+    /// 纯元数据，服务端不落盘、不补投。
+    pub async fn send_typing(&self, channel_id: &str) -> Result<(), ClientError> {
+        const TYPING_THROTTLE_MS: i64 = 4000;
+        let now = now_ms();
+        {
+            let mut map = self.last_typing.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(last) = map.get(channel_id)
+                && now - *last < TYPING_THROTTLE_MS
+            {
+                return Ok(());
+            }
+            map.insert(channel_id.to_string(), now);
+        }
+        self.conn.send_typing(channel_id).await
+    }
+
+    /// 编辑/删除共用：把应用层操作 payload 按 channel 形态分流发送。
+    ///
+    /// 与消息发送路径一一对应（DM → v2 seal；私密频道 → 0x03；公开频道 →
+    /// MLS encrypt → 落盘 → 广播），操作落同一历史端点，接收方从历史或
+    /// 实时流里按 ts 顺序 fold 即可。
+    async fn send_op_envelope(&self, channel_id: &str, bytes: &[u8]) -> Result<(), ClientError> {
+        // DM：与 send_dm 同路径（per-conv AEAD v2 seal + HTTP 落库 + 本地回显）。
+        if channel_id.starts_with("dm:") {
+            if !self.conn.dm_has_group(channel_id) {
+                self.dm_ensure_group(channel_id).await?;
+            }
+            self.ensure_snapshot_ok()?;
+            let ciphertext = self.conn.dm_seal(channel_id, bytes)?;
+            let ts = match self
+                .http
+                .dm_post_message(channel_id, now_ms(), self.uid.as_str(), &ciphertext)
+                .await
+            {
+                Ok(ts) => ts,
+                Err(e) => {
+                    tracing::warn!("dm_post_message: {}", e);
+                    return Err(e);
+                }
+            };
+            // 本地回显（服务器只推给对方，不推回自己）
+            self.conn.emit_local_event(ClientEvent::DmReceived {
+                server_id: self.conn.server_id().to_string(),
+                conv_id: channel_id.to_string(),
+                from: self.uid.clone(),
+                ts,
+                plaintext: bytes.to_vec(),
+            });
+            self.conn.flush_dirty_snapshots().await;
+            return Ok(());
+        }
+
+        self.ensure_channel_sendable(channel_id)?;
+
+        // 私密频道：与消息同路径——0x03 channel-key seal + POST /api/messages。
+        // 频道 key 加密使用随机 nonce，不推进 MLS ratchet；历史用频道密钥
+        // 可重复解密，不需要本地副本。
+        if self.conn.channel_has_group(channel_id) {
+            let key = self.conn.channel_export_key(channel_id)?;
+            let sealed =
+                kaede_crypto::dm_cipher::seal(&key, channel_id, self.uid.as_str(), "", bytes)
+                    .map_err(|e| ClientError::Protocol(format!("channel seal: {e}")))?;
+            let mut out = Vec::with_capacity(1 + sealed.len());
+            out.push(0x03u8);
+            out.extend_from_slice(&sealed);
+            if let Err(e) = self
+                .http
+                .post_message(channel_id, now_ms(), self.uid.as_str(), &out)
+                .await
+            {
+                tracing::warn!("post_message: {}", e);
+                return Err(e);
+            }
+            return Ok(());
+        }
+
+        // 公开频道：与消息同路径——MLS encrypt（推进 ratchet）→ 落盘 → 广播，
+        // 再 POST /api/messages 入历史；本地副本用服务器权威 ts 落盘。
+        let ciphertext = self.encrypt_persist_and_broadcast(bytes).await?;
+        match self
+            .http
+            .post_message(channel_id, now_ms(), self.uid.as_str(), &ciphertext)
+            .await
+        {
+            Ok(server_ts) => {
+                self.persist_local_message(channel_id, server_ts, bytes)
+                    .await;
+            }
+            Err(e) => {
+                tracing::warn!("post_message: {}", e);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     // ---- DM ----
 
     pub async fn list_dm_conversations(
@@ -1908,21 +2195,14 @@ impl RoomSession {
                 },
             };
             if let Some(pt) = pt
-                && let crate::payload::DecodedPayload::Message(p) = crate::payload::decode(&pt)
+                && let Some(op) = decode_history_op(r.ts, r.sender, &pt)
             {
-                out.push(HistoryMessage {
-                    sender: r.sender,
-                    ts: r.ts,
-                    plaintext: p.t,
-                    attachments: p.a,
-                    reply_to: p.r,
-                    mentions: p.m,
-                });
+                out.push(op);
             }
         }
         self.prune_dm_cached_history(conv_id).await;
         self.conn.flush_dirty_snapshots().await;
-        Ok(out)
+        Ok(fold_history_ops(out))
     }
 
     /// 发送 DM 消息。
@@ -1965,6 +2245,30 @@ impl RoomSession {
         attachments: &[kaede_protocol::Attachment],
         mentions: &[String],
     ) -> Result<(), ClientError> {
+        self.send_dm_full(conv_id, text, attachments, mentions, None)
+            .await
+    }
+
+    /// 带引用回复的 DM。
+    pub async fn send_dm_with_reply(
+        &self,
+        conv_id: &str,
+        text: &str,
+        mentions: &[String],
+        reply_to: kaede_protocol::ReplyRef,
+    ) -> Result<(), ClientError> {
+        self.send_dm_full(conv_id, text, &[], mentions, Some(reply_to))
+            .await
+    }
+
+    async fn send_dm_full(
+        &self,
+        conv_id: &str,
+        text: &str,
+        attachments: &[kaede_protocol::Attachment],
+        mentions: &[String],
+        reply_to: Option<kaede_protocol::ReplyRef>,
+    ) -> Result<(), ClientError> {
         if !self.conn.dm_has_group(conv_id) {
             self.dm_ensure_group(conv_id).await?;
         }
@@ -1977,7 +2281,7 @@ impl RoomSession {
             self.uid.as_str(),
             text,
             attachments.to_vec(),
-            None,
+            reply_to,
         );
         payload.m = mentions.to_vec();
         let bytes = payload
@@ -2372,10 +2676,12 @@ pub fn device_cipher(uid: &str, server_url: &str) -> Box<dyn kaede_mls::Snapshot
 }
 
 pub(crate) fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    // wasm32 上 std::time::SystemTime::now() 会 panic（"time not implemented"），
+    // 必须使用 web-time（native 下等价于 std）。
+    use web_time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as i64
 }
 
@@ -2655,5 +2961,129 @@ mod history_cache_tests {
         let ch = load_cached_raw(&store, prefix, "history_cache").await;
         assert_eq!(ch.len(), 1);
         assert_eq!(ch[0].1, "carol");
+    }
+}
+
+/// 历史 fold：编辑 / 删除 / 反应按 ts 顺序作用到消息列表。
+#[cfg(test)]
+mod history_fold_tests {
+    use super::*;
+    use crate::payload::{DeletePayload, EditPayload, MessagePayload, ReactionPayload};
+
+    fn msg_op(ts: i64, sender: &str, text: &str) -> HistoryOp {
+        let p = MessagePayload::new("general", sender, text, Vec::new(), None);
+        decode_history_op(ts, sender.to_string(), &p.to_bytes().unwrap()).unwrap()
+    }
+
+    fn edit_op(record_ts: i64, sender: &str, target_ts: i64, new_text: &str) -> HistoryOp {
+        let p = EditPayload::new("general", sender, target_ts, new_text);
+        decode_history_op(record_ts, sender.to_string(), &p.to_bytes().unwrap()).unwrap()
+    }
+
+    fn delete_op(record_ts: i64, sender: &str, target_ts: i64) -> HistoryOp {
+        let p = DeletePayload::new("general", sender, target_ts);
+        decode_history_op(record_ts, sender.to_string(), &p.to_bytes().unwrap()).unwrap()
+    }
+
+    fn reaction_op(record_ts: i64, sender: &str, target_ts: i64, action: &str) -> HistoryOp {
+        let p = ReactionPayload::new("general", sender, target_ts, "👍", action);
+        decode_history_op(record_ts, sender.to_string(), &p.to_bytes().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn edit_applies_and_marks_edited() {
+        let mut ops = vec![
+            msg_op(100, "alice", "hello"),
+            edit_op(150, "alice", 100, "world"),
+        ];
+        ops.sort_by_key(op_sort_key);
+        let out = fold_history_ops(ops);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].plaintext, "world");
+        assert!(out[0].edited);
+    }
+
+    #[test]
+    fn edit_by_non_author_is_rejected() {
+        let mut ops = vec![
+            msg_op(100, "alice", "hello"),
+            edit_op(150, "bob", 100, "hacked"),
+        ];
+        ops.sort_by_key(op_sort_key);
+        let out = fold_history_ops(ops);
+        assert_eq!(out[0].plaintext, "hello");
+        assert!(!out[0].edited);
+    }
+
+    #[test]
+    fn delete_removes_message() {
+        let mut ops = vec![
+            msg_op(100, "alice", "hello"),
+            msg_op(110, "bob", "hi"),
+            delete_op(150, "alice", 100),
+        ];
+        ops.sort_by_key(op_sort_key);
+        let out = fold_history_ops(ops);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].sender, "bob");
+    }
+
+    #[test]
+    fn delete_by_non_author_keeps_message() {
+        let mut ops = vec![msg_op(100, "alice", "hello"), delete_op(150, "bob", 100)];
+        ops.sort_by_key(op_sort_key);
+        assert_eq!(fold_history_ops(ops).len(), 1);
+    }
+
+    #[test]
+    fn reaction_add_and_remove() {
+        let mut ops = vec![
+            msg_op(100, "alice", "hello"),
+            reaction_op(150, "bob", 100, "add"),
+            reaction_op(160, "carol", 100, "add"),
+            reaction_op(170, "bob", 100, "remove"),
+        ];
+        ops.sort_by_key(op_sort_key);
+        let out = fold_history_ops(ops);
+        assert_eq!(out[0].reactions.len(), 1);
+        assert_eq!(out[0].reactions[0].users, vec!["carol".to_string()]);
+    }
+
+    #[test]
+    fn op_sorts_after_its_message_even_with_equal_ts() {
+        // 构造乱序输入（edit 的 ts() == 目标消息 ts）：sort 必须保证消息在前。
+        let mut ops = vec![
+            edit_op(150, "alice", 100, "world"),
+            msg_op(100, "alice", "hello"),
+        ];
+        ops.sort_by_key(op_sort_key);
+        let out = fold_history_ops(ops);
+        assert_eq!(out[0].plaintext, "world");
+        assert!(out[0].edited);
+    }
+
+    #[test]
+    fn last_edit_wins() {
+        let mut ops = vec![
+            msg_op(100, "alice", "v1"),
+            edit_op(150, "alice", 100, "v2"),
+            edit_op(160, "alice", 100, "v3"),
+        ];
+        ops.sort_by_key(op_sort_key);
+        let out = fold_history_ops(ops);
+        assert_eq!(out[0].plaintext, "v3");
+    }
+
+    #[test]
+    fn op_targeting_message_outside_window_is_skipped() {
+        let mut ops = vec![
+            msg_op(200, "alice", "new"),
+            edit_op(210, "alice", 100, "ghost"),
+        ];
+        ops.sort_by_key(op_sort_key);
+        let out = fold_history_ops(ops);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].plaintext, "new");
+        assert!(!out[0].edited);
     }
 }

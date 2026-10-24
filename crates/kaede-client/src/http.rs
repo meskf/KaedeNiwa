@@ -89,6 +89,12 @@ pub struct MeResp {
 pub struct PublishKeyPackagesReq {
     /// base64(URL-safe, no pad) 的 KeyPackage 列表。
     pub packages: Vec<String>,
+    /// 身份重建后首次上传时置 true：先清空该账号的旧 KP 队列。
+    ///
+    /// 旧 KP 属于已经销毁的本地身份，对新客户端不可解密；不清理会让
+    /// host 取到 stale KP，Welcome/DM 报 `NoMatchingKeyPackage`。
+    #[serde(default)]
+    pub replace: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -402,10 +408,15 @@ impl HttpApi {
         parse_json::<MeResp>(resp).await
     }
 
-    /// 上传一批 KeyPackage。
-    pub async fn publish_key_packages(&self, packages: Vec<Vec<u8>>) -> Result<(), ClientError> {
+    /// 上传一批 KeyPackage。`replace=true` 时先清空旧队列（身份重建后使用）。
+    pub async fn publish_key_packages(
+        &self,
+        packages: Vec<Vec<u8>>,
+        replace: bool,
+    ) -> Result<(), ClientError> {
         let req = PublishKeyPackagesReq {
             packages: packages.iter().map(|p| URL_SAFE_NO_PAD.encode(p)).collect(),
+            replace,
         };
         let resp = self
             .http
@@ -1225,19 +1236,27 @@ impl HttpApi {
 }
 
 fn map_reqwest_err(e: reqwest::Error) -> ClientError {
+    // 保留完整 source 链：wasm 上 reqwest 的顶层错误经常只有
+    // "builder error"，没有底层 JS 异常就完全无法定位。
+    let mut detail = format!("http: {}", e);
+    let mut source = std::error::Error::source(&e);
+    while let Some(s) = source {
+        detail.push_str(&format!(" <- {}", s));
+        source = s.source();
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         if e.is_timeout() {
             return ClientError::Timeout;
         }
         if e.is_connect() {
-            return ClientError::Connection(format!("http: {}", e));
+            return ClientError::Connection(detail);
         }
         if e.is_decode() {
             return ClientError::Protocol(format!("decode: {}", e));
         }
     }
-    ClientError::Transport(format!("http: {}", e))
+    ClientError::Transport(detail)
 }
 
 async fn parse_json<T: serde::de::DeserializeOwned>(

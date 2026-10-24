@@ -3,7 +3,8 @@
 use dioxus::prelude::*;
 use kaede_client::http::DmConversation;
 
-use crate::state::{AppState, UiMessage, UiState};
+use crate::i18n::use_i18n;
+use crate::state::{AppState, MsgMenuTarget, UiMessage, UiState};
 
 pub(crate) async fn load_messages(mut app: AppState, conv_id: String) {
     let room_opt = app.room.read().clone();
@@ -28,8 +29,9 @@ pub(crate) async fn load_messages(mut app: AppState, conv_id: String) {
                     text: h.plaintext,
                     attachments: h.attachments,
                     reply_to: h.reply_to,
-                    reactions: vec![],
+                    reactions: h.reactions,
                     mentions: h.mentions,
+                    edited: h.edited,
                 })
                 .collect();
             // 合并而不是替换：避免丢掉加载期间收到的实时 DM。
@@ -76,8 +78,9 @@ async fn load_older_messages(mut app: AppState, conv_id: String) {
                     text: h.plaintext,
                     attachments: h.attachments,
                     reply_to: h.reply_to,
-                    reactions: vec![],
+                    reactions: h.reactions,
                     mentions: h.mentions,
+                    edited: h.edited,
                 })
                 .collect();
             let mut map = app.dm_messages.write();
@@ -109,14 +112,58 @@ pub(crate) async fn load_conversations(mut app: AppState) {
 #[component]
 pub fn DmView() -> Element {
     let app = use_context::<AppState>();
-    let ui = use_context::<UiState>();
+    let mut ui = use_context::<UiState>();
+    let i18n = use_i18n();
     let mut input = use_signal(String::new);
 
     let selected = ui.selected_dm_conv.read().clone();
+
+    // 切换 DM 会话时清掉回复目标，防止把 A 会话的引用带进 B 会话。
+    let mut prev_conv = use_signal(|| Option::<String>::None);
+    use_effect(move || {
+        let cur = ui.selected_dm_conv.read().clone();
+        if *prev_conv.peek() != cur {
+            prev_conv.set(cur.clone());
+            ui.reply_target.set(None);
+        }
+    });
+
     let messages: Vec<UiMessage> = selected
         .as_ref()
         .and_then(|cid| app.dm_messages.read().get(cid).cloned())
         .unwrap_or_default();
+
+    // typing 指示的过期重渲染：2s 本地 tick（只写不读，避免自触发循环）。
+    let mut typing_tick = use_signal(|| 0u64);
+    use_future(move || async move {
+        loop {
+            crate::content::tick_sleep(2000).await;
+            *typing_tick.write() += 1;
+        }
+    });
+
+    // DM 的 typing 键与 observer 写入处一致：channel_key(server, conv_id)。
+    // 不显示自己。
+    let typing_text = use_memo(move || {
+        let _ = *typing_tick.read();
+        let sid = app.current_server.read().clone()?;
+        let conv = ui.selected_dm_conv.read().clone()?;
+        let key = AppState::channel_key(&sid, &conv);
+        let now = crate::observer::now_ms();
+        let me = crate::content::current_uid(&ui, &app);
+        let map = app.typing.read();
+        let list = map.get(&key)?;
+        let names: Vec<String> = list
+            .iter()
+            .filter(|(_, ts)| now - *ts < 6000)
+            .filter(|(uid, _)| uid != &me)
+            .map(|(uid, _)| crate::content::display_name(&app, &sid, uid))
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        Some(i18n.tf("channel.typing", &[("names", &names.join("、"))]))
+    });
 
     // 已读：查看中的 DM 收到/加载新消息时上报 last_read 并清本地未读。
     // 按会话记录已上报的最大 ts，避免任何 DM 来消息都重复 POST。
@@ -222,63 +269,49 @@ pub fn DmView() -> Element {
                     "加载更早"
                 }
                 for m in messages {
-                    div {
-                        style: "display: flex; gap: 10px; align-items: flex-start;",
-                        div {
-                            style: "width: 32px; height: 32px; border-radius: 50%; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; flex-shrink: 0;",
-                            "{m.author_initial}"
-                        }
-                        div {
-                            style: "flex: 1; min-width: 0;",
-                            div {
-                                style: "display: flex; gap: 8px; align-items: baseline;",
-                                span {
-                                    style: "font-size: 13px; font-weight: 600; color: var(--fg);",
-                                    "{m.author}"
-                                }
-                                span {
-                                    style: "font-size: 11px; color: var(--fg-faint);",
-                                    "{m.time}"
-                                }
-                            }
-                            div {
-                                style: "font-size: 14px; color: var(--fg); margin-top: 2px; white-space: pre-wrap; word-wrap: break-word;",
-                                for seg in crate::content::split_mentions(&m.text, &m.mentions) {
-                                    if seg.1 {
-                                        span {
-                                            style: "padding: 0 2px; border-radius: 3px; background: rgba(88,101,242,0.20); font-weight: 600;",
-                                            "{seg.0}"
-                                        }
-                                    } else {
-                                        span { "{seg.0}" }
-                                    }
-                                }
-                            }
-                            // M57: DM 附件渲染（复用 content.rs 的 URL 白名单）
-                            if !m.attachments.is_empty() {
-                                div {
-                                    style: "margin-top: 6px; display: flex; flex-direction: column; gap: 4px;",
-                                    for att in m.attachments.iter() {
-                                        crate::attachment::AttachmentView {
-                                            att: att.clone(),
-                                            target_id: m.channel_id.clone(),
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    DmMessageRow { key: "{m.id}", msg: m.clone(), conv_id: conv_id.clone() }
                 }
             }
             div {
                 style: "padding: 12px 24px; border-top: 1px solid rgba(128,128,128,0.15);",
+                if let Some(text) = typing_text() {
+                    div {
+                        style: "font-size: 12px; color: var(--fg-faint); padding: 0 4px 4px;",
+                        "{text}"
+                    }
+                }
+                if let Some(r) = ui.reply_target.read().clone() {
+                    div {
+                        class: "reply-preview",
+                        span { class: "reply-preview-icon", "↪" }
+                        span { class: "reply-preview-author", "@{r.author}" }
+                        span { class: "reply-preview-text", "{r.preview}" }
+                        button {
+                            class: "reply-preview-cancel",
+                            onclick: move |_| ui.reply_target.set(None),
+                            "✕"
+                        }
+                    }
+                }
                 div {
                     style: "display: flex; gap: 8px;",
                     input {
                         r#type: "text",
                         placeholder: "输入消息...",
                         value: "{input}",
-                        oninput: move |e| input.set(e.value()),
+                        oninput: {
+                            let cid = conv_id.clone();
+                            move |e| {
+                                input.set(e.value());
+                                // 客户端内置 4 秒节流，UI 直接调即可。
+                                if let Some(room) = app.room.read().clone() {
+                                    let cid = cid.clone();
+                                    spawn(async move {
+                                        let _ = room.send_typing(&cid).await;
+                                    });
+                                }
+                            }
+                        },
                         style: "flex: 1; padding: 10px 14px; border-radius: 8px; border: 1px solid rgba(128,128,128,0.35); background: rgba(0,0,0,0.05); color: var(--fg); font-size: 14px; outline: none;",
                     }
                     button {
@@ -331,23 +364,192 @@ pub fn DmView() -> Element {
                                     .unwrap_or_default();
                                 let cid2 = cid.clone();
                                 let mut ui_for_err = ui;
+                                let reply = ui.reply_target.read().clone();
                                 spawn(async move {
                                     let room_opt = app.room.read().clone();
                                     let Some(room) = room_opt else { return };
-                                    let result = room
-                                        .send_dm_with_attachments_mentions(&cid2, &text, &[], &mentions)
-                                        .await;
+                                    let result = match &reply {
+                                        Some(r) => {
+                                            room.send_dm_with_reply(
+                                                &cid2,
+                                                &text,
+                                                &mentions,
+                                                kaede_protocol::ReplyRef {
+                                                    ts: r.ts,
+                                                    author: r.author.clone(),
+                                                    preview: r.preview.clone(),
+                                                },
+                                            )
+                                            .await
+                                        }
+                                        None => {
+                                            room.send_dm_with_attachments_mentions(
+                                                &cid2, &text, &[], &mentions,
+                                            )
+                                            .await
+                                        }
+                                    };
                                     if let Err(e) = &result {
                                         tracing::warn!("send_dm: {}", e);
                                         ui_for_err
                                             .toast
                                             .set(Some((format!("发送失败: {}", e), true)));
+                                    } else {
+                                        ui_for_err.reply_target.set(None);
                                     }
                                     input.set(String::new());
                                 });
                             }
                         },
                         "发送"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// DM 消息行：右键菜单（自己的消息可编辑/删除）、内联编辑、（已编辑）标记。
+#[component]
+fn DmMessageRow(msg: UiMessage, conv_id: String) -> Element {
+    let mut ui = use_context::<UiState>();
+    let app = use_context::<AppState>();
+    let i18n = use_i18n();
+
+    let editing = ui
+        .editing_message
+        .read()
+        .as_ref()
+        .is_some_and(|(id, _)| id == &msg.id);
+    let edit_draft = if editing {
+        ui.editing_message
+            .read()
+            .as_ref()
+            .map(|(_, d)| d.clone())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let menu_target = MsgMenuTarget {
+        target_id: conv_id.clone(),
+        msg_id: msg.id.clone(),
+        author: msg.author.clone(),
+        ts: msg.ts,
+        text: msg.text.clone(),
+        is_dm: true,
+    };
+
+    let mid_edit = msg.id.clone();
+    let target_ts = msg.ts;
+    let submit_author = msg.author.clone();
+
+    rsx! {
+        div {
+            style: "display: flex; gap: 10px; align-items: flex-start;",
+            oncontextmenu: move |e| {
+                e.prevent_default();
+                // 菜单项在 MsgContextMenu 内过滤：回复所有人可用，
+                // 编辑/删除仅自己的消息（mine 判断在菜单组件里）。
+                let coords = e.client_coordinates();
+                ui.msg_menu
+                    .set(Some((coords.x as i32, coords.y as i32, menu_target.clone())));
+            },
+            div {
+                style: "width: 32px; height: 32px; border-radius: 50%; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; flex-shrink: 0;",
+                "{msg.author_initial}"
+            }
+            div {
+                style: "flex: 1; min-width: 0;",
+                div {
+                    style: "display: flex; gap: 8px; align-items: baseline;",
+                    span {
+                        style: "font-size: 13px; font-weight: 600; color: var(--fg);",
+                        "{msg.author}"
+                    }
+                    span {
+                        style: "font-size: 11px; color: var(--fg-faint);",
+                        "{msg.time}"
+                    }
+                    if msg.edited {
+                        span {
+                            style: "font-size: 11px; color: var(--fg-faint);",
+                            "{i18n.t(\"channel.edited\")}"
+                        }
+                    }
+                }
+                if let Some(r) = &msg.reply_to {
+                    div {
+                        class: "msg-reply",
+                        span { class: "msg-reply-author", "{r.author}" }
+                        span { class: "msg-reply-preview", " {r.preview}" }
+                    }
+                }
+                if editing {
+                    div {
+                        textarea {
+                            id: "msg-edit-input",
+                            rows: 2,
+                            autofocus: true,
+                            value: "{edit_draft}",
+                            style: "width: 100%; box-sizing: border-box; padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(128,128,128,0.4); background: rgba(0,0,0,0.05); color: var(--fg); font-size: 14px; outline: none; resize: none; font-family: inherit;",
+                            oninput: move |e| {
+                                ui.editing_message.set(Some((mid_edit.clone(), e.value())));
+                            },
+                            onkeydown: move |e: KeyboardEvent| {
+                                if e.is_composing() {
+                                    return;
+                                }
+                                if e.key() == Key::Escape {
+                                    ui.editing_message.set(None);
+                                    return;
+                                }
+                                if e.key() == Key::Enter
+                                    && !e.modifiers().contains(Modifiers::SHIFT)
+                                {
+                                    e.prevent_default();
+                                    crate::content::submit_edit(
+                                        ui,
+                                        app,
+                                        i18n,
+                                        conv_id.clone(),
+                                        target_ts,
+                                        submit_author.clone(),
+                                        true,
+                                    );
+                                }
+                            },
+                        }
+                        div {
+                            style: "font-size: 11px; color: var(--fg-faint); margin-top: 2px;",
+                            "{i18n.t(\"channel.editHint\")}"
+                        }
+                    }
+                } else {
+                    div {
+                        style: "font-size: 14px; color: var(--fg); margin-top: 2px; white-space: pre-wrap; word-wrap: break-word;",
+                        for seg in crate::content::split_mentions(&msg.text, &msg.mentions) {
+                            if seg.1 {
+                                span {
+                                    style: "padding: 0 2px; border-radius: 3px; background: rgba(88,101,242,0.20); font-weight: 600;",
+                                    "{seg.0}"
+                                }
+                            } else {
+                                span { "{seg.0}" }
+                            }
+                        }
+                    }
+                }
+                // M57: DM 附件渲染（复用 content.rs 的 URL 白名单）
+                if !msg.attachments.is_empty() {
+                    div {
+                        style: "margin-top: 6px; display: flex; flex-direction: column; gap: 4px;",
+                        for att in msg.attachments.iter() {
+                            crate::attachment::AttachmentView {
+                                att: att.clone(),
+                                target_id: msg.channel_id.clone(),
+                            }
+                        }
                     }
                 }
             }

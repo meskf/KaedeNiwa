@@ -237,6 +237,32 @@ pub fn apply_event(
                         apply_reaction(&mut app, &server_id, &r, from.as_str());
                     }
                 }
+                DecodedPayload::Edit(e) => {
+                    // 与 Message 臂同样只接受公开频道的主群广播；
+                    // 发送者用 MLS 认证的 from，不信任 payload 声明的 e.u。
+                    let accepted = app
+                        .channels
+                        .read()
+                        .get(&server_id)
+                        .and_then(|list| list.iter().find(|c| c.id == e.c))
+                        .map(|c| !c.is_private)
+                        .unwrap_or(false);
+                    if accepted {
+                        apply_edit(&mut app, &server_id, &e.c, e.target_ts, from.as_str(), &e.t);
+                    }
+                }
+                DecodedPayload::Delete(d) => {
+                    let accepted = app
+                        .channels
+                        .read()
+                        .get(&server_id)
+                        .and_then(|list| list.iter().find(|c| c.id == d.c))
+                        .map(|c| !c.is_private)
+                        .unwrap_or(false);
+                    if accepted {
+                        apply_delete(&mut app, &server_id, &d.c, d.target_ts, from.as_str());
+                    }
+                }
                 _ => {}
             }
         }
@@ -280,46 +306,73 @@ pub fn apply_event(
             ts,
             plaintext,
         } => {
-            // 私密频道实时消息：频道 id 以服务器事件为准，时间用服务器 ts。
-            if let Some(p) = kaede_client::MessagePayload::parse(&plaintext) {
-                let author = from.as_str().to_string();
-                let initial = author
-                    .chars()
-                    .next()
-                    .map(|c| c.to_string())
-                    .unwrap_or_default();
-                let msg = UiMessage {
-                    id: format!("{}::{}::{}::{}", server_id, author, ts, next_seq()),
-                    channel_id: channel_id.clone(),
-                    author,
-                    author_initial: initial,
-                    day: day_label(ts),
-                    time: format_hhmm(ts),
-                    ts,
-                    text: p.t,
-                    attachments: p.a,
-                    reply_to: p.r,
-                    reactions: Vec::new(),
-                    mentions: p.m,
-                };
-                let viewing = viewing_channel(app, ui, &server_id, &channel_id);
-                if !viewing {
-                    let me = app
-                        .room
-                        .read()
-                        .as_ref()
-                        .map(|r| r.uid().as_str().to_string());
-                    let mention_me = me.is_some_and(|uid| msg.mentions.iter().any(|m| m == &uid));
-                    app.bump_unread(&server_id, &channel_id, mention_me);
+            // 私密频道实时流：必须全解析——Edit/Delete payload 也走这条事件，
+            // 只按 MessagePayload 解析会把编辑操作误当成新消息显示。
+            match kaede_client::decode(&plaintext) {
+                DecodedPayload::Message(p) => {
+                    // 私密频道实时消息：频道 id 以服务器事件为准，时间用服务器 ts。
+                    let author = from.as_str().to_string();
+                    let initial = author
+                        .chars()
+                        .next()
+                        .map(|c| c.to_string())
+                        .unwrap_or_default();
+                    let msg = UiMessage {
+                        id: format!("{}::{}::{}::{}", server_id, author, ts, next_seq()),
+                        channel_id: channel_id.clone(),
+                        author,
+                        author_initial: initial,
+                        day: day_label(ts),
+                        time: format_hhmm(ts),
+                        ts,
+                        text: p.t,
+                        attachments: p.a,
+                        reply_to: p.r,
+                        reactions: Vec::new(),
+                        mentions: p.m,
+                        edited: false,
+                    };
+                    let viewing = viewing_channel(app, ui, &server_id, &channel_id);
+                    if !viewing {
+                        let me = app
+                            .room
+                            .read()
+                            .as_ref()
+                            .map(|r| r.uid().as_str().to_string());
+                        let mention_me =
+                            me.is_some_and(|uid| msg.mentions.iter().any(|m| m == &uid));
+                        app.bump_unread(&server_id, &channel_id, mention_me);
+                    }
+                    let mut s = app.messages.write();
+                    let key = AppState::channel_key(&server_id, &channel_id);
+                    let list = s.entry(key).or_default();
+                    if !list.iter().any(|m| m.ts == ts && m.author == msg.author) {
+                        list.push(msg);
+                        list.sort_by_key(|m| m.ts);
+                        trim_cached_messages(list);
+                    }
                 }
-                let mut s = app.messages.write();
-                let key = AppState::channel_key(&server_id, &channel_id);
-                let list = s.entry(key).or_default();
-                if !list.iter().any(|m| m.ts == ts && m.author == msg.author) {
-                    list.push(msg);
-                    list.sort_by_key(|m| m.ts);
-                    trim_cached_messages(list);
+                // 频道与发送者以服务器事件为准，不信任 payload 的 c/u。
+                DecodedPayload::Edit(e) => {
+                    apply_edit(
+                        &mut app,
+                        &server_id,
+                        &channel_id,
+                        e.target_ts,
+                        from.as_str(),
+                        &e.t,
+                    );
                 }
+                DecodedPayload::Delete(d) => {
+                    apply_delete(
+                        &mut app,
+                        &server_id,
+                        &channel_id,
+                        d.target_ts,
+                        from.as_str(),
+                    );
+                }
+                _ => {}
             }
         }
 
@@ -344,58 +397,71 @@ pub fn apply_event(
             ts,
             plaintext,
         } => {
-            if let Some(p) = kaede_client::MessagePayload::parse(&plaintext) {
-                // C19 (DM 侧): 强制用 server 注入的 from 覆盖 payload 声明的 u。
-                // 与主群 AppMessage 的处理保持一致（见 decode_message_payload）。
-                if !p.u.is_empty() && p.u.as_str() != from.as_str() {
-                    tracing::warn!(
-                        "dm sender mismatch: payload.u={} but server from={}; using from",
-                        p.u,
-                        from
-                    );
-                }
-                // 统一使用服务器 ts：排序、去重、翻页游标必须同源。
-                // 仅在旧服务器没有 ts 时回退到 payload ts。
-                let actual_ts = if ts > 0 { ts } else { p.ts };
-                let msg = UiMessage {
-                    id: format!("dm-{}-{}", conv_id, actual_ts),
-                    channel_id: conv_id.clone(),
-                    author: from.as_str().to_string(),
-                    author_initial: p
-                        .u
-                        .chars()
-                        .next()
-                        .map(|c| c.to_string())
-                        .unwrap_or_default(),
-                    day: crate::observer::day_label(ts),
-                    time: crate::observer::format_hhmm(ts),
-                    ts: actual_ts,
-                    text: p.t,
-                    attachments: p.a,
-                    reply_to: p.r,
-                    reactions: vec![],
-                    mentions: p.m,
-                };
-                let viewing = viewing_dm(app, ui, &server_id, &conv_id);
-                if !viewing {
-                    let me = app
-                        .room
-                        .read()
-                        .as_ref()
-                        .map(|r| r.uid().as_str().to_string());
-                    let is_me = me.as_deref() == Some(from.as_str());
-                    let mention_me = me.is_some_and(|uid| msg.mentions.iter().any(|m| m == &uid));
-                    if !is_me {
-                        app.bump_unread(&server_id, &conv_id, mention_me);
+            // DM 全解析：Edit/Delete 也走这条事件（含自己操作的本地 echo，
+            // send_op_envelope 会 emit_local_event，apply_* 幂等无害）。
+            match kaede_client::decode(&plaintext) {
+                DecodedPayload::Message(p) => {
+                    // C19 (DM 侧): 强制用 server 注入的 from 覆盖 payload 声明的 u。
+                    // 与主群 AppMessage 的处理保持一致（见 decode_message_payload）。
+                    if !p.u.is_empty() && p.u.as_str() != from.as_str() {
+                        tracing::warn!(
+                            "dm sender mismatch: payload.u={} but server from={}; using from",
+                            p.u,
+                            from
+                        );
+                    }
+                    // 统一使用服务器 ts：排序、去重、翻页游标必须同源。
+                    // 仅在旧服务器没有 ts 时回退到 payload ts。
+                    let actual_ts = if ts > 0 { ts } else { p.ts };
+                    let msg = UiMessage {
+                        id: format!("dm-{}-{}", conv_id, actual_ts),
+                        channel_id: conv_id.clone(),
+                        author: from.as_str().to_string(),
+                        author_initial: p
+                            .u
+                            .chars()
+                            .next()
+                            .map(|c| c.to_string())
+                            .unwrap_or_default(),
+                        day: crate::observer::day_label(ts),
+                        time: crate::observer::format_hhmm(ts),
+                        ts: actual_ts,
+                        text: p.t,
+                        attachments: p.a,
+                        reply_to: p.r,
+                        reactions: vec![],
+                        mentions: p.m,
+                        edited: false,
+                    };
+                    let viewing = viewing_dm(app, ui, &server_id, &conv_id);
+                    if !viewing {
+                        let me = app
+                            .room
+                            .read()
+                            .as_ref()
+                            .map(|r| r.uid().as_str().to_string());
+                        let is_me = me.as_deref() == Some(from.as_str());
+                        let mention_me =
+                            me.is_some_and(|uid| msg.mentions.iter().any(|m| m == &uid));
+                        if !is_me {
+                            app.bump_unread(&server_id, &conv_id, mention_me);
+                        }
+                    }
+                    let mut map = app.dm_messages.write();
+                    let list = map.entry(conv_id).or_default();
+                    if !list.iter().any(|m| m.ts == actual_ts) {
+                        list.push(msg);
+                        list.sort_by_key(|m| m.ts);
+                        trim_cached_messages(list);
                     }
                 }
-                let mut map = app.dm_messages.write();
-                let list = map.entry(conv_id).or_default();
-                if !list.iter().any(|m| m.ts == actual_ts) {
-                    list.push(msg);
-                    list.sort_by_key(|m| m.ts);
-                    trim_cached_messages(list);
+                DecodedPayload::Edit(e) => {
+                    apply_dm_edit(&mut app, &conv_id, e.target_ts, from.as_str(), &e.t);
                 }
+                DecodedPayload::Delete(d) => {
+                    apply_dm_delete(&mut app, &conv_id, d.target_ts, from.as_str());
+                }
+                _ => {}
             }
         }
         ClientEvent::Disconnected { server_id, reason } => {
@@ -429,6 +495,7 @@ pub fn apply_event(
                 }
                 // 清理所有挂起的 ConsumerHandle
                 let consumers = std::mem::take(&mut *voice.media_consumers.write());
+                voice.audio_players.write().clear();
                 spawn(async move {
                     for (_, h) in consumers {
                         h.stop().await;
@@ -514,6 +581,20 @@ pub fn apply_event(
             ui.toast.set(Some((user_message, true)));
         }
 
+        ClientEvent::Typing {
+            server_id,
+            channel_id,
+            from,
+        } => {
+            // 键与消息列表渲染处保持一致：频道和 DM 都用 channel_key
+            // （DM 的 channel_id 即 conv_id）。渲染端只取数秒内的记录。
+            let key = AppState::channel_key(&server_id, &channel_id);
+            let now = now_ms();
+            let mut map = app.typing.write();
+            let list = map.entry(key).or_default();
+            crate::state::upsert_typing(list, from.as_str(), now);
+        }
+
         _ => {}
     }
 }
@@ -562,6 +643,7 @@ pub fn logout_and_clear(mut app: AppState, mut ui: UiState, mut voice: VoiceStat
                 h.inner().disconnect().await;
             }
             let consumers = std::mem::take(&mut *voice.media_consumers.write());
+            voice.audio_players.write().clear();
             for (_, h) in consumers {
                 h.stop().await;
             }
@@ -581,6 +663,7 @@ pub fn logout_and_clear(mut app: AppState, mut ui: UiState, mut voice: VoiceStat
         app.dm_messages.write().clear();
         app.loaded_channels.write().clear();
         app.unread.write().clear();
+        app.typing.write().clear();
         app.pending_adds.write().clear();
         app.is_host.set(None);
         app.reconnecting.set(false);
@@ -869,6 +952,7 @@ fn decode_message_payload(
         reply_to: p.r,
         reactions: Vec::new(),
         mentions: p.m,
+        edited: false,
     })
 }
 
@@ -907,6 +991,73 @@ fn apply_reaction(
     }
 }
 
+// ============================================================================
+// 消息编辑 / 删除（E2EE 应用层操作的本地应用）
+// ============================================================================
+
+/// 频道消息编辑：命中 (ts, author) 的消息替换文本并标记已编辑；找不到忽略。
+pub(crate) fn apply_edit(
+    app: &mut AppState,
+    server_id: &str,
+    channel_id: &str,
+    target_ts: i64,
+    from: &str,
+    new_text: &str,
+) {
+    let key = AppState::channel_key(server_id, channel_id);
+    if let Some(list) = app.messages.write().get_mut(&key) {
+        apply_edit_to(list, target_ts, from, new_text);
+    }
+}
+
+/// 频道消息删除：移除命中 (ts, author) 的消息；找不到忽略（幂等）。
+pub(crate) fn apply_delete(
+    app: &mut AppState,
+    server_id: &str,
+    channel_id: &str,
+    target_ts: i64,
+    from: &str,
+) {
+    let key = AppState::channel_key(server_id, channel_id);
+    if let Some(list) = app.messages.write().get_mut(&key) {
+        apply_delete_from(list, target_ts, from);
+    }
+}
+
+/// DM 消息编辑（DM 列表的键直接是 conv_id）。
+pub(crate) fn apply_dm_edit(
+    app: &mut AppState,
+    conv_id: &str,
+    target_ts: i64,
+    from: &str,
+    new_text: &str,
+) {
+    if let Some(list) = app.dm_messages.write().get_mut(conv_id) {
+        apply_edit_to(list, target_ts, from, new_text);
+    }
+}
+
+/// DM 消息删除（DM 列表的键直接是 conv_id）。
+pub(crate) fn apply_dm_delete(app: &mut AppState, conv_id: &str, target_ts: i64, from: &str) {
+    if let Some(list) = app.dm_messages.write().get_mut(conv_id) {
+        apply_delete_from(list, target_ts, from);
+    }
+}
+
+fn apply_edit_to(list: &mut [UiMessage], target_ts: i64, from: &str, new_text: &str) {
+    if let Some(m) = list
+        .iter_mut()
+        .find(|m| m.ts == target_ts && m.author == from)
+    {
+        m.text = new_text.to_string();
+        m.edited = true;
+    }
+}
+
+fn apply_delete_from(list: &mut Vec<UiMessage>, target_ts: i64, from: &str) {
+    list.retain(|m| !(m.ts == target_ts && m.author == from));
+}
+
 pub fn history_to_ui(
     h: kaede_client::HistoryMessage,
     channel_id: &str,
@@ -930,8 +1081,9 @@ pub fn history_to_ui(
         text: h.plaintext,
         attachments: h.attachments,
         reply_to: h.reply_to,
-        reactions: Vec::new(),
+        reactions: h.reactions,
         mentions: h.mentions,
+        edited: h.edited,
     }
 }
 
@@ -960,7 +1112,9 @@ pub(crate) fn day_label(ms: i64) -> String {
 }
 
 pub(crate) fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    // wasm32 上 std::time::SystemTime::now() 会 panic（"time not implemented"），
+    // 必须使用 web-time（native 下等价于 std）。
+    use web_time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -976,5 +1130,55 @@ pub(crate) fn format_hhmm(ms: i64) -> String {
             let secs = (ms / 1000).rem_euclid(86400);
             format!("{:02}:{:02}", secs / 3600, (secs / 60) % 60)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(ts: i64, author: &str, text: &str) -> UiMessage {
+        UiMessage {
+            ts,
+            author: author.into(),
+            text: text.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn edit_replaces_text_and_marks_edited() {
+        let mut list = vec![msg(1, "alice", "hello"), msg(2, "bob", "hi")];
+        apply_edit_to(&mut list, 1, "alice", "world");
+        assert_eq!(list[0].text, "world");
+        assert!(list[0].edited);
+        assert_eq!(list[1].text, "hi");
+        assert!(!list[1].edited);
+        // 幂等：重复应用同一编辑结果不变。
+        apply_edit_to(&mut list, 1, "alice", "world");
+        assert_eq!(list[0].text, "world");
+    }
+
+    #[test]
+    fn edit_requires_matching_author() {
+        let mut list = vec![msg(1, "alice", "hello")];
+        apply_edit_to(&mut list, 1, "bob", "world");
+        assert_eq!(list[0].text, "hello");
+        assert!(!list[0].edited);
+    }
+
+    #[test]
+    fn delete_removes_only_matching_message() {
+        let mut list = vec![
+            msg(1, "alice", "a"),
+            msg(1, "bob", "b"),
+            msg(2, "alice", "c"),
+        ];
+        apply_delete_from(&mut list, 1, "alice");
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|m| !(m.ts == 1 && m.author == "alice")));
+        // 幂等：目标已不存在时无副作用。
+        apply_delete_from(&mut list, 1, "alice");
+        assert_eq!(list.len(), 2);
     }
 }

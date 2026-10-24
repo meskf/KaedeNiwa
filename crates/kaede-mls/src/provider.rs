@@ -194,9 +194,12 @@ impl KaedeMlsProvider {
         })
     }
 
-    /// 序列化整个 storage 到字节（不加密）。
+    /// 序列化整个 storage 到字节（**明文**，含 KeyPackage / 群组私钥材料）。
     ///
-    /// 生产代码应使用 [`Self::snapshot_with`] 并传入 cipher。
+    /// 合法用途：`MlsSession::snapshot_inner` 把它作为中间构建块——
+    /// 其输出会被上层整体加密（见 `snapshot_with` 的调用方），且中间缓冲
+    /// 用后已 zeroize。**不要**把本函数的返回值直接写盘。
+    /// 需要独立加密快照时用 [`Self::snapshot_with`]。
     pub fn snapshot(&self) -> Result<Vec<u8>, ProviderError> {
         self.snapshot_with(&crate::NoOpCipher)
     }

@@ -91,6 +91,80 @@ impl ReactionPayload {
     }
 }
 
+/// 消息编辑 payload（E2EE 应用层操作）。
+///
+/// 编辑不走新的协议消息，而是作为加密 envelope 内的独立 payload 类型
+/// （与 [`ReactionPayload`] 同模式），服务端只存/转密文，零改动。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditPayload {
+    /// 固定 `"edit"`。人类可读的 tag，也用于防御性校验。
+    pub kind: String,
+    pub c: String,
+    pub u: String,
+    /// 目标消息的 ts。
+    pub target_ts: i64,
+    /// 新文本。
+    pub t: String,
+}
+
+impl EditPayload {
+    pub fn new(
+        channel_id: impl Into<String>,
+        uid: impl Into<String>,
+        target_ts: i64,
+        new_text: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: "edit".into(),
+            c: channel_id.into(),
+            u: uid.into(),
+            target_ts,
+            t: new_text.into(),
+        }
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
+/// 消息删除 payload（E2EE 应用层操作）。
+///
+/// 与 [`EditPayload`] 同模式：加密 envelope 内的独立 payload 类型，
+/// 服务端零改动。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletePayload {
+    /// 固定 `"delete"`。
+    pub kind: String,
+    pub c: String,
+    pub u: String,
+    /// 目标消息的 ts。
+    pub target_ts: i64,
+}
+
+impl DeletePayload {
+    pub fn new(channel_id: impl Into<String>, uid: impl Into<String>, target_ts: i64) -> Self {
+        Self {
+            kind: "delete".into(),
+            c: channel_id.into(),
+            u: uid.into(),
+            target_ts,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
 /// 媒体会话信令 payload。
 ///
 /// 用 MLS Application Message 广播媒体格式元数据，让接收端
@@ -199,17 +273,39 @@ pub enum DecodedPayload {
     Message(MessagePayload),
     Reaction(ReactionPayload),
     MediaMeta(MediaMetaPayload),
+    Edit(EditPayload),
+    Delete(DeletePayload),
     /// 无法识别（旧版消息或纯文本）。
     Raw(Vec<u8>),
 }
 
 pub fn decode(bytes: &[u8]) -> DecodedPayload {
-    // 字段名不同，serde 反序列化本身就区分了 payload 类型：
+    // 顺序安全（关键）：Edit/Delete 的 JSON 也含 c/u/t 字段，会被
+    // MessagePayload 的 serde 解析接受（多余字段被忽略）。所以必须先试
+    // Edit / Delete，再试 Message。
+    //
+    // 其余类型靠字段名天然区分：
     // - MessagePayload 必填 c / u / t
     // - ReactionPayload 必填 c / u / target_ts / emoji / action
     // - MediaMetaPayload 必填 kind / channel_id / uid / purpose / codec / action
-    // 所以顺序无关，任意顺序都行。
 
+    if let Some(e) = EditPayload::parse(bytes)
+        && e.kind == "edit"
+        && e.target_ts > 0
+        && !e.c.is_empty()
+        && !e.u.is_empty()
+        && !e.t.is_empty()
+    {
+        return DecodedPayload::Edit(e);
+    }
+    if let Some(d) = DeletePayload::parse(bytes)
+        && d.kind == "delete"
+        && d.target_ts > 0
+        && !d.c.is_empty()
+        && !d.u.is_empty()
+    {
+        return DecodedPayload::Delete(d);
+    }
     // 先试 MessagePayload（更常见）
     if let Some(p) = MessagePayload::parse(bytes)
         && !p.c.is_empty()
@@ -314,5 +410,95 @@ mod tests {
     fn unknown_payload_falls_back_to_raw() {
         let d = decode(b"{\"weird\": true}");
         assert!(matches!(d, DecodedPayload::Raw(_)));
+    }
+
+    #[test]
+    fn edit_roundtrip() {
+        let p = EditPayload::new("general", "alice", 12345, "edited text");
+        assert_eq!(p.kind, "edit");
+        let b = p.to_bytes().unwrap();
+        match decode(&b) {
+            DecodedPayload::Edit(q) => {
+                assert_eq!(q.c, "general");
+                assert_eq!(q.u, "alice");
+                assert_eq!(q.target_ts, 12345);
+                assert_eq!(q.t, "edited text");
+            }
+            other => panic!("expected Edit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn delete_roundtrip() {
+        let p = DeletePayload::new("general", "alice", 12345);
+        assert_eq!(p.kind, "delete");
+        let b = p.to_bytes().unwrap();
+        match decode(&b) {
+            DecodedPayload::Delete(q) => {
+                assert_eq!(q.c, "general");
+                assert_eq!(q.u, "alice");
+                assert_eq!(q.target_ts, 12345);
+            }
+            other => panic!("expected Delete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn edit_bytes_never_decoded_as_message() {
+        // Edit 的 JSON 含 c/u/t，MessagePayload 的 serde 解析会接受它
+        // （多余字段被忽略）。decode 必须先识别 Edit。
+        let b = EditPayload::new("general", "alice", 12345, "new")
+            .to_bytes()
+            .unwrap();
+        assert!(MessagePayload::parse(&b).is_some()); // 证明确实会被误收
+        assert!(matches!(decode(&b), DecodedPayload::Edit(_)));
+    }
+
+    #[test]
+    fn delete_bytes_never_decoded_as_message() {
+        // Delete 的 JSON 含 c/u，但缺 t——MessagePayload 不会接受。
+        // 仍验证 decode 落到 Delete 而非 Raw。
+        let b = DeletePayload::new("general", "alice", 12345)
+            .to_bytes()
+            .unwrap();
+        assert!(matches!(decode(&b), DecodedPayload::Delete(_)));
+    }
+
+    #[test]
+    fn message_bytes_never_decoded_as_edit_or_delete() {
+        // 普通 message 没有 kind / target_ts，绝不能被 decode 成 Edit/Delete。
+        let b = MessagePayload::new("general", "alice", "hi", Vec::new(), None)
+            .to_bytes()
+            .unwrap();
+        match decode(&b) {
+            DecodedPayload::Message(q) => assert_eq!(q.t, "hi"),
+            other => panic!("expected Message, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn edit_rejects_bad_kind_and_ts() {
+        // kind 不对：不能当 Edit（含 c/u/t，会按 Message 处理）。
+        let raw = br#"{"kind":"not-edit","c":"general","u":"alice","target_ts":1,"t":"x"}"#;
+        assert!(matches!(decode(raw), DecodedPayload::Message(_)));
+
+        // target_ts <= 0：无效 Edit。
+        let mut p = EditPayload::new("general", "alice", 0, "x");
+        let b = p.to_bytes().unwrap();
+        assert!(!matches!(decode(&b), DecodedPayload::Edit(_)));
+        p.target_ts = -5;
+        let b = p.to_bytes().unwrap();
+        assert!(!matches!(decode(&b), DecodedPayload::Edit(_)));
+    }
+
+    #[test]
+    fn delete_rejects_bad_kind_and_ts() {
+        let raw = br#"{"kind":"not-delete","c":"general","u":"alice","target_ts":1}"#;
+        assert!(matches!(decode(raw), DecodedPayload::Raw(_)));
+
+        let b = DeletePayload::new("general", "alice", 0)
+            .to_bytes()
+            .unwrap();
+        assert!(!matches!(decode(&b), DecodedPayload::Delete(_)));
     }
 }

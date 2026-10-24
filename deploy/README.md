@@ -41,7 +41,7 @@ docker build -f deploy/Dockerfile -t kaede-server:0.0.1 .
 | `KAEDE_DB` | 否 | `sqlite://kaede.db?mode=rwc` | 只支持 `sqlite:`；父目录会自动创建 |
 | `KAEDE_SESSION_TTL_HOURS` | 否 | `168` | 会话有效期，`1..=8760` |
 | `KAEDE_DATA_DIR` | 否 | `<cwd>/data` | 附件密文根目录；容器部署应指向可写卷 |
-| `KAEDE_TRUSTED_PROXIES` | 容器部署建议 | 仅 loopback | 逗号分隔 IP/CIDR；Docker bridge 需设为 `172.16.0.0/12`，否则所有用户共享代理 IP |
+| `KAEDE_TRUSTED_PROXIES` | 容器部署建议 | 仅 loopback | 逗号分隔 IP/CIDR；Docker bridge 需设为 compose 固定网段 `172.28.0.0/16`，否则所有用户共享代理 IP |
 | `KAEDE_CORS_ORIGINS` | 生产必填 | 本地开发端口 | 逗号分隔；生产禁止 `*` |
 | `KAEDE_LOG_FORMAT` | 否 | `human` | `json` 输出单行 JSON |
 | `RUST_LOG` | 否 | `info,kaede_server=debug` | tracing 过滤 |
@@ -119,7 +119,7 @@ docker compose -f deploy/docker-compose.yml logs -f kaede
 
 compose 只把 Caddy 的 80/443 暴露到公网；`kaede` 仅在容器网络内监听 18080。
 数据库与附件放在命名卷 `kaede-data`。compose 已设置 `KAEDE_UPSTREAM=kaede:18080`
-（Caddy 反代目标）和 `KAEDE_TRUSTED_PROXIES=172.16.0.0/12`（Docker bridge），
+（Caddy 反代目标）和 `KAEDE_TRUSTED_PROXIES=172.28.0.0/16`（compose 固定网段），
 否则容器内会把所有用户识别成同一个代理 IP，登录失败计数会全站共享。
 
 ### 4.3 TLS / 反向代理
@@ -187,10 +187,10 @@ SQLite 使用 WAL。**不要直接 `cp kaede.db`**，会漏掉 WAL 中已提交�
 
 ```powershell
 # Windows
-pwsh -File scripts/backup-db.ps1 -Db C:\kaede\kaede.db -OutDir C:\kaede\backups
+pwsh -File scripts/backup-db.ps1 -DbPath C:\kaede\kaede.db -OutDir C:\kaede\backups
 
 # 恢复（先停服务！）
-pwsh -File scripts/backup-db.ps1 -Mode restore -Db C:\kaede\kaede.db -Backup C:\kaede\backups\kaede-20261022-120000.db
+pwsh -File scripts/backup-db.ps1 -Mode restore -DbPath C:\kaede\kaede.db -Backup C:\kaede\backups\kaede-20261022-120000.db
 ```
 
 ```bash

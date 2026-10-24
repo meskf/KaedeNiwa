@@ -12,6 +12,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use dioxus::prelude::{ReadableExt, WritableExt};
 use kaede_livekit_web::LiveKitWebSession;
 
 use crate::state::{VoiceControls, VoiceState};
@@ -33,7 +34,7 @@ pub async fn leave_voice() {
 /// 连到某频道媒体房间。失败时不动 `voice.active_channel`，由调用方回滚。
 pub async fn connect_voice(
     _voice: VoiceState,
-    _controls: VoiceControls,
+    mut controls: VoiceControls,
     room: std::sync::Arc<kaede_client::room::RoomSession>,
     channel_id: String,
 ) -> Result<(), String> {
@@ -59,6 +60,17 @@ pub async fn connect_voice(
     session
         .attach_remote_videos_to("kaede-remote-videos")
         .map_err(|e| format!("attach_remote_videos: {}", e))?;
+
+    // 与 native 路径一致：进入语音后自动推麦克风（若用户未主动关麦）。
+    if *controls.mic_on.read() {
+        match session.set_microphone(true).await {
+            Ok(()) => tracing::info!("[voice-web] mic published"),
+            Err(e) => {
+                tracing::warn!("[voice-web] auto mic publish failed: {}", e);
+                controls.mic_on.set(false);
+            }
+        }
+    }
 
     // 关闭/刷新页面时服务端收不到 /leave，媒体 seed 会保留到 8h TTL，
     // 重进时可能复用同一 E2EE key（LiveKit ratchet 归零）。pagehide 里用
@@ -150,6 +162,15 @@ pub async fn set_microphone(enabled: bool) -> Result<(), String> {
         .set_microphone(enabled)
         .await
         .map_err(|e| format!("setMicrophoneEnabled: {}", e))
+}
+
+/// 开关扬声器（静音/恢复所有远端音频）。
+pub async fn set_speaker(enabled: bool) -> Result<(), String> {
+    let session = current_session()?;
+    session
+        .set_speaker_enabled(enabled)
+        .await
+        .map_err(|e| format!("setSpeakerEnabled: {}", e))
 }
 
 /// 开关屏幕共享。`true` 时浏览器弹出 getDisplayMedia 选择器，

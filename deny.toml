@@ -1,5 +1,5 @@
 [advisories]
-yanked = "warn"
+yanked = "deny"
 unmaintained = "all"
 unsound = "all"
 unused-ignored-advisory = "warn"

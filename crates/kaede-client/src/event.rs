@@ -74,6 +74,15 @@ pub enum ClientEvent {
     /// 有 peer 加入。
     PeerJoined { server_id: String, uid: UserId },
 
+    /// 对端正在输入（协议 v7）。
+    ///
+    /// 服务端不持久化、不离线补投；UI 应本地设置数秒超时自动消失。
+    Typing {
+        server_id: String,
+        channel_id: String,
+        from: UserId,
+    },
+
     /// 有 peer 离开。
     PeerLeft { server_id: String, uid: UserId },
 

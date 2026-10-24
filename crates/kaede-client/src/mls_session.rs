@@ -431,43 +431,61 @@ impl MlsSession {
         Self::from_snapshot_with(snapshot, None)
     }
 
+    /// 内存回滚备份：序列化当前状态（明文，仅保存在内存）。
+    ///
+    /// 用于 Commit 冲突时回滚本地已应用但未被服务端采纳的 Commit。
+    /// **绝不可**直接写盘——写盘必须走 [`Self::snapshot_with`]。
+    pub(crate) fn recovery_snapshot(&self) -> Result<Vec<u8>, ClientError> {
+        self.snapshot_inner()
+    }
+
+    /// 从内存回滚备份恢复。
+    pub(crate) fn from_recovery_snapshot(snapshot: &[u8]) -> Result<Self, ClientError> {
+        Self::from_snapshot_inner(snapshot)
+    }
+
     /// 从快照恢复。
     ///
-    /// 若输入外层为 `0x03` 头，先解密再走内层逻辑。
-    /// 否则按明文（老格式）处理。
+    /// **fail-closed**：只接受带 `0x03` 外层头、且 alg 非 NOOP 的加密快照。
+    /// 老格式明文快照会被拒绝——否则任何能写本地存储的攻击者都可以把
+    /// 加密快照替换成明文快照，绕过平台钥匙串保护并植入自己的签名身份。
+    /// 需要旧格式迁移时，必须显式重建身份后重新落盘。
     pub fn from_snapshot_with(
         snapshot: &[u8],
         cipher: Option<&dyn kaede_mls::SnapshotCipher>,
     ) -> Result<Self, ClientError> {
-        let inner_bytes = if snapshot.len() >= 6 && snapshot[0] == SNAPSHOT_CIPHER_HEADER {
-            let alg = snapshot[1];
-            let ct_len =
-                u32::from_be_bytes([snapshot[2], snapshot[3], snapshot[4], snapshot[5]]) as usize;
-            let ct = &snapshot[6..];
-            // 数据长度不符 = 数据损坏，不是平台不兼容
-            if ct.len() != ct_len {
-                return Err(ClientError::Mls(format!(
-                    "ciphertext length mismatch: header={} actual={}",
-                    ct_len,
-                    ct.len()
-                )));
-            }
-            if alg == kaede_mls::ALG_NOOP {
-                ct.to_vec()
-            } else {
-                // cipher 缺失 = 平台不兼容（典型：Windows 上创建的 DPAPI snapshot 在 Linux/Web 打开）
-                let c = cipher.ok_or(ClientError::SnapshotIncompatible { alg })?;
-                // cipher 与 snapshot 声明的 alg 不符 = 调用方传错 cipher（防御性）
-                if c.alg_id() != alg {
-                    return Err(ClientError::SnapshotIncompatible { alg });
-                }
-                // 解密失败 = 数据损坏或密钥错误
-                c.decrypt(ct)
-                    .map_err(|e| ClientError::Mls(format!("snapshot decrypt: {}", e)))?
-            }
-        } else {
-            snapshot.to_vec()
-        };
+        if snapshot.len() < 6 || snapshot[0] != SNAPSHOT_CIPHER_HEADER {
+            return Err(ClientError::Mls(
+                "legacy plaintext snapshot rejected; re-login to rebuild identity".into(),
+            ));
+        }
+        let alg = snapshot[1];
+        if alg == kaede_mls::ALG_NOOP {
+            return Err(ClientError::Mls(
+                "plaintext (NOOP) snapshot rejected; snapshot must be encrypted".into(),
+            ));
+        }
+        let ct_len =
+            u32::from_be_bytes([snapshot[2], snapshot[3], snapshot[4], snapshot[5]]) as usize;
+        let ct = &snapshot[6..];
+        // 数据长度不符 = 数据损坏，不是平台不兼容
+        if ct.len() != ct_len {
+            return Err(ClientError::Mls(format!(
+                "ciphertext length mismatch: header={} actual={}",
+                ct_len,
+                ct.len()
+            )));
+        }
+        // cipher 缺失 = 平台不兼容（典型：Windows 上创建的 DPAPI snapshot 在 Linux/Web 打开）
+        let c = cipher.ok_or(ClientError::SnapshotIncompatible { alg })?;
+        // cipher 与 snapshot 声明的 alg 不符 = 调用方传错 cipher（防御性）
+        if c.alg_id() != alg {
+            return Err(ClientError::SnapshotIncompatible { alg });
+        }
+        // 解密失败 = 数据损坏或密钥错误
+        let inner_bytes = c
+            .decrypt(ct)
+            .map_err(|e| ClientError::Mls(format!("snapshot decrypt: {}", e)))?;
 
         Self::from_snapshot_inner(&inner_bytes)
     }
@@ -707,7 +725,7 @@ mod tests {
 
         // snapshot + restore
         let snap = alice.snapshot().unwrap();
-        let mut alice2 = MlsSession::from_snapshot(&snap).unwrap();
+        let mut alice2 = MlsSession::from_snapshot_inner(&snap).unwrap();
 
         // 恢复后 uid / epoch / 成员数 / group_id 一致
         assert_eq!(alice2.uid(), "alice");
@@ -717,7 +735,7 @@ mod tests {
 
         // bob 也 snapshot
         let bob_snap = bob.snapshot().unwrap();
-        let mut bob2 = MlsSession::from_snapshot(&bob_snap).unwrap();
+        let mut bob2 = MlsSession::from_snapshot_inner(&bob_snap).unwrap();
         assert_eq!(bob2.uid(), "bob");
         assert_eq!(bob2.member_count(), 2);
 
@@ -736,7 +754,7 @@ mod tests {
     fn snapshot_restore_without_group() {
         let s = MlsSession::new("alice").unwrap();
         let snap = s.snapshot().unwrap();
-        let s2 = MlsSession::from_snapshot(&snap).unwrap();
+        let s2 = MlsSession::from_snapshot_inner(&snap).unwrap();
         assert_eq!(s2.uid(), "alice");
         assert!(!s2.is_ready());
         assert!(s2.group_id().is_none());
@@ -755,7 +773,7 @@ mod tests {
         let a_key_orig = alice.export_sframe_key("ch-general").unwrap();
 
         let snap = alice.snapshot().unwrap();
-        let alice2 = MlsSession::from_snapshot(&snap).unwrap();
+        let alice2 = MlsSession::from_snapshot_inner(&snap).unwrap();
 
         let a_key_restored = alice2.export_sframe_key("ch-general").unwrap();
         assert_eq!(
@@ -809,20 +827,28 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_without_cipher_still_readable() {
-        // 老格式（明文）仍能被 from_snapshot_with(None) 读
+    fn plaintext_snapshot_rejected() {
+        // fail-closed：明文老格式不再被接受，防止本地存储被替换后绕过钥匙串保护
         let mut s = MlsSession::new("alice").unwrap();
         s.create_group().unwrap();
         let snap = s.snapshot().unwrap(); // 明文
-        let s2 = MlsSession::from_snapshot_with(&snap, None).unwrap();
-        assert_eq!(s2.uid(), "alice");
+        assert!(MlsSession::from_snapshot_with(&snap, None).is_err());
+        assert!(MlsSession::from_snapshot(&snap).is_err());
+    }
+
+    #[test]
+    fn noop_snapshot_rejected() {
+        let mut s = MlsSession::new("alice").unwrap();
+        s.create_group().unwrap();
+        let snap = s.snapshot_with(&kaede_mls::NoOpCipher).unwrap();
+        assert!(MlsSession::from_snapshot_with(&snap, None).is_err());
     }
 
     #[test]
     fn corrupt_snapshot_rejected() {
-        assert!(MlsSession::from_snapshot(&[]).is_err());
-        assert!(MlsSession::from_snapshot(&[0xff]).is_err()); // 坏版本号
-        assert!(MlsSession::from_snapshot(&[1, 0]).is_err()); // 截断
+        assert!(MlsSession::from_snapshot_inner(&[]).is_err());
+        assert!(MlsSession::from_snapshot_inner(&[0xff]).is_err()); // 坏版本号
+        assert!(MlsSession::from_snapshot_inner(&[1, 0]).is_err()); // 截断
     }
 
     #[test]
@@ -1022,7 +1048,7 @@ mod p0gh_regression {
         assert!(snap.len() > off + 4, "snapshot too short to patch");
         snap[off..off + 4].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
 
-        match MlsSession::from_snapshot(&snap) {
+        match MlsSession::from_snapshot_inner(&snap) {
             Err(ClientError::Mls(msg)) => {
                 assert!(
                     msg.contains("sig_priv") && msg.contains("exceeds max"),
@@ -1041,7 +1067,7 @@ mod p0gh_regression {
         snap.push(1u8); // version
         snap.extend_from_slice(&0xFFFFu16.to_be_bytes()); // uid_len = 65535 > MAX_UID_LEN(256)
 
-        match MlsSession::from_snapshot(&snap) {
+        match MlsSession::from_snapshot_inner(&snap) {
             Err(ClientError::Mls(msg)) => {
                 assert!(
                     msg.contains("uid") && msg.contains("exceeds max"),
@@ -1061,7 +1087,7 @@ mod p0gh_regression {
         assert!(snap.len() > off + 4, "snapshot too short to patch");
         snap[off..off + 4].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
 
-        match MlsSession::from_snapshot(&snap) {
+        match MlsSession::from_snapshot_inner(&snap) {
             Err(ClientError::Mls(msg)) => {
                 assert!(
                     msg.contains("storage") && msg.contains("exceeds max"),
@@ -1088,7 +1114,7 @@ mod p0gh_regression {
     #[test]
     fn p0g_normal_snapshot_still_loads() {
         let snap = make_plain_snapshot();
-        let _s = MlsSession::from_snapshot(&snap).unwrap();
+        let _s = MlsSession::from_snapshot_inner(&snap).unwrap();
     }
 
     /// S1：欢迎校验失败时不得改变本地状态。

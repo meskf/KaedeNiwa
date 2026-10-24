@@ -6,7 +6,9 @@ use crate::i18n::use_i18n;
 use dioxus::prelude::*;
 
 use crate::icons::{IconHash, IconVolume2};
-use crate::state::{AppState, ReplyTarget, UiMessage, UiState, trim_cached_messages};
+use crate::state::{
+    AppState, MsgMenuTarget, ReplyTarget, UiMessage, UiState, trim_cached_messages,
+};
 
 #[component]
 pub fn ContentArea() -> Element {
@@ -172,8 +174,9 @@ fn MessageList() -> Element {
                             text: h.plaintext,
                             attachments: h.attachments,
                             reply_to: h.reply_to,
-                            reactions: vec![],
+                            reactions: h.reactions,
                             mentions: h.mentions,
+                            edited: h.edited,
                         })
                         .collect();
                     // 合并而不是替换：加载期间到达的实时消息不能被历史覆盖。
@@ -237,10 +240,11 @@ fn MessageList() -> Element {
         }
     });
 
-    // 切换频道时清掉回复目标，避免把 A 频道的引用发到 B 频道。
+    // 切换频道时清掉回复目标与编辑态，避免把 A 频道的操作带到 B 频道。
     use_effect(move || {
         let _ = ui.selected_channel.read();
         ui.reply_target.set(None);
+        ui.editing_message.set(None);
     });
 
     // 1.2 滚到顶自动加载：监听 #msg-list 滚动，靠近顶部时自动触发"加载更早"按钮。
@@ -310,8 +314,9 @@ fn MessageList() -> Element {
                                     text: h.plaintext,
                                     attachments: h.attachments,
                                     reply_to: h.reply_to,
-                                    reactions: vec![],
+                                    reactions: h.reactions,
                                     mentions: h.mentions,
+                                    edited: h.edited,
                                 }).collect();
                                 let mut map = app.messages.write();
                                 let list = map.entry(key).or_default();
@@ -354,6 +359,8 @@ fn MessageList() -> Element {
 #[component]
 fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
     let mut ui = use_context::<UiState>();
+    let app = use_context::<AppState>();
+    let i18n = use_i18n();
     let mut hovered = use_signal(|| false);
 
     let mid = msg.id.clone();
@@ -376,7 +383,34 @@ fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
     let author = msg.author.clone();
     let preview: String = msg.text.chars().take(80).collect();
 
-    let mid_ctx = mid.clone();
+    // 内联编辑态：全局 signal 存 (msg_id, 草稿)，同一时刻只编辑一条。
+    let editing = ui
+        .editing_message
+        .read()
+        .as_ref()
+        .is_some_and(|(id, _)| id == &mid);
+    let edit_draft = if editing {
+        ui.editing_message
+            .read()
+            .as_ref()
+            .map(|(_, d)| d.clone())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let menu_target = MsgMenuTarget {
+        target_id: msg.channel_id.clone(),
+        msg_id: mid.clone(),
+        author: msg.author.clone(),
+        ts: msg.ts,
+        text: msg.text.clone(),
+        is_dm: false,
+    };
+
+    let mid_edit = mid.clone();
+    let submit_ch = msg.channel_id.clone();
+    let submit_author = msg.author.clone();
 
     rsx! {
         div {
@@ -392,7 +426,12 @@ fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
             },
             oncontextmenu: move |e| {
                 e.prevent_default();
-                ui.selected_message.set(Some(mid_ctx.clone()));
+                let coords = e.client_coordinates();
+                ui.msg_menu.set(Some((
+                    coords.x as i32,
+                    coords.y as i32,
+                    menu_target.clone(),
+                )));
             },
             if !merged {
                 div {
@@ -400,6 +439,12 @@ fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
                     div { class: "msg-avatar", "{msg.author_initial}" }
                     span { class: "msg-author", "{msg.author}" }
                     span { class: "msg-time", "{msg.time}" }
+                    if msg.edited {
+                        span {
+                            style: "font-size: 11px; color: var(--fg-faint);",
+                            "{i18n.t(\"channel.edited\")}"
+                        }
+                    }
                 }
             }
             if let Some(r) = &msg.reply_to {
@@ -409,15 +454,48 @@ fn MessageGroup(msg: UiMessage, merged: bool) -> Element {
                     span { class: "msg-reply-preview", " {r.preview}" }
                 }
             }
-            div { class: "msg-body",
-                for seg in split_mentions(&msg.text, &msg.mentions) {
-                    if seg.1 {
-                        span {
-                            style: "padding: 0 2px; border-radius: 3px; background: rgba(88,101,242,0.20); font-weight: 600;",
-                            "{seg.0}"
+            if editing {
+                div { class: "msg-body",
+                    textarea {
+                        id: "msg-edit-input",
+                        rows: 2,
+                        autofocus: true,
+                        value: "{edit_draft}",
+                        style: "width: 100%; box-sizing: border-box; padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(128,128,128,0.4); background: rgba(0,0,0,0.05); color: var(--fg); font-size: 14px; outline: none; resize: none; font-family: inherit;",
+                        oninput: move |e| {
+                            ui.editing_message.set(Some((mid_edit.clone(), e.value())));
+                        },
+                        onkeydown: move |e: KeyboardEvent| {
+                            // 输入法候选词确认的 Enter 不提交。
+                            if e.is_composing() {
+                                return;
+                            }
+                            if e.key() == Key::Escape {
+                                ui.editing_message.set(None);
+                                return;
+                            }
+                            if e.key() == Key::Enter && !e.modifiers().contains(Modifiers::SHIFT) {
+                                e.prevent_default();
+                                submit_edit(ui, app, i18n, submit_ch.clone(), target_ts, submit_author.clone(), false);
+                            }
+                        },
+                    }
+                    div {
+                        style: "font-size: 11px; color: var(--fg-faint); margin-top: 2px;",
+                        "{i18n.t(\"channel.editHint\")}"
+                    }
+                }
+            } else {
+                div { class: "msg-body",
+                    for seg in split_mentions(&msg.text, &msg.mentions) {
+                        if seg.1 {
+                            span {
+                                style: "padding: 0 2px; border-radius: 3px; background: rgba(88,101,242,0.20); font-weight: 600;",
+                                "{seg.0}"
+                            }
+                        } else {
+                            span { "{seg.0}" }
                         }
-                    } else {
-                        span { "{seg.0}" }
                     }
                 }
             }
@@ -568,6 +646,46 @@ fn Composer() -> Element {
     let is_empty = draft.read().trim().is_empty();
     let reply = ui.reply_target.read().clone();
 
+    // 切换频道时清空草稿：草稿是全局 Signal，不清会串到下一个频道发送。
+    let mut prev_channel = use_signal(|| Option::<String>::None);
+    use_effect(move || {
+        let cur = ui.selected_channel.read().clone();
+        if *prev_channel.peek() != cur {
+            prev_channel.set(cur);
+            ui.draft.set(String::new());
+        }
+    });
+
+    // typing 指示的过期重渲染：每 2s 推一次本地 tick（只写不读，避免
+    // 响应式自触发循环——app.rs ToastContainer 的教训）。记录本身由
+    // ClientEvent::Typing 写入，渲染时按 6 秒窗口过滤。
+    let mut typing_tick = use_signal(|| 0u64);
+    use_future(move || async move {
+        loop {
+            tick_sleep(2000).await;
+            *typing_tick.write() += 1;
+        }
+    });
+
+    let typing_text = use_memo(move || {
+        let _ = *typing_tick.read();
+        let sid = app.current_server.read().clone()?;
+        let ch = ui.selected_channel.read().clone()?;
+        let key = AppState::channel_key(&sid, &ch);
+        let now = crate::observer::now_ms();
+        let map = app.typing.read();
+        let list = map.get(&key)?;
+        let names: Vec<String> = list
+            .iter()
+            .filter(|(_, ts)| now - *ts < 6000)
+            .map(|(uid, _)| display_name(&app, &sid, uid))
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        Some(i18n.tf("channel.typing", &[("names", &names.join("、"))]))
+    });
+
     // D1: 拖拽 / 粘贴桥接（wasm-only，幂等）
     #[cfg(target_arch = "wasm32")]
     use_effect(move || {
@@ -579,6 +697,12 @@ fn Composer() -> Element {
         div {
             id: "composer-wrap",
             class: "composer-wrap",
+            if let Some(text) = typing_text() {
+                div {
+                    style: "font-size: 12px; color: var(--fg-faint); padding: 0 4px 4px;",
+                    "{text}"
+                }
+            }
             if let Some(r) = reply {
                 div {
                     class: "reply-preview",
@@ -599,7 +723,17 @@ fn Composer() -> Element {
                     class: "composer-input",
                     placeholder: "{i18n.t(\"channel.inputPlaceholder\")}",
                     value: "{draft}",
-                    oninput: move |e| draft.set(e.value()),
+                    oninput: move |e| {
+                        draft.set(e.value());
+                        // 客户端内置 4 秒节流，UI 直接调即可。
+                        if let Some(room) = app.room.read().clone()
+                            && let Some(ch) = ui.selected_channel.read().clone()
+                        {
+                            spawn(async move {
+                                let _ = room.send_typing(&ch).await;
+                            });
+                        }
+                    },
                     onkeydown: move |e: KeyboardEvent| {
                         // 中文/日文输入法用 Enter 确认候选词，此时不能发送消息。
                         if e.is_composing() {
@@ -720,6 +854,7 @@ fn send_attachments(
             reply_to: None,
             reactions: Vec::new(),
             mentions: Vec::new(),
+            edited: false,
         };
         {
             let mut map = app.messages.write();
@@ -793,6 +928,7 @@ pub(crate) fn send_attachments_bytes(
             reply_to: None,
             reactions: Vec::new(),
             mentions: Vec::new(),
+            edited: false,
         };
         {
             let mut map = app.messages.write();
@@ -846,6 +982,7 @@ fn send_message(mut ui: UiState, mut app: AppState, text: &str) {
         reply_to: reply_ref.clone(),
         reactions: vec![],
         mentions: mentions.clone(),
+        edited: false,
     };
     let key = AppState::channel_key(&sid, &ch);
     {
@@ -881,6 +1018,220 @@ fn send_message(mut ui: UiState, mut app: AppState, text: &str) {
                     .set(Some((format!("发送失败: {}", e), true)));
             }
         });
+    }
+}
+
+// ============================================================
+// 消息右键菜单 / 编辑 / 删除 / Typing（频道与 DM 共用）
+// ============================================================
+
+/// 当前用户 login_id（优先通用账户，回退到 room uid）。
+pub(crate) fn current_uid(ui: &UiState, app: &AppState) -> String {
+    let acc = ui.common_account.read().login_id.clone();
+    if !acc.is_empty() {
+        return acc;
+    }
+    app.room
+        .read()
+        .as_ref()
+        .map(|r| r.uid().as_str().to_string())
+        .unwrap_or_default()
+}
+
+/// uid → 展示名（成员昵称，昵称为空用 login_id；非成员回退 uid）。
+pub(crate) fn display_name(app: &AppState, server_id: &str, uid: &str) -> String {
+    app.members
+        .read()
+        .get(server_id)
+        .and_then(|l| l.iter().find(|m| m.login_id == uid).cloned())
+        .map(|m| {
+            if m.nickname.is_empty() {
+                m.login_id
+            } else {
+                m.nickname
+            }
+        })
+        .unwrap_or_else(|| uid.to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn tick_sleep(ms: u64) {
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn tick_sleep(ms: u64) {
+    gloo_timers::future::TimeoutFuture::new(ms as u32).await;
+}
+
+/// 提交内联编辑：先发 send_edit，成功后乐观本地应用。
+///
+/// 公开/私密频道服务端不回声自己，必须靠乐观应用；DM 有本地 echo
+/// （ClientEvent::DmReceived）会再应用一次，apply_edit 幂等无害。
+pub(crate) fn submit_edit(
+    mut ui: UiState,
+    mut app: AppState,
+    i18n: crate::i18n::I18n,
+    channel_id: String,
+    target_ts: i64,
+    author: String,
+    is_dm: bool,
+) {
+    let draft = ui
+        .editing_message
+        .read()
+        .as_ref()
+        .map(|(_, d)| d.clone())
+        .unwrap_or_default();
+    let new_text = draft.trim().to_string();
+    ui.editing_message.set(None);
+    if new_text.is_empty() {
+        return;
+    }
+    let Some(room) = app.room.read().clone() else {
+        return;
+    };
+    let sid = app.current_server.read().clone();
+    spawn(async move {
+        if let Err(e) = room.send_edit(&channel_id, target_ts, &new_text).await {
+            ui.toast.set(Some((
+                i18n.tf("channel.editFailed", &[("err", &e.to_string())]),
+                true,
+            )));
+            return;
+        }
+        if is_dm {
+            crate::observer::apply_dm_edit(&mut app, &channel_id, target_ts, &author, &new_text);
+        } else if let Some(sid) = sid {
+            crate::observer::apply_edit(&mut app, &sid, &channel_id, target_ts, &author, &new_text);
+        }
+    });
+}
+
+/// 删除消息：无需确认直接 send_delete，成功后乐观从列表移除。
+pub(crate) fn delete_message(
+    mut ui: UiState,
+    mut app: AppState,
+    i18n: crate::i18n::I18n,
+    target: MsgMenuTarget,
+) {
+    let Some(room) = app.room.read().clone() else {
+        return;
+    };
+    let sid = app.current_server.read().clone();
+    spawn(async move {
+        if let Err(e) = room.send_delete(&target.target_id, target.ts).await {
+            ui.toast.set(Some((
+                i18n.tf("channel.deleteFailed", &[("err", &e.to_string())]),
+                true,
+            )));
+            return;
+        }
+        if target.is_dm {
+            crate::observer::apply_dm_delete(
+                &mut app,
+                &target.target_id,
+                target.ts,
+                &target.author,
+            );
+        } else if let Some(sid) = sid {
+            crate::observer::apply_delete(
+                &mut app,
+                &sid,
+                &target.target_id,
+                target.ts,
+                &target.author,
+            );
+        }
+    });
+}
+
+/// 消息右键菜单（全局弹层）：回复、添加反应（仅频道）、编辑 / 删除（仅自己的消息）。
+#[component]
+pub fn MsgContextMenu() -> Element {
+    let mut ui = use_context::<UiState>();
+    let app = use_context::<AppState>();
+    let i18n = use_i18n();
+
+    let Some((x, y, target)) = ui.msg_menu.read().clone() else {
+        return rsx! {};
+    };
+
+    let me = current_uid(&ui, &app);
+    let mine = target.author == me;
+
+    let btn_style = "width: 100%; text-align: left; padding: 8px 12px; border-radius: 6px; font-size: 14px; background: transparent; border: none; cursor: pointer; color: var(--fg);";
+
+    rsx! {
+        div {
+            style: "position: fixed; inset: 0; z-index: 1000;",
+            onclick: move |_| ui.msg_menu.set(None),
+            oncontextmenu: move |e| {
+                e.prevent_default();
+                ui.msg_menu.set(None);
+            },
+            div {
+                onclick: move |e| e.stop_propagation(),
+                style: "position: fixed; left: {x}px; top: {y}px; background: var(--inner-bg); border-radius: 10px; padding: 6px; min-width: 160px; box-shadow: 0 8px 32px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 2px;",
+                button {
+                    style: "{btn_style}",
+                    onclick: {
+                        let t = target.clone();
+                        move |_| {
+                            ui.reply_target.set(Some(ReplyTarget {
+                                author: t.author.clone(),
+                                preview: t.text.chars().take(80).collect(),
+                                ts: t.ts,
+                            }));
+                            ui.msg_menu.set(None);
+                        }
+                    },
+                    "{i18n.t(\"channel.reply\")}"
+                }
+                if !target.is_dm {
+                    button {
+                        style: "{btn_style}",
+                        onclick: {
+                            let t = target.clone();
+                            move |_| {
+                                ui.emoji_picker.set(Some((t.target_id.clone(), t.ts)));
+                                ui.msg_menu.set(None);
+                            }
+                        },
+                        "{i18n.t(\"channel.react\")}"
+                    }
+                }
+                if mine {
+                    button {
+                        style: "{btn_style}",
+                        onclick: {
+                            let t = target.clone();
+                            move |_| {
+                                ui.editing_message.set(Some((t.msg_id.clone(), t.text.clone())));
+                                ui.msg_menu.set(None);
+                                // autofocus 之外再兜底一次：动态插入的元素
+                                // 某些 webview 不触发 autofocus。
+                                let _ = dioxus::document::eval(
+                                    "setTimeout(function(){var el=document.getElementById('msg-edit-input');if(el){el.focus();el.setSelectionRange(el.value.length,el.value.length);}},0);",
+                                );
+                            }
+                        },
+                        "{i18n.t(\"channel.edit\")}"
+                    }
+                    button {
+                        style: "{btn_style}",
+                        onclick: {
+                            let t = target.clone();
+                            move |_| {
+                                ui.msg_menu.set(None);
+                                delete_message(ui, app, i18n, t.clone());
+                            }
+                        },
+                        "{i18n.t(\"channel.delete\")}"
+                    }
+                }
+            }
+        }
     }
 }
 

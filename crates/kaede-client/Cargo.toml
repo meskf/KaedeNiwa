@@ -10,6 +10,7 @@ wasm   = ["kaede-mls/wasm"]
 native = ["kaede-mls/native"]
 
 [dependencies]
+web-time = "1.1"
 kaede-crypto   = { workspace = true }
 kaede-mls      = { workspace = true }
 kaede-protocol = { workspace = true }

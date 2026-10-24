@@ -313,21 +313,39 @@ async fn get_messages(
         return Err(ApiError::Unauthorized);
     }
 
+    // 历史读取限流 + 单次密文字节封顶（同公开频道）。
+    if !state.check_rate_scoped(&uid, "dm_history_read", 2.0, 10.0) {
+        state.metrics.rate_limited();
+        return Err(ApiError::TooManyRequests(
+            "dm history read rate limited".into(),
+        ));
+    }
+
     let before = q.before_ts.unwrap_or(i64::MAX);
     let limit = q.limit.unwrap_or(200).clamp(1, 500); // C-8: clamp 防 limit=-1 全表扫描
 
     let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
-        "SELECT ts, sender, ciphertext FROM messages \
-         WHERE channel_id = ? AND ts < ? \
-         ORDER BY ts DESC LIMIT ?",
+        "WITH recent AS ( \
+           SELECT ts, sender, ciphertext, \
+                  SUM(LENGTH(ciphertext)) OVER (ORDER BY ts DESC) AS run_bytes \
+           FROM ( \
+             SELECT ts, sender, ciphertext FROM messages \
+             WHERE channel_id = ? AND ts < ? \
+             ORDER BY ts DESC LIMIT ? \
+           ) \
+         ) \
+         SELECT ts, sender, ciphertext FROM recent \
+         WHERE run_bytes <= ? ORDER BY ts ASC",
     )
     .bind(&conv_id)
     .bind(before)
     .bind(limit)
+    .bind(crate::db::MAX_HISTORY_RESPONSE_BYTES)
     .fetch_all(&state.pool)
     .await?;
 
-    let mut out: Vec<MessageRecord> = rows
+    // SQL 已按时间升序返回
+    let out: Vec<MessageRecord> = rows
         .into_iter()
         .map(|(ts, sender, ct)| MessageRecord {
             ts,
@@ -335,7 +353,6 @@ async fn get_messages(
             ciphertext: crate::db::base64_url(&ct),
         })
         .collect();
-    out.reverse();
 
     Ok(Json(MessagesResp { messages: out }))
 }

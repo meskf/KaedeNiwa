@@ -20,11 +20,14 @@ services:
       KAEDE_DATA_DIR: /var/lib/kaede/data
       # 容器内反向代理来自 Docker bridge，必须显式信任该网段，
       # 否则所有用户会被归并成同一个代理 IP（登录失败计数全站共享）。
-      KAEDE_TRUSTED_PROXIES: ${KAEDE_TRUSTED_PROXIES:-172.16.0.0/12}
+      # 网段固定为下方 kaede-net 的 subnet，避免默认信任整个 172.16.0.0/12。
+      KAEDE_TRUSTED_PROXIES: ${KAEDE_TRUSTED_PROXIES:-172.28.0.0/16}
     expose:
       - "18080"
     volumes:
       - kaede-data:/var/lib/kaede
+    networks:
+      - kaede-net
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -58,8 +61,17 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     restart: unless-stopped
+    networks:
+      - kaede-net
 
 volumes:
   kaede-data:
   caddy-data:
   caddy-config:
+
+networks:
+  kaede-net:
+    ipam:
+      config:
+        # 固定网段：与 KAEDE_TRUSTED_PROXIES 默认值保持一致。
+        - subnet: 172.28.0.0/16

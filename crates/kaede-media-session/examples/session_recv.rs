@@ -59,18 +59,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut events = session.events();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(listen_secs);
+    let started = tokio::time::Instant::now();
 
     // 持有的 sink / player / consumer，生命周期跟 task 走
     let mut videos: HashMap<TrackId, (Arc<LiveKitVideoSink>, ConsumerHandle)> = HashMap::new();
     let mut audios: HashMap<TrackId, (Arc<AudioPlayer>, ConsumerHandle)> = HashMap::new();
+
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_video = 0u64;
+    let mut last_audio = 0u64;
 
     loop {
         let timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
         if timeout.is_zero() {
             break;
         }
-        match tokio::time::timeout(timeout, events.recv()).await {
-            Ok(Ok(ev)) => match ev {
+        tokio::select! {
+            _ = tokio::time::sleep(timeout) => break,
+            _ = tick.tick() => {
+                let v: u64 = videos.values().map(|(s, _)| s.frames_pushed()).sum();
+                let a: u64 = audios.values().map(|(p, _)| p.frames_pushed()).sum();
+                println!(
+                    "[tick {:>4.1}s] video_total={} (+{}) audio_total={} (+{})",
+                    started.elapsed().as_secs_f64(),
+                    v,
+                    v.saturating_sub(last_video),
+                    a,
+                    a.saturating_sub(last_audio)
+                );
+                last_video = v;
+                last_audio = a;
+            }
+            ev = events.recv() => match ev {
+            Ok(ev) => match ev {
                 MediaEvent::TrackAvailable { track, kind } => {
                     println!("[+] TrackAvailable {:?} {}", kind, track.sid);
                     match kind {
@@ -127,21 +149,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 _ => {}
             },
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
-                tracing::warn!("events lagged {}", n);
-            }
-            Ok(Err(_)) => break,
-            Err(_) => break, // timeout
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("events lagged {}", n);
+                }
+                Err(_) => break,
+            },
         }
     }
 
     println!("\n[3] 收尾");
-    for (_, (sink, _h)) in &videos {
+    let mut total_video_frames = 0u64;
+    let mut total_audio_frames = 0u64;
+    for (track, (sink, _h)) in &videos {
+        let frames = sink.frames_pushed();
+        println!(
+            "    video {} frames={} dropped={}",
+            track.sid,
+            frames,
+            sink.frames_dropped()
+        );
+        total_video_frames += frames;
         sink.stop();
     }
-    for (_, (player, _h)) in &audios {
+    for (track, (player, _h)) in &audios {
+        let frames = player.frames_pushed();
+        println!("    audio {} frames={}", track.sid, frames);
+        total_audio_frames += frames;
         player.stop();
     }
+    println!(
+        "[stats] video_frames={} audio_frames={}",
+        total_video_frames, total_audio_frames
+    );
     videos.clear();
     audios.clear();
 

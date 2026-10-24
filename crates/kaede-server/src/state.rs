@@ -82,6 +82,30 @@ pub(crate) const BROADCAST_BYTES_BURST: f64 = 64.0 * 1024.0 * 1024.0;
 /// 并发 WebSocket 连接上限（同时是 semaphore 与 /metrics 的容量来源）。
 pub const MAX_WS_CONNECTIONS: usize = 5000;
 
+/// 单个客户端 IP 的并发 WS 连接上限（含尚未完成认证的握手）。
+///
+/// 全局 semaphore 只能限制总量；没有 per-IP 上限时，单个来源可以
+/// 用大量未认证连接占满 permit（首帧超时 5s），让正常用户收到 503。
+pub const MAX_WS_CONNECTIONS_PER_IP: usize = 64;
+
+/// 单 IP WS 连接计数守卫：drop 时递减，保证异常路径也能归还额度。
+pub struct WsIpGuard {
+    map: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    ip: IpAddr,
+}
+
+impl Drop for WsIpGuard {
+    fn drop(&mut self) {
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&self.ip) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                map.remove(&self.ip);
+            }
+        }
+    }
+}
+
 /// `broadcast_except_important` 对**单个** peer 的发送超时。
 ///
 /// P1-I 修复的核心：单个 slow consumer 的 1024 buffer 满了会阻塞
@@ -134,6 +158,8 @@ pub struct AppState {
     pub next_session_id: Arc<std::sync::atomic::AtomicU64>,
     /// P1-10：WS 连接并发上限。
     pub ws_semaphore: Arc<tokio::sync::Semaphore>,
+    /// 单 IP 并发 WS 连接计数（含握手阶段）。
+    pub ws_conns_per_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
     /// P0-2：login 并发上限（防 Argon2 内存 DoS）。
     pub login_semaphore: Arc<tokio::sync::Semaphore>,
     /// P0-2：login 失败计数 `(uid, 来源 IP)` -> (次数, 首次失败时间)。
@@ -223,6 +249,7 @@ impl AppState {
             broadcast_budget: Arc::new(Mutex::new(RateBucket::new(BROADCAST_BYTES_BURST))),
             next_session_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ws_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_WS_CONNECTIONS)),
+            ws_conns_per_ip: Arc::new(Mutex::new(HashMap::new())),
             login_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
             login_failures,
             room_media_seeds,
@@ -287,6 +314,23 @@ impl AppState {
             t.0 = t.0.saturating_add(1);
         }
         true
+    }
+
+    /// 尝试占用一个单 IP WS 连接额度。超限返回 None。
+    pub fn try_acquire_ws_ip(&self, ip: IpAddr) -> Option<WsIpGuard> {
+        let mut map = self
+            .ws_conns_per_ip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let n = map.entry(ip).or_insert(0);
+        if *n >= MAX_WS_CONNECTIONS_PER_IP {
+            return None;
+        }
+        *n += 1;
+        Some(WsIpGuard {
+            map: self.ws_conns_per_ip.clone(),
+            ip,
+        })
     }
 
     /// 当前连接的 session id（若用户在线）。
@@ -543,8 +587,11 @@ impl AppState {
 
     /// 广播给除 `sender` 外的所有成员。
     ///
-    /// 先快照出所有 tx，再释放锁逐个 send。
-    /// 这样将来即使换成带 backpressure 的 sender，也不会在锁内 await 造成死锁。
+    /// 先快照出所有 tx，再释放锁逐个 `try_send`（锁内不 await）。
+    ///
+    /// **丢弃语义**：目标出站缓冲（每连接 1024 条）满时，该成员**静默丢失**
+    /// 此消息。仅用于可丢失/可由历史拉取补偿的消息（如 reaction、普通事件）。
+    /// 必须可靠到达的控制消息（MlsCommit 等）走 [`Self::broadcast_except_important`]。
     pub fn broadcast_except(&self, sender: &UserId, msg: ServerMessage) {
         let targets: Vec<mpsc::Sender<ServerMessage>> = {
             let room = self.room.lock().unwrap_or_else(|e| e.into_inner());
@@ -559,9 +606,14 @@ impl AppState {
         }
     }
 
-    /// P1-7：关键消息（MlsCommit 等）用 await send 有背压，避免 try_send 静默丢弃。
+    /// P1-7：关键消息（MlsCommit 等）的广播路径。
     ///
-    /// 所有目标**并发发送**：单个 slow consumer 最多拖 2s，而不是串行 N×2s。
+    /// 与 `broadcast_except` 的差异：用 await send 等待缓冲腾出空间，
+    /// 单个 slow consumer 最多阻塞 2s（`BROADCAST_SEND_TIMEOUT`），超时后
+    /// **该成员仍会丢失此消息**（记 metrics + warn 日志），但不会拖住其他成员。
+    /// 所有目标并发发送，总耗时取决于最慢的一个（上限 2s），而非串行 N×2s。
+    ///
+    /// 注意：这不是"保证送达"。被超时丢弃的成员依赖重连后的离线补投追上状态。
     pub async fn broadcast_except_important(&self, sender: &UserId, msg: ServerMessage) {
         let targets: Vec<mpsc::Sender<ServerMessage>> = {
             let room = self.room.lock().unwrap_or_else(|e| e.into_inner());
@@ -588,7 +640,10 @@ impl AppState {
         futures_util::future::join_all(sends).await;
     }
 
-    /// 广播给所有在线成员（不过滤发送者）。
+    /// 广播给所有在线成员（含发送者本人）。
+    ///
+    /// 丢弃语义同 [`Self::broadcast_except`]：缓冲满时静默丢失，
+    /// 仅用于可丢失/可补偿的消息。
     pub fn broadcast_all(&self, msg: ServerMessage) {
         let targets: Vec<mpsc::Sender<ServerMessage>> = {
             let room = self.room.lock().unwrap_or_else(|e| e.into_inner());

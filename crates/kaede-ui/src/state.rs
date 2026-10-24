@@ -27,6 +27,8 @@ pub struct UiMessage {
     pub reactions: Vec<Reaction>,
     /// @ 提及的 login_id（来自解密后的 payload）。
     pub mentions: Vec<String>,
+    /// 是否被作者编辑过（历史 fold 或实时 EditPayload 应用后置位）。
+    pub edited: bool,
 }
 
 /// 每个频道 / DM 会话的消息缓存上限。
@@ -43,6 +45,19 @@ pub const TRIM_CACHED_MESSAGES_TO: usize = 500;
 pub fn trim_cached_messages(list: &mut Vec<UiMessage>) {
     if list.len() > MAX_CACHED_MESSAGES {
         let drop_n = list.len() - TRIM_CACHED_MESSAGES_TO;
+        list.drain(0..drop_n);
+    }
+}
+
+/// 同一频道同时显示的 typing 人数上限（超出丢最旧）。
+pub const MAX_TYPING_USERS: usize = 8;
+
+/// typing 状态 upsert：同 uid 刷新本地接收时间并移到末尾；超出上限丢最旧。
+pub fn upsert_typing(list: &mut Vec<(String, i64)>, uid: &str, now_ms: i64) {
+    list.retain(|(u, _)| u != uid);
+    list.push((uid.to_string(), now_ms));
+    if list.len() > MAX_TYPING_USERS {
+        let drop_n = list.len() - MAX_TYPING_USERS;
         list.drain(0..drop_n);
     }
 }
@@ -145,6 +160,10 @@ pub struct AppState {
     pub pending_adds: Signal<std::collections::HashSet<String>>,
     /// 未读计数，键为 `server::channel_id` / `server::conv_id`。
     pub unread: Signal<HashMap<String, UnreadView>>,
+    /// 「正在输入」指示：channel_key → [(uid, 收到时的本地 ms)]。
+    ///
+    /// 服务端不持久化、不补投；UI 渲染时只取最近数秒内的记录。
+    pub typing: Signal<HashMap<String, Vec<(String, i64)>>>,
 }
 
 impl AppState {
@@ -165,6 +184,7 @@ impl AppState {
             is_host: Signal::new(None),
             pending_adds: Signal::new(std::collections::HashSet::new()),
             unread: Signal::new(HashMap::new()),
+            typing: Signal::new(HashMap::new()),
         }
     }
 
@@ -317,6 +337,23 @@ pub struct UiState {
     pub upload_progress: Signal<Option<(String, u32)>>,
     /// Round 7：等待用户确认的主群 Welcome。按 Vec 顺序排队展示。
     pub pending_welcomes: Signal<Vec<PendingWelcomeUi>>,
+    /// 消息右键菜单：(x, y, 目标消息)。None = 关闭。
+    pub msg_menu: Signal<Option<(i32, i32, MsgMenuTarget)>>,
+    /// 正在内联编辑的消息：(msg_id, 草稿)。
+    pub editing_message: Signal<Option<(String, String)>>,
+}
+
+/// 消息右键菜单的目标（频道 / DM 共用）。
+#[derive(Clone, PartialEq)]
+pub struct MsgMenuTarget {
+    /// 发送 edit/delete 用的目标 id：频道 id 或 DM conv_id。
+    pub target_id: String,
+    /// 消息的 UI id（进入编辑态用）。
+    pub msg_id: String,
+    pub author: String,
+    pub ts: i64,
+    pub text: String,
+    pub is_dm: bool,
 }
 
 /// 成员选择器的使用场景。
@@ -369,6 +406,8 @@ impl UiState {
             search_open: Signal::new(false),
             upload_progress: Signal::new(None),
             pending_welcomes: Signal::new(Vec::new()),
+            msg_menu: Signal::new(None),
+            editing_message: Signal::new(None),
         }
     }
 
@@ -423,6 +462,14 @@ pub struct VoiceState {
             kaede_media_session::ConsumerHandle,
         )>,
     >,
+    /// 远端音频播放器（用于扬声器静音开关）。
+    #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
+    pub audio_players: Signal<
+        Vec<(
+            kaede_media_session::TrackId,
+            std::sync::Arc<kaede_media::AudioPlayer>,
+        )>,
+    >,
     /// 当前选择的视频画质档位；屏幕共享与共享中重建都按此配置编码器。
     pub current_profile: Signal<kaede_protocol::VideoProfile>,
     /// 屏幕共享实时统计（开启时才有值）。
@@ -441,6 +488,8 @@ impl VoiceState {
             handle: Signal::new(None),
             #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
             media_consumers: Signal::new(Vec::new()),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "desktop-media"))]
+            audio_players: Signal::new(Vec::new()),
             current_profile: Signal::new(kaede_protocol::DEFAULT_VIDEO_PROFILE),
             current_bitrate: Signal::new(kaede_protocol::DEFAULT_VIDEO_BITRATE),
             screen_stats: Signal::new(None),
@@ -475,6 +524,8 @@ pub struct VoiceControls {
     pub mic_on: Signal<bool>,
     pub speaker_on: Signal<bool>,
     pub screen_on: Signal<bool>,
+    /// 系统声音（loopback）共享开关（桌面端）。
+    pub system_audio_on: Signal<bool>,
 }
 
 impl VoiceControls {
@@ -483,6 +534,7 @@ impl VoiceControls {
             mic_on: Signal::new(true),
             speaker_on: Signal::new(true),
             screen_on: Signal::new(false),
+            system_audio_on: Signal::new(false),
         }
     }
 }
@@ -560,8 +612,8 @@ impl AppState {
             ],
         );
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
 
@@ -582,6 +634,7 @@ impl AppState {
             reply_to: None,
             reactions: vec![],
             mentions: vec![],
+            edited: false,
         };
 
         let key = AppState::channel_key(&sid, "general");
@@ -683,6 +736,26 @@ mod tests {
         trim_cached_messages(&mut list);
         assert_eq!(list.len(), MAX_CACHED_MESSAGES);
         assert_eq!(list.first().map(|m| m.ts), Some(0));
+    }
+
+    #[test]
+    fn typing_upsert_refreshes_existing_user() {
+        let mut list = vec![("a".to_string(), 100)];
+        upsert_typing(&mut list, "b", 200);
+        upsert_typing(&mut list, "a", 300);
+        // 同 uid 不重复，时间被刷新并移到末尾。
+        assert_eq!(list, vec![("b".to_string(), 200), ("a".to_string(), 300)]);
+    }
+
+    #[test]
+    fn typing_upsert_caps_and_drops_oldest() {
+        let mut list = Vec::new();
+        for i in 0..10 {
+            upsert_typing(&mut list, &format!("u{i}"), i as i64);
+        }
+        assert_eq!(list.len(), MAX_TYPING_USERS);
+        assert_eq!(list.first().map(|(u, _)| u.as_str()), Some("u2"));
+        assert_eq!(list.last().map(|(u, _)| u.as_str()), Some("u9"));
     }
 }
 

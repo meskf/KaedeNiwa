@@ -14,6 +14,11 @@ pub struct LiveKitWebSession {
     key_provider: Option<JsValue>,
 }
 
+thread_local! {
+    /// 扬声器开关状态。用于给**新订阅**的远端音频轨应用静音。
+    static SPEAKER_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
 fn global_lk() -> Result<JsValue, LiveKitWebError> {
     let g = js_sys::global();
     let lk = Reflect::get(&g, &JsValue::from_str("LivekitClient"))
@@ -84,8 +89,7 @@ impl LiveKitWebSession {
 
         if let Some(key) = e2ee_key {
             let kp_ctor = ctor(&lk, "ExternalE2EEKeyProvider")?;
-            let kp = kp_ctor
-                .call0(&JsValue::UNDEFINED)
+            let kp = js_sys::Reflect::construct(&kp_ctor, &js_sys::Array::new())
                 .map_err(|e| LiveKitWebError::Js(format!("new keyProvider: {:?}", e)))?;
 
             // 关键：`livekit-client` 的 setKey(string) 走 PBKDF2，
@@ -114,8 +118,9 @@ impl LiveKitWebSession {
             key_provider = Some(kp);
         }
 
-        let room = room_ctor
-            .call1(&JsValue::UNDEFINED, &opts)
+        let args = js_sys::Array::new();
+        args.push(&opts);
+        let room = js_sys::Reflect::construct(&room_ctor, &args)
             .map_err(|e| LiveKitWebError::Js(format!("new Room: {:?}", e)))?;
 
         tracing::info!(
@@ -184,21 +189,41 @@ impl LiveKitWebSession {
         let opts = JsValue::from(Object::new());
         Reflect::set(&opts, &JsValue::from_str("video"), &video_opts)
             .map_err(|e| LiveKitWebError::Js(format!("opts.video: {:?}", e)))?;
-        Reflect::set(&opts, &JsValue::from_str("audio"), &JsValue::FALSE)
+        // 请求系统/标签页音频（Chrome/Edge 支持；不支持的浏览器回退为纯视频）。
+        Reflect::set(&opts, &JsValue::from_str("audio"), &JsValue::TRUE)
             .map_err(|e| LiveKitWebError::Js(format!("opts.audio: {:?}", e)))?;
 
-        await_promise(
-            set_ss
+        let mut with_audio = true;
+        let first = set_ss
+            .call2(&lp, &JsValue::from_bool(enabled), &opts)
+            .map_err(|e| LiveKitWebError::Js(format!("setScreenShareEnabled: {:?}", e)))?;
+        if let Err(e) = await_promise(first).await {
+            let msg = format!("{:?}", e);
+            // 用户在系统选择框里拒绝共享：不要二次弹窗，直接报错。
+            if !enabled || msg.contains("NotAllowedError") || msg.contains("Permission") {
+                return Err(e);
+            }
+            tracing::warn!(
+                "[livekit-web] screen share with audio failed ({}); retrying video-only",
+                msg
+            );
+            Reflect::set(&opts, &JsValue::from_str("audio"), &JsValue::FALSE)
+                .map_err(|e| LiveKitWebError::Js(format!("opts.audio fallback: {:?}", e)))?;
+            let retry = set_ss
                 .call2(&lp, &JsValue::from_bool(enabled), &opts)
-                .map_err(|e| LiveKitWebError::Js(format!("setScreenShareEnabled: {:?}", e)))?,
-        )
-        .await?;
+                .map_err(|e| {
+                    LiveKitWebError::Js(format!("setScreenShareEnabled retry: {:?}", e))
+                })?;
+            await_promise(retry).await?;
+            with_audio = false;
+        }
         tracing::info!(
-            "[livekit-web] screen share -> {} ({}x{}@{})",
+            "[livekit-web] screen share -> {} ({}x{}@{}, audio={})",
             enabled,
             profile.width,
             profile.height,
-            profile.fps
+            profile.fps,
+            with_audio
         );
         Ok(())
     }
@@ -229,6 +254,22 @@ impl LiveKitWebSession {
                     .ok()
                     .and_then(|v| v.as_string())
                     .unwrap_or_default();
+                if kind == "audio" {
+                    // 新订阅的远端音频：扬声器关闭时立刻静音。
+                    let speaker_enabled = SPEAKER_ENABLED.with(|f| f.get());
+                    if !speaker_enabled
+                        && let Ok(set_volume) =
+                            Reflect::get(&track, &JsValue::from_str("setVolume"))
+                        && let Ok(f) = set_volume.dyn_into::<Function>()
+                    {
+                        let _ = f.call1(&track, &JsValue::from_f64(0.0));
+                    }
+                    tracing::info!(
+                        "[livekit-web] remote audio subscribed (speaker_enabled={})",
+                        speaker_enabled
+                    );
+                    return;
+                }
                 if kind != "video" {
                     return;
                 }
@@ -272,6 +313,32 @@ impl LiveKitWebSession {
         )
         .map_err(|e| LiveKitWebError::Js(format!("room.on(trackSubscribed): {:?}", e)))?;
         closure.forget();
+        Ok(())
+    }
+
+    /// 扬声器开关：静音/恢复所有远端音频（含后续新订阅的音频轨）。
+    pub async fn set_speaker_enabled(&self, enabled: bool) -> Result<(), LiveKitWebError> {
+        SPEAKER_ENABLED.with(|f| f.set(enabled));
+        if let Some(window) = web_sys::window()
+            && let Some(document) = window.document()
+            && let Ok(nodes) = document.query_selector_all("audio")
+        {
+            for i in 0..nodes.length() {
+                if let Some(node) = nodes.item(i)
+                    && let Ok(audio) = node.dyn_into::<web_sys::HtmlAudioElement>()
+                {
+                    audio.set_muted(!enabled);
+                }
+            }
+        }
+        // 浏览器自动播放策略：用户手势后恢复音频输出。失败不阻断开关。
+        if enabled
+            && let Ok(start) = get_fn(&self.room, "startAudio")
+            && let Ok(p) = start.call0(&self.room)
+        {
+            let _ = await_promise(p).await;
+        }
+        tracing::info!("[livekit-web] speaker -> {}", enabled);
         Ok(())
     }
 

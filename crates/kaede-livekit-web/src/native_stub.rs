@@ -21,6 +21,9 @@ impl LiveKitWebSession {
     pub async fn set_microphone(&self, _enabled: bool) -> Result<(), LiveKitWebError> {
         Err(LiveKitWebError::NotSupported)
     }
+    pub async fn set_speaker_enabled(&self, _enabled: bool) -> Result<(), LiveKitWebError> {
+        Err(LiveKitWebError::NotSupported)
+    }
     pub fn attach_remote_videos_to(&self, _container_id: &str) -> Result<(), LiveKitWebError> {
         Err(LiveKitWebError::NotSupported)
     }

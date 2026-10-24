@@ -16,7 +16,14 @@
     "reply": "Reply",
     "react": "React",
     "cancel": "Cancel",
-    "selected": "Selected {author}: {text}"
+    "selected": "Selected {author}: {text}",
+    "edit": "Edit",
+    "delete": "Delete",
+    "edited": "(edited)",
+    "editHint": "Enter to save · Esc to cancel",
+    "editFailed": "Edit failed: {err}",
+    "deleteFailed": "Delete failed: {err}",
+    "typing": "{names} is typing…"
   },
   "member": {
     "online": "Online — {count}",

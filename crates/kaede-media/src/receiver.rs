@@ -67,6 +67,46 @@ pub struct ReceiveStats {
     pub rejected: u64,
 }
 
+/// 每个 sender 的重放窗口。
+///
+/// `seen` 的第 0 位对应 `highest`，第 i 位对应 `highest - i`。
+/// 允许窗口内乱序（RTP 抖动常见），拒绝重复帧和窗口外旧帧。
+#[derive(Debug, Clone, Copy)]
+struct ReplayWindow {
+    highest: u32,
+    seen: u64,
+}
+
+impl ReplayWindow {
+    /// 检查并标记一个序号。返回 false = 重复或超出窗口。
+    fn check_and_mark(&mut self, seq: u32) -> bool {
+        const WINDOW_BITS: u32 = 64;
+        if seq > self.highest {
+            let shift = seq - self.highest;
+            if shift >= WINDOW_BITS {
+                self.seen = 1;
+            } else {
+                self.seen = (self.seen << shift) | 1;
+            }
+            self.highest = seq;
+            return true;
+        }
+        if seq == self.highest {
+            return false;
+        }
+        let diff = self.highest - seq;
+        if diff >= WINDOW_BITS {
+            return false;
+        }
+        let mask = 1u64 << diff;
+        if self.seen & mask != 0 {
+            return false;
+        }
+        self.seen |= mask;
+        true
+    }
+}
+
 /// SFrame 接收会话。
 ///
 /// **无状态密钥**：key / key_id 由上层提供（一般在 MLS epoch 前进时重建）。
@@ -75,8 +115,8 @@ pub struct ReceiverSession {
     expected_key_id: u32,
     /// 只接收某个 sender 的帧（可选）。
     expected_sender_id: Option<u32>,
-    /// sender_id -> last accepted seq。用于重放 / 乱序检测。
-    last_seq_by_sender: Mutex<HashMap<u32, u32>>,
+    /// sender_id -> 重放窗口（64 帧）。
+    replay_by_sender: Mutex<HashMap<u32, ReplayWindow>>,
     decrypted: AtomicU64,
     rejected: AtomicU64,
 }
@@ -88,7 +128,7 @@ impl ReceiverSession {
             key,
             expected_key_id: key_id,
             expected_sender_id: None,
-            last_seq_by_sender: Mutex::new(HashMap::new()),
+            replay_by_sender: Mutex::new(HashMap::new()),
             decrypted: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
         }
@@ -106,9 +146,8 @@ impl ReceiverSession {
     ///
     /// - **篡改检测**：SFrame 头部（key_id + counter）是 AEAD 的 AAD，
     ///   任何字节被改都会导致 GCM tag 校验失败
-    /// - **重放检测**：每个 sender 独立维护 last_seq，seq 必须严格递增
-    ///   （允许 u32 回绕 `MAX -> 0`）。LiveKit 的 RTP 层会做乱序重排，
-    ///   所以到达这里时应该大致有序
+    /// - **重放检测**：每个 sender 独立维护 64 帧滑动窗口，窗口内允许
+    ///   乱序（RTP 抖动常见），重复帧和窗口外旧帧被拒绝
     /// - **key_id 校验**：防止用旧 epoch 的帧污染新 epoch 的解密器
     // ReceiverSession 是 sframe::decrypt 的上层封装：
     // - sframe::decrypt 裸 API 无防护（已 deprecated）
@@ -152,12 +191,10 @@ impl ReceiverSession {
         };
 
         // 5. 重放 / 乱序检测（解密成功后才信任 counter）
-        // M12: 删除 u32 wrap 分支——发送端 Counter::checked_next 保证
-        // 不产生 MAX→0 回绕；攻击者伪造的 seq=0 帧会被 AAD 校验拒绝。
         {
             // M11: Mutex poison 恢复 —— 一次 decrypt panic 不应让整个
             // 接收链永久死锁。取 into_inner 继续（replay 保护可能损失一次）。
-            let mut map = match self.last_seq_by_sender.lock() {
+            let mut map = match self.replay_by_sender.lock() {
                 Ok(g) => g,
                 Err(p) => {
                     tracing::warn!(
@@ -166,9 +203,28 @@ impl ReceiverSession {
                     p.into_inner()
                 }
             };
-            if let Some(last) = map.get(&sender_id).copied()
-                && seq <= last
-            {
+            let rejected_last = match map.get_mut(&sender_id) {
+                Some(window) => {
+                    if window.check_and_mark(seq) {
+                        None
+                    } else {
+                        Some(window.highest)
+                    }
+                }
+                None => {
+                    // 该 sender 的第一帧：直接建立窗口，不经过 check_and_mark，
+                    // 否则重复的同一帧会被误判为“首帧”而放行。
+                    map.insert(
+                        sender_id,
+                        ReplayWindow {
+                            highest: seq,
+                            seen: 1,
+                        },
+                    );
+                    None
+                }
+            };
+            if let Some(last) = rejected_last {
                 drop(map);
                 self.rejected.fetch_add(1, Ordering::Relaxed);
                 return Err(ReceiveError::Replay {
@@ -177,7 +233,6 @@ impl ReceiverSession {
                     got: seq,
                 });
             }
-            map.insert(sender_id, seq);
         }
 
         self.decrypted.fetch_add(1, Ordering::Relaxed);
@@ -313,10 +368,12 @@ mod tests {
     }
 
     #[test]
-    fn out_of_order_rejected() {
+    fn out_of_order_within_window_accepted_once() {
         let r = make_receiver();
         r.decrypt(&encrypt_frame("alice", 5, b"a", false)).unwrap();
-        // seq 回退
+        // 窗口内乱序：允许一次（RTP 抖动）
+        r.decrypt(&encrypt_frame("alice", 3, b"b", false)).unwrap();
+        // 重复的 3 必须拒绝
         let err = r
             .decrypt(&encrypt_frame("alice", 3, b"b", false))
             .unwrap_err();
@@ -325,6 +382,24 @@ mod tests {
             ReceiveError::Replay {
                 last: 5,
                 got: 3,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn too_old_outside_window_rejected() {
+        let r = make_receiver();
+        r.decrypt(&encrypt_frame("alice", 100, b"a", false))
+            .unwrap();
+        let err = r
+            .decrypt(&encrypt_frame("alice", 10, b"b", false))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ReceiveError::Replay {
+                last: 100,
+                got: 10,
                 ..
             }
         ));

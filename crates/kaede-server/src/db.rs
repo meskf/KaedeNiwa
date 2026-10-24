@@ -277,6 +277,13 @@ pub async fn cleanup_expired(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 /// 单个账号的消息密文累计上限（终身）。
 pub const MAX_USER_MESSAGE_BYTES: i64 = 512 * 1024 * 1024;
 
+/// 单次历史拉取返回的**密文总字节**上限。
+///
+/// 单个请求最多 `limit=500` 条、单条密文 4 MiB，若不设总量上限，
+/// 一次 `fetch_all` 可把约 2 GiB 密文读进内存再 base64 放大。
+/// 8 MiB 足够覆盖正常的一页历史，同时把最坏内存占用压到可控范围。
+pub(crate) const MAX_HISTORY_RESPONSE_BYTES: i64 = 8 * 1024 * 1024;
+
 /// 在事务内预占消息字节配额。返回 false 表示超额。
 pub async fn reserve_message_bytes(
     conn: &mut sqlx::SqliteConnection,

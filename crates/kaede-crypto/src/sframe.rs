@@ -20,7 +20,16 @@
 //!
 //! 12 字节帧头（`key_id || counter`）作为 AAD。这保证：
 //! - 篡改 key_id 或 counter 会导致 GCM tag 校验失败
-//! - 重放检测可以在解密前基于 counter 做（明文的 counter 已绑定到密文）
+//! - counter 以明文随帧传输且被 tag 绑定，因此上层**可以**在解密后基于
+//!   counter 做重放检测——但本模块的裸 `decrypt` **不做**这项检查
+//!
+//! # ⚠️ 防护边界
+//!
+//! 本模块只提供 AEAD 加解密。**不提供** sender 身份校验与重放检测：
+//! 恶意成员可用共享 key 伪造他人 sender_id，或反复投递旧帧。
+//! 生产路径必须使用 `kaede-media::receiver::ReceiverSession::decrypt`
+//! （sender 白名单 + 滑动窗口重放检测）或 `decrypt_checked`。
+//! 裸 `decrypt` 已 deprecated，仅为兼容保留。
 //!
 //! # 与旧项目的关系
 //!

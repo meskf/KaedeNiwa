@@ -469,9 +469,6 @@ async fn join_channel(
             "channel password attempts limited from this address".into(),
         ));
     }
-    // C10: 并发 Argon2 上限（同 login），防 OOM DoS
-    let _permit = crate::http::acquire_argon2(&state).await?;
-
     // C8: 若提交了 KP，先校验 credential == auth uid。
     // 无论首次加入还是重广播，KP 都会流到 channel group 的 add_member，
     // 恶意 credential 会污染 group state。
@@ -484,17 +481,23 @@ async fn join_channel(
         }
     }
 
-    let row: Option<(i64, Option<String>)> =
-        sqlx::query_as("SELECT is_private, password_hash FROM channels WHERE id = ?")
+    let row: Option<(i64, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT is_private, password_hash, hash_tier FROM channels WHERE id = ?")
             .bind(&id)
             .fetch_optional(&state.pool)
             .await?;
-    let (is_private_raw, pw_hash) = row.ok_or_else(|| ApiError::NotFound("channel".into()))?;
+    let (is_private_raw, pw_hash, hash_tier) =
+        row.ok_or_else(|| ApiError::NotFound("channel".into()))?;
 
     // A1: 总是先验证密码（不再"已加入直接放行"）
     if is_private_raw != 0 {
         let stored = pw_hash
             .ok_or_else(|| ApiError::BadRequest("private channel without password_hash".into()))?;
+        // C10: 并发 Argon2 上限按**存储档位**计费（同 login）。
+        // 256 MiB 档必须占 4 份额度，否则 8 并发≈2 GiB，可打爆小内存 VPS。
+        let _permit =
+            crate::http::acquire_argon2_weighted(&state, argon2_permits(hash_tier.as_deref()))
+                .await?;
         if !verify_channel_password(&req.password, &stored) {
             return Err(ApiError::Unauthorized);
         }

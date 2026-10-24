@@ -230,8 +230,9 @@ pub fn MemberContextMenu() -> Element {
                                                             text: h.plaintext,
                                                             attachments: h.attachments,
                                                             reply_to: h.reply_to,
-                                                            reactions: vec![],
+                                                            reactions: h.reactions,
                                                             mentions: h.mentions,
+                                                            edited: h.edited,
                                                         })
                                                         .collect();
                                                     app.dm_messages.write().insert(cid, ui_msgs);

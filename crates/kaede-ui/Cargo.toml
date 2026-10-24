@@ -12,6 +12,7 @@ desktop-media = ["dep:kaede-media", "dep:kaede-capture", "dep:kaede-media-sessio
 mobile = []
 
 [dependencies]
+web-time = "1.1"
 kaede-client   = { workspace = true }
 kaede-protocol = { workspace = true }
 dioxus         = { workspace = true }

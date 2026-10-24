@@ -8,49 +8,73 @@ use kaede_server::{
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// 随服务端一起拉起的 LiveKit 子进程。`Drop` 时回收，避免早退路径留下孤儿进程。
-struct LivekitChild(Option<std::process::Child>);
+struct LivekitChild {
+    child: Option<std::process::Child>,
+    /// 临时生成的 LiveKit 配置文件，进程退出时删除。
+    config_file: Option<std::path::PathBuf>,
+}
 
 impl Drop for LivekitChild {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        if let Some(path) = self.config_file.take() {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
 
-/// 同目录存在 `livekit-server.exe` 时自动拉起，实现单目录开箱即用。
+/// 同目录存在 `livekit-server.exe` / `livekit-server` 时自动拉起，实现单目录开箱即用。
 ///
 /// 只在**服务端配置校验通过、监听成功后**调用：配置错误不会留下孤儿进程。
 /// `--dev` 使用 LiveKit 的默认 devkey/secret，因此只绑回环，避免把无认证的
 /// 开发实例暴露到局域网/公网。
 fn spawn_bundled_livekit() -> LivekitChild {
-    let Some(exe_path) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.join("livekit-server.exe")))
-        .filter(|p| p.exists())
-    else {
-        return LivekitChild(None);
+    let Some(exe_path) = std::env::current_exe().ok().and_then(|p| {
+        let dir = p.parent()?;
+        ["livekit-server.exe", "livekit-server"]
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|path| path.exists())
+    }) else {
+        return LivekitChild {
+            child: None,
+            config_file: None,
+        };
     };
+
+    // 当前 LiveKit 版本没有 --port / --rtc-tcp-port / --rtc-udp-port 参数，
+    // 必须通过 YAML 配置端口（否则 LiveKit 会退回 7880，客户端连接被拒）。
+    let config = "port: 18082\nrtc:\n  tcp_port: 18083\n  udp_port: 18084\n";
+    let config_path =
+        std::env::temp_dir().join(format!("kaede-livekit-{}.yaml", std::process::id()));
+    if let Err(e) = std::fs::write(&config_path, config) {
+        tracing::error!("failed to write bundled LiveKit config: {}", e);
+        return LivekitChild {
+            child: None,
+            config_file: None,
+        };
+    }
+
     tracing::info!("starting bundled LiveKit server from {:?}", exe_path);
     match std::process::Command::new(&exe_path)
-        .args([
-            "--dev",
-            "--bind",
-            "127.0.0.1",
-            "--port",
-            "18082",
-            "--rtc-tcp-port",
-            "18083",
-            "--rtc-udp-port",
-            "18084",
-        ])
+        .args(["--dev", "--bind", "127.0.0.1", "--config"])
+        .arg(&config_path)
         .spawn()
     {
-        Ok(child) => LivekitChild(Some(child)),
+        Ok(child) => LivekitChild {
+            child: Some(child),
+            config_file: Some(config_path),
+        },
         Err(e) => {
             tracing::error!("failed to spawn livekit-server: {}", e);
-            LivekitChild(None)
+            let _ = std::fs::remove_file(&config_path);
+            LivekitChild {
+                child: None,
+                config_file: None,
+            }
         }
     }
 }

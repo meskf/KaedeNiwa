@@ -112,8 +112,12 @@ pub fn MemberPickerModal() -> Element {
                                                                         list.push(conv.clone());
                                                                     }
                                                                 }
-                                                                ui.selected_dm_conv.set(Some(conv.conv_id));
+                                                                let cid = conv.conv_id.clone();
+                                                                ui.selected_dm_conv.set(Some(cid.clone()));
                                                                 ui.main_tab.set(crate::state::MainTab::Dm);
+                                                                // 与 DM 列表点击一致：选中后立即拉历史，
+                                                                // 否则通过成员选择器打开已有会话会显示空白。
+                                                                crate::dm_view::load_messages(app, cid).await;
                                                             }
                                                             Err(e) => {
                                                                 ui.toast.set(Some((format!("打开失败: {}", e), true)));

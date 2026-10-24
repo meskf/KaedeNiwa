@@ -121,11 +121,32 @@ jobs:
         with:
           toolchain: "1.99.0"
           targets: wasm32-unknown-unknown
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: check kaede-wasm (end-to-end wasm)
         run: cargo check -p kaede-wasm --target wasm32-unknown-unknown
       - name: check kaede-client (wasm feature)
         run: cargo check -p kaede-client --features wasm --target wasm32-unknown-unknown
+      - name: clippy kaede-livekit-web (wasm)
+        run: cargo clippy -p kaede-livekit-web --target wasm32-unknown-unknown -- -D warnings
+
+  test-ui:
+    name: test + clippy (kaede-ui, no desktop media)
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: clippy kaede-ui
+        run: cargo clippy -p kaede-ui --no-default-features --all-targets -- -D warnings
+      - name: test kaede-ui
+        run: cargo nextest run -p kaede-ui --no-default-features --no-fail-fast
 
   check-windows:
     name: check (windows, core crates)

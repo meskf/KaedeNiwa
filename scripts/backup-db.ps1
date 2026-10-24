@@ -1,17 +1,17 @@
 # KaedeNiwa SQLite 在线备份 / 恢复
 #
 # 备份：
-#   pwsh -File scripts/backup-db.ps1 -Mode backup -Db C:\kaede\kaede.db
+#   pwsh -File scripts/backup-db.ps1 -Mode backup -DbPath C:\kaede\kaede.db
 #
 # 恢复（必须先停止服务；需要 -Force 才会真正覆盖）：
-#   pwsh -File scripts/backup-db.ps1 -Mode restore -Db C:\kaede\kaede.db `
+#   pwsh -File scripts/backup-db.ps1 -Mode restore -DbPath C:\kaede\kaede.db `
 #       -Backup C:\kaede\backups\kaede-20261022-120000.db -Force
 param(
     [ValidateSet('backup', 'restore')]
     [string]$Mode = 'backup',
 
     [Parameter(Mandatory = $true)]
-    [string]$Db,
+    [string]$DbPath,
 
     [string]$OutDir,
 
@@ -42,19 +42,19 @@ function Sql([string]$Text) {
 }
 
 if ($Mode -eq 'backup') {
-    if (-not (Test-Path -LiteralPath $Db)) {
-        throw "数据库不存在: $Db"
+    if (-not (Test-Path -LiteralPath $DbPath)) {
+        throw "数据库不存在: $DbPath"
     }
     if (-not $OutDir) {
-        $OutDir = Join-Path (Split-Path -Parent $Db) 'backups'
+        $OutDir = Join-Path (Split-Path -Parent $DbPath) 'backups'
     }
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $dest = Join-Path $OutDir "kaede-$stamp.db"
 
-    Write-Host "备份 $Db -> $dest"
-    & sqlite3 $Db ".backup '$(Sql $dest)'"
+    Write-Host "备份 $DbPath -> $dest"
+    & sqlite3 $DbPath ".backup '$(Sql $dest)'"
     if ($LASTEXITCODE -ne 0) { throw 'sqlite3 .backup 失败' }
 
     Assert-Integrity $dest
@@ -91,18 +91,18 @@ if (-not $Force) {
 }
 
 foreach ($suffix in @('-wal', '-shm')) {
-    $side = "$Db$suffix"
+    $side = "$DbPath$suffix"
     if (Test-Path -LiteralPath $side) { Remove-Item -LiteralPath $side -Force }
 }
 
-Write-Host "恢复 $Backup -> $Db"
-& sqlite3 $Db ".restore '$(Sql $Backup)'"
+Write-Host "恢复 $Backup -> $DbPath"
+& sqlite3 $DbPath ".restore '$(Sql $Backup)'"
 if ($LASTEXITCODE -ne 0) { throw 'sqlite3 .restore 失败' }
 
 foreach ($suffix in @('-wal', '-shm')) {
-    $side = "$Db$suffix"
+    $side = "$DbPath$suffix"
     if (Test-Path -LiteralPath $side) { Remove-Item -LiteralPath $side -Force }
 }
 
-Assert-Integrity $Db
+Assert-Integrity $DbPath
 Write-Host '恢复完成，integrity_check = ok' -ForegroundColor Green

@@ -17,7 +17,7 @@
     <div id="main"></div>
     <noscript>KaedeNiwa 需要 JavaScript 才能运行。</noscript>
   <!-- LiveKit SDK 与 E2EE worker 已 vendored 到同源 assets，避免 CDN 供应链风险。 -->
-  <script src="./livekit-client.umd.min.js"></script>
+  <script defer src="/livekit-client.umd.min.js"></script>
   <!-- 启动脚本独立成文件，保证 CSP 可以只允许 'self'（不需要 unsafe-inline）。 -->
   <script src="./boot.js"></script>
 </body>

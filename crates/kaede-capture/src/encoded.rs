@@ -167,7 +167,7 @@ fn nvenc_params(element: &str, codec: VideoCodec, bitrate_kbps: u32, fps: u32) -
     let gop = fps * 2;
     match element {
         // NVENC HEVC / H.264：相同的属性集
-        "nvh265enc" | "nvd3d11h265enc" | "nvh264enc" => match codec {
+        "nvh265enc" | "nvd3d11h265enc" | "nvh264enc" | "nvd3d11h264enc" => match codec {
             VideoCodec::H264 | VideoCodec::HEVC => format!(
                 "{element} bitrate={bitrate_kbps} rc-mode=cbr zerolatency=true gop-size={gop}"
             ),
@@ -565,5 +565,18 @@ mod tests {
     fn vertical_resolution_detected_as_longest() {
         assert_eq!(VideoCodec::recommend(2160, 3840, 60), VideoCodec::HEVC);
         assert_eq!(VideoCodec::recommend(4320, 7680, 60), VideoCodec::AV1);
+    }
+
+    /// GPU 直通用的 `nvd3d11h264enc` 曾经漏配参数，导致 CBR/zerolatency/GOP
+    /// 全部丢失（关键帧间隔变成编码器默认 75 帧）。所有 NVENC 元素名都必须命中。
+    #[test]
+    fn nvenc_params_apply_low_latency_for_every_nvenc_element() {
+        for elem in ["nvh264enc", "nvd3d11h264enc", "nvh265enc", "nvd3d11h265enc"] {
+            let p = nvenc_params(elem, VideoCodec::H264, 4000, 30);
+            assert!(p.starts_with(elem), "{p}");
+            assert!(p.contains("rc-mode=cbr"), "{p}");
+            assert!(p.contains("zerolatency=true"), "{p}");
+            assert!(p.contains("gop-size=60"), "{p}");
+        }
     }
 }

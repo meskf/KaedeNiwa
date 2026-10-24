@@ -1,4 +1,4 @@
-﻿# KaedeNiwa 安全模型与边界
+# KaedeNiwa 安全模型与边界
 
 本文件**诚实说明**当前实现的安全边界——哪些场景我们保护、哪些不保护。
 每次安全相关的审查（如 2026-10-19 全量审查）都会更新此文件。
@@ -234,8 +234,7 @@ snapshot → 拿到签名私钥**。
 - `sframe::decrypt` 裸 API 无 sender 白名单 / 重放防护 → 标记 `#[deprecated]`（见下）
 - 上层应始终使用 `kaede-media::receiver::ReceiverSession::decrypt`，它已有：
   - `expected_sender_id: Option<u32>`（`with_sender` 设置）
-  - `last_seq_by_sender` 重放检测
-  - u32 回绕处理
+  - `replay_by_sender`：每个 sender 64 帧滑动窗口，窗口内允许乱序、拒绝重复与窗口外旧帧
 
 **未修复（P2 / 未来）**：
 - `expected_sender_id: Option<u32>` 只支持单个 sender → 多人通话时调用方只能设 `None` 放弃防护。若未来应用层 SFrame 路径启用，需改为 `HashSet<u32>` + `with_senders(...)`
@@ -246,4 +245,39 @@ snapshot → 拿到签名私钥**。
 - **`kaede-media` 的 SFrame 路径是"未来能力"**（自建 SFU / 离线落盘）
 - 未来启用时，调用方 MUST 用 `ReceiverSession::decrypt` + `with_senders(...)`
 - `sframe::decrypt` 的 `#[deprecated]` 是**编译期强制**——新代码无法绕过
+
+## 2026-10-23 全量审查收口
+
+本次审查覆盖 15 个 crate（约 4.8 万行 Rust）与当前未提交工作区，修复了以下安全/一致性边界：
+
+### 快照恢复 fail-closed
+
+- `MlsSession::from_snapshot_with` 只接受 `0x03` 外层头 + 非 `ALG_NOOP` 的加密快照；
+  明文旧格式直接拒绝并重建身份。
+- Web 端 `init_web_keystore` 失败会阻断登录；`device_cipher` 在 DEK 不可用时返回
+  不可写 cipher，**不再回退**到由公开信息派生的 key。
+- **仍然存在**：本地写权限攻击者可以回滚旧密文（无 TPM/单调计数器）；
+  平台钥匙串保护的是机密性，不是防回滚。
+
+### MLS Commit 并发仲裁
+
+- 服务端同一 epoch 只入库并广播第一份 Commit；落败 Commit 不再广播。
+- 客户端按 epoch 排序：超前 Commit 暂存并 `ReportEpoch` 补拉，落后/重复丢弃；
+  本地刚生成但落败的 Commit 用内存回滚备份恢复到提交前状态，再跟随胜出者。
+- 回滚备份只存在内存（`Zeroizing`），不写盘。
+
+### 资源上限
+
+- 频道 / DM 历史接口单次响应密文总量上限 8 MiB，并增加按 uid 的历史读取限流。
+- 频道密码校验的 Argon2 并发额度改为按**存储档位**计费（256 MiB 档 = 4 份）。
+- `Typing` 扇出计入房间广播预算；WS 增加单 IP 并发连接上限（64），
+  未认证握手超时从 10s 缩短到 5s。
+- `KAEDE_TRUSTED_PROXIES` 任一条目非法时启动失败（不再静默丢弃）；compose
+  固定 `kaede-net` 为 `172.28.0.0/16`，只信任该网段。
+
+### SFrame 重放窗口
+
+- 接收端从“seq 必须严格递增”改为每 sender 64 帧滑动窗口：
+  允许 RTP 抖动造成的窗口内乱序，重复帧与窗口外旧帧仍被拒绝。
+
 
