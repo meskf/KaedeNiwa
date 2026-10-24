@@ -568,20 +568,8 @@ impl RoomSession {
         let conn = self.conn.clone();
         spawn_detached(conn.run_event_loop());
 
-        let hb = self.conn.clone();
-        spawn_detached(async move {
-            let mut nonce: u64 = 0;
-            loop {
-                sleep_ms(45_000).await;
-                if hb.state() == crate::ClientState::Disconnected {
-                    break;
-                }
-                nonce += 1;
-                if hb.send_ping(nonce).await.is_err() {
-                    break;
-                }
-            }
-        });
+        // P0-2: 心跳由 ServerConnection::spawn_heartbeat (20s ping, 30s timeout) 负责，
+        // 此处不再重复起 45s ping loop（旧实现的遗留）。
     }
 
     // ---------------------------------------------------------------------

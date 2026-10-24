@@ -378,6 +378,30 @@ impl ServerConnection {
         if existing_group_id == new_group_id {
             return Ok(());
         }
+        // P1-3-client: 保护本地更高 epoch 的 group
+        // 场景：reload 后 u0 误以为 u1 是新成员，重发 Welcome epoch=1（新群）
+        // 但 u1 本地 snapshot 已恢复到 epoch=N (N>1)。
+        // 如果采纳新群 → u1 从 epoch=N 掉回 epoch=1 → 数据丢失。
+        // 策略：本地已有 group 且 probe.epoch() < 本地 epoch → 拒绝覆盖。
+        if let Some(_) = existing_group_id {
+            let local_epoch = self.channel_epoch(channel_id).unwrap_or(0);
+            let new_epoch = probe.epoch();
+            if new_epoch < local_epoch {
+                tracing::warn!(
+                    "[channel_join_via_welcome] REJECT downgrade: ch={} local_epoch={} new_epoch={}",
+                    channel_id, local_epoch, new_epoch
+                );
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::warn_1(&format!(
+                    "[channel_join_via_welcome] REJECT downgrade: local={} new={}",
+                    local_epoch, new_epoch
+                ).into());
+                return Err(ClientError::Mls(format!(
+                    "channel {} welcome is older (epoch {}) than local (epoch {}); refusing downgrade",
+                    channel_id, new_epoch, local_epoch
+                )));
+            }
+        }
         // 不同（或本地没有）→ 采纳新群。
         self.channel_groups
             .lock()
