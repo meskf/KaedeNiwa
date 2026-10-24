@@ -117,3 +117,6 @@ _local_trash/
 crates/kaede-protocol/fuzz/target/
 crates/kaede-protocol/fuzz/corpus/
 crates/kaede-protocol/fuzz/artifacts/
+
+# 诊断日志/运行日志
+/logs/
