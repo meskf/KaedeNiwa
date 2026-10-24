@@ -45,12 +45,53 @@ fn spawn_bundled_livekit() -> LivekitChild {
         };
     };
 
-    // 当前 LiveKit 版本没有 --port / --rtc-tcp-port / --rtc-udp-port 参数，
-    // 必须通过 YAML 配置端口（否则 LiveKit 会退回 7880，客户端连接被拒）。
-    let config = "port: 18082\nrtc:\n  tcp_port: 18083\n  udp_port: 18084\n";
+    // 从 env 读 API key/secret：server 签 token、livekit 验 token 必须用同一组值。
+    // 为空时跳过启动（比用 devkey 起来但 token 永远验不过更诚实）。
+    let api_key = std::env::var("LIVEKIT_API_KEY").unwrap_or_default();
+    let api_secret = std::env::var("LIVEKIT_API_SECRET").unwrap_or_default();
+    if api_key.is_empty() || api_secret.is_empty() {
+        tracing::warn!(
+            "bundled livekit skipped: LIVEKIT_API_KEY/SECRET not set (voice will be unavailable)"
+        );
+        return LivekitChild {
+            child: None,
+            config_file: None,
+        };
+    }
+
+    // bind IP 从 KAEDE_BIND 推导：
+    //   `0.0.0.0:18080`   → `0.0.0.0`（局域网/公网可访问）
+    //   `127.0.0.1:18080` → `127.0.0.1`（仅本机）
+    let bind_ip = std::env::var("KAEDE_BIND")
+        .ok()
+        .and_then(|s| s.rsplit_once(':').map(|(ip, _)| ip.to_string()))
+        .unwrap_or_else(|| "0.0.0.0".into());
+
+    let ws_port: u32 = std::env::var("KAEDE_LIVEKIT_WS_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(18082);
+    let tcp_port: u32 = std::env::var("KAEDE_LIVEKIT_TCP_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(18083);
+    let udp_port: u32 = std::env::var("KAEDE_LIVEKIT_UDP_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(18084);
+
+    // LiveKit 没有 --port 参数，必须通过 YAML 配置端口。
+    // `keys:` 段必须与 server 的 LIVEKIT_API_KEY/SECRET 一致，否则 token 校验失败。
+    let config = format!(
+        "port: {ws_port}\n\
+         rtc:\n  tcp_port: {tcp_port}\n  udp_port: {udp_port}\n  use_external_ip: false\n\
+         keys:\n  {api_key}: {api_secret}\n\
+         logging:\n  level: info\n  json: false\n\
+         room:\n  auto_create: true\n"
+    );
     let config_path =
         std::env::temp_dir().join(format!("kaede-livekit-{}.yaml", std::process::id()));
-    if let Err(e) = std::fs::write(&config_path, config) {
+    if let Err(e) = std::fs::write(&config_path, &config) {
         tracing::error!("failed to write bundled LiveKit config: {}", e);
         return LivekitChild {
             child: None,
@@ -58,9 +99,16 @@ fn spawn_bundled_livekit() -> LivekitChild {
         };
     }
 
-    tracing::info!("starting bundled LiveKit server from {:?}", exe_path);
+    tracing::info!(
+        "starting bundled LiveKit server from {:?} (bind={}, ws={}, tcp={}, udp={})",
+        exe_path,
+        bind_ip,
+        ws_port,
+        tcp_port,
+        udp_port
+    );
     match std::process::Command::new(&exe_path)
-        .args(["--dev", "--bind", "127.0.0.1", "--config"])
+        .args(["--bind", bind_ip.as_str(), "--config"])
         .arg(&config_path)
         .spawn()
     {
@@ -172,7 +220,12 @@ async fn main() -> Result<()> {
             .merge(members::router(state.clone()))
             .merge(reads::router(state.clone()))
             .merge(sessions_api::router(state.clone()))
-            .merge(ws::router(state.clone())),
+            .merge(ws::router(state.clone()))
+            // 静态文件托管：所有非 API 请求 fallback 到 dist/web/public
+            .fallback_service(
+                tower_http::services::ServeDir::new("web")
+                    .fallback(tower_http::services::ServeFile::new("web/index.html"))
+            ),
     );
 
     // 管理面板：独立 task + 独立 listener（默认 127.0.0.1:18081）

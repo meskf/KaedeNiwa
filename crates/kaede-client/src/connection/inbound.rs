@@ -195,7 +195,20 @@ impl ServerConnection {
                     }
                 }
             }
-            ServerMessage::MlsAppMessage { from, payload } => {
+            ServerMessage::MlsAppMessage { from, channel_id, payload } => {
+            // 【核心修复】真正的 MLS 密文解密
+            match self.mls_decrypt(&payload) {
+                Ok(plaintext) => {
+                    self.emit_local_event(ClientEvent::AppMessageReceived {
+                        from: from.0.clone(),
+                        channel_id,
+                        payload: plaintext,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("[mls] 解密 MlsAppMessage 失败: {}", e);
+                }
+            }
                 let plaintext = {
                     let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
                     match guard.as_mut() {
@@ -371,6 +384,11 @@ impl ServerConnection {
                 }
                 match payload[0] {
                     0x04 => {
+                        #[cfg(target_arch = "wasm32")]
+                        web_sys::console::log_1(&format!(
+                            "[ChannelSync 0x04] ch={} welcome_len={}",
+                            channel_id, payload.len() - 1
+                        ).into());
                         let welcome = &payload[1..];
                         match self.channel_join_via_welcome(&channel_id, welcome).await {
                             Ok(()) => {
@@ -558,6 +576,12 @@ impl ServerConnection {
                 ts,
                 ciphertext,
             } => {
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(&format!(
+                    "[ChannelMessage] ch={} from={} has_03={} has_group={} ct_len={}",
+                    channel_id, from, ciphertext.first() == Some(&0x03), self.channel_has_group(&channel_id), ciphertext.len()
+                ).into());
+
                 if ciphertext.first() == Some(&0x03) {
                     // 只接受本地确实持有频道 group 的频道。
                     if !self.channel_has_group(&channel_id) {
@@ -578,6 +602,11 @@ impl ServerConnection {
                                 });
                             }
                             Err(e) => {
+                                #[cfg(target_arch = "wasm32")]
+                                web_sys::console::warn_1(&format!(
+                                    "[ChannelMessage] decrypt FAILED ch={} from={}: {}",
+                                    channel_id, from, e
+                                ).into());
                                 tracing::warn!(
                                     "[client:{}] channel message decrypt failed for {}: {}",
                                     self.server_id,

@@ -579,6 +579,11 @@ impl ServerConnection {
     }
 
     /// 发送「正在输入」指示（协议 v7）。纯元数据，服务端不落盘、不补投。
+    pub async fn send_app_message(&self, channel_id: String, payload: Vec<u8>) -> Result<(), ClientError> {
+        let msg = ClientMessage::MlsAppMessage { channel_id, payload };
+        self.transport.send(msg).await
+    }
+
     pub async fn send_typing(&self, channel_id: &str) -> Result<(), ClientError> {
         self.transport
             .send(ClientMessage::Typing {
@@ -634,51 +639,37 @@ impl ServerConnection {
     ///
     /// 调用方负责 spawn：native 用 `tokio::spawn`，wasm 用
     /// `wasm_bindgen_futures::spawn_local`。返回即连接关闭。
-    pub async fn run_event_loop(self: Arc<Self>) {
-        // 快照写盘做尾随去抖：每条消息都整包加密重写 MLS 状态代价很高
-        // （群状态 + 最多 64 个 past epoch）。发送路径仍在广播前显式落盘，
-        // 这里只负责接收侧/成员变更的最终持久化。
+pub async fn run_event_loop(self: Arc<Self>) {
+        // 定期把 dirty 快照落盘（每 250ms）
         let flush_interval = std::time::Duration::from_millis(250);
         let mut last_flush = web_time::Instant::now();
-        let reason = loop {
-            match self.transport.recv().await {
+
+        loop {
+            let reason = match self.transport.recv().await {
                 Ok(msg) => {
                     if let Err(e) = self.handle_server_message(msg).await {
-                        // fatal 错误（Kicked / UnsupportedVersion / Malformed）
-                        // 会让 handle_server_message 返回 Err。
-                        tracing::warn!("[client:{}] handle failed: {}", self.server_id, e);
-                        break e.to_string();
+                        // 【不死鸟护盾】业务层错误只打日志，绝不 Break，防止掉线
+                        tracing::warn!("[client:{}] 收到消息但处理失败 (不断线): {}", self.server_id, e);
                     }
+                    // 周期落盘：把 dirty 快照（channel / dm）写入 IndexedDB
                     if last_flush.elapsed() >= flush_interval {
                         self.flush_dirty_snapshots().await;
                         last_flush = web_time::Instant::now();
                     }
+                    continue;
                 }
-                Err(ClientError::Closed) => {
-                    tracing::info!("[client:{}] ws closed", self.server_id);
-                    break "connection closed".to_string();
-                }
-                Err(e) => {
-                    tracing::warn!("[client:{}] recv error: {}", self.server_id, e);
-                    break e.to_string();
-                }
-            }
-        };
-
-        // 退出前补一次落盘，避免最后 250ms 内的成员变更丢失。
-        self.flush_dirty_snapshots().await;
-
-        // 主动关闭 transport（服务端可能还挂着，需要我们这端发 Close 帧）
-        let _ = self.transport.close().await;
-
-        // 状态置 Disconnected（忽略非法转移——比如已经被 close() 过）
-        let _ = self.transition(ClientState::Disconnected);
-
-        // 通知 UI
-        self.emit(ClientEvent::Disconnected {
-            server_id: self.server_id.clone(),
-            reason,
-        });
+                Err(ClientError::Closed) => "网络连接已关闭".to_string(),
+                Err(e) => format!("网络传输错误: {}", e),
+            };
+            tracing::info!("[client:{}] 事件循环结束: {}", self.server_id, reason);
+            self.emit(ClientEvent::Disconnected {
+                server_id: self.server_id.clone(),
+                reason,
+            });
+            // 退出前补一次落盘
+            self.flush_dirty_snapshots().await;
+            break;
+        }
     }
 
     /// 关闭连接。

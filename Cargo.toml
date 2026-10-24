@@ -7,15 +7,7 @@ members = [
     "crates/kaede-storage",
     "crates/kaede-client",
     "crates/kaede-server",
-    "crates/kaede-ui",
-    "crates/kaede-wasm",
-    "crates/kaede-desktop",
-    "crates/kaede-mobile",
-    "crates/kaede-admin",
-    "crates/kaede-capture",
-    "crates/kaede-media",
-    "crates/kaede-media-session",
-    "crates/kaede-livekit-web",
+    "crates/kaede-client-wasm",
 ]
 
 [workspace.package]
@@ -31,8 +23,6 @@ kaede-crypto   = { path = "crates/kaede-crypto", version = "0.0.3" }
 kaede-mls      = { path = "crates/kaede-mls", version = "0.0.3" }
 kaede-storage  = { path = "crates/kaede-storage", version = "0.0.3" }
 kaede-client   = { path = "crates/kaede-client", version = "0.0.3" }
-kaede-ui       = { path = "crates/kaede-ui", version = "0.0.3" }
-kaede-livekit-web = { path = "crates/kaede-livekit-web", version = "0.0.3" }
 
 # serialization
 serde    = { version = "1", features = ["derive"] }
@@ -66,11 +56,6 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow             = "1"
 thiserror          = "2"
-
-# dioxus
-dioxus         = "0.7"
-dioxus-web     = "0.7"
-dioxus-desktop = "0.7"
 
 # wasm
 wasm-bindgen             = "0.2"

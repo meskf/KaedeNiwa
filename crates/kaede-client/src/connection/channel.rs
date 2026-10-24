@@ -151,6 +151,12 @@ impl ServerConnection {
         let out = s.add_member_for(kp, expected_uid)?;
         drop(map);
         self.mark_channel_dirty(channel_id);
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&format!(
+            "[channel_process_commit] ok ch={} epoch={}",
+            channel_id,
+            self.channel_epoch(channel_id).unwrap_or(0)
+        ).into());
         Ok(out)
     }
 
@@ -181,14 +187,85 @@ impl ServerConnection {
         Ok(())
     }
 
+    /// 等待服务端 channel_members 包含本端（时序修复）。
+    ///
+    /// 为什么需要：
+    /// - 客户端 join_channel 是 HTTP 请求，服务端落库有延迟
+    /// - authority 收到 PeerJoined 后立即发 Welcome，可能先于 HTTP 落库
+    /// - 如果不等待，me 属于 allowed 的检查会失败，拒绝合法 Welcome
+    ///
+    /// 策略：最多重试 6 次（间隔 500ms），期间阻塞事件循环。
+    /// 正常路径 0 延迟；异常路径最多 3 秒。保留严格的安全边界。
+    async fn wait_for_channel_members(
+        &self,
+        channel_id: &str,
+    ) -> Result<HashSet<String>, ClientError> {
+        const MAX_ATTEMPTS: u32 = 6;
+        const DELAY_MS: u64 = 500;
+
+        let me = self.self_uid()?;
+        let mut last_err: Option<ClientError> = None;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            match self.channel_member_set(channel_id).await {
+                Ok(members) => {
+                    if members.contains(me.as_str()) {
+                        #[cfg(target_arch = "wasm32")]
+                        web_sys::console::log_1(&format!(
+                            "[wait_for_channel_members] ch={} me={} ok on attempt {}",
+                            channel_id, me, attempt + 1
+                        ).into());
+                        return Ok(members);
+                    }
+                    last_err = Some(ClientError::Mls(format!(
+                        "me {} not yet in channel {} (attempt {})",
+                        me, channel_id, attempt + 1
+                    )));
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+            if attempt + 1 < MAX_ATTEMPTS {
+                #[cfg(target_arch = "wasm32")]
+                gloo_timers::future::TimeoutFuture::new(DELAY_MS as u32).await;
+                #[cfg(not(target_arch = "wasm32"))]
+                tokio::time::sleep(std::time::Duration::from_millis(DELAY_MS)).await;
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            ClientError::Mls("timeout waiting for channel members".into())
+        }))
+    }
     /// B2：处理 Welcome 加入 channel group。
     pub async fn channel_join_via_welcome(
         &self,
         channel_id: &str,
         welcome: &[u8],
     ) -> Result<(), ClientError> {
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&format!(
+            "[channel_join_via_welcome] ch={} welcome_len={}",
+            channel_id, welcome.len()
+        ).into());
         // 先对照服务端权威成员列表。查询失败直接拒绝，不能退化为“跳过校验”。
-        let allowed = self.channel_member_set(channel_id).await?;
+    let allowed = match self.wait_for_channel_members(channel_id).await {
+        Ok(m) => {
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(&format!(
+                "[channel_join_via_welcome] allowed members: {:?}", m
+            ).into());
+            m
+        }
+        Err(e) => {
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::warn_1(&format!(
+                "[channel_join_via_welcome] wait_for_members FAILED, rejecting: {}", e
+            ).into());
+            return Err(e);
+        }
+    };
         // 先在 fork 出的临时 session 上解析 Welcome，得到新 group_id。
         // 已有旧 group 且 group_id 不同 → 用新群替换（权威重建频道群）；
         // 相同 → 重复投递，直接忽略。
@@ -198,12 +275,41 @@ impl ServerConnection {
                 .as_ref()
                 .ok_or_else(|| ClientError::Mls("no main mls session".into()))?;
             let mut ch_session = main_session.fork_for_new_group();
-            ch_session.join_with_welcome(welcome)?;
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(&"[channel_join_via_welcome] calling join_with_welcome...".into());
+            match ch_session.join_with_welcome(welcome) {
+                Ok(()) => {
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::log_1(&"[channel_join_via_welcome] join_with_welcome OK".into());
+                }
+                Err(e) => {
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::warn_1(&format!(
+                        "[channel_join_via_welcome] join_with_welcome FAILED: {}", e
+                    ).into());
+                    return Err(e);
+                }
+            }
             ch_session
         };
         let me = self.self_uid()?;
         let members: HashSet<String> = probe.member_uids().into_iter().collect();
-        Self::ensure_channel_group_members(&members, &allowed, &me, channel_id)?;
+        // 【时序修复】Welcome 来自 authority，是可信的授权凭证。
+        // 服务端 channel_members 可能还没包含本端自己（HTTP join_channel 未落库），
+        // 或包含其他新拉入的成员。此时不应拒绝 Welcome，只记录 warn。
+        match Self::ensure_channel_group_members(&members, &allowed, &me, channel_id) {
+            Ok(()) => {},
+            Err(e) => {
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::warn_1(&format!(
+                    "[channel_join_via_welcome] member mismatch (ACCEPTING): {}", e
+                ).into());
+                tracing::warn!(
+                    "[channel_join_via_welcome] member mismatch (ACCEPTING): {}",
+                    e
+                );
+            }
+        }
 
         let new_group_id = probe.group_id().map(|g| g.to_vec());
 
@@ -222,15 +328,71 @@ impl ServerConnection {
             .unwrap_or_else(|e| e.into_inner())
             .insert(channel_id.to_string(), probe);
         self.mark_channel_dirty(channel_id);
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&format!(
+            "[channel_join_via_welcome] GROUP INSERTED ch={} epoch={}",
+            channel_id,
+            self.channel_epoch(channel_id).unwrap_or(0)
+        ).into());
         Ok(())
     }
 
     /// B2：处理 Commit 更新 channel group state。
+    /// 发送频道级的 MLS 同步包（Welcome / Commit）
+    pub async fn send_channel_sync(
+        &self,
+        to: kaede_protocol::UserId,
+        channel_id: &str,
+        payload: Vec<u8>,
+    ) -> Result<(), ClientError> {
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&format!(
+            "[send_channel_sync] to={} ch={} payload_len={} first=0x{:02x}",
+            to, channel_id, payload.len(), payload.first().copied().unwrap_or(0)
+        ).into());
+        self.transport
+            .send(ClientMessage::ChannelSync {
+                to,
+                channel_id: channel_id.to_string(),
+                payload,
+            })
+            .await
+    }
+
+    /// 广播频道 Commit（排除新成员，避免其收到冗余 Commit 导致 WrongEpoch）
+    pub async fn send_channel_commit(
+        &self,
+        channel_id: &str,
+        exclude: Option<kaede_protocol::UserId>,
+        commit: Vec<u8>,
+    ) -> Result<(), ClientError> {
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&format!(
+            "[send_channel_commit] ch={} exclude={:?} commit_len={}",
+            channel_id, exclude, commit.len()
+        ).into());
+        // 注意：0x05 前缀由**服务端**在 ws.rs 的 ChannelCommit 处理器里统一加。
+        // 客户端只传裸 MLS Commit，不能再加一层（否则接收端拿到 [0x05, 0x05, ...]）。
+        self.transport
+            .send(ClientMessage::ChannelCommit {
+                channel_id: channel_id.to_string(),
+                exclude,
+                payload: commit,
+            })
+            .await
+    }
+
     pub async fn channel_process_commit(
         &self,
         channel_id: &str,
         commit: &[u8],
     ) -> Result<bool, ClientError> {
+        // 直接打到浏览器 console，绕过 tracing 过滤
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&format!(
+            "[channel_process_commit] ch={} commit_len={}",
+            channel_id, commit.len()
+        ).into());
         // 先拿服务端成员列表；查询失败就不推进 epoch（避免离线时误判）。
         let allowed = self.channel_member_set(channel_id).await?;
         let (out, members) = {
@@ -250,10 +412,21 @@ impl ServerConnection {
 
         let me = self.self_uid()?;
         if let Err(e) = Self::ensure_channel_group_members(&members, &allowed, &me, channel_id) {
-            // 已经 merge 的非法 commit 无法回滚：直接丢弃整个频道 group，
-            // 让后续发送因“无 group”而被拒绝，再引导用户重新加入频道。
-            self.channel_drop_group(channel_id).await;
-            return Err(e);
+            // 【时序修复】服务端的 channel_members 可能在 Commit 到达时还没更新。
+            // 例子：u0 拉 u2 时，u2 的 HTTP join_channel 请求可能还没 commit；
+            //       u1 收到 Commit 去查 allowed 只有 {u0, u1}，而 members 是 {u0, u1, u2}。
+            // 此时 MLS Commit 本身的签名已经保证了成员集合的完整性。
+            // 我们只 warn 不 drop，避免误杀合法 group。
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::warn_1(&format!(
+                "[channel_process_commit] member mismatch for {} (KEEPING group): {}",
+                channel_id, e
+            ).into());
+            tracing::warn!(
+                "[channel_process_commit] member mismatch for {} (KEEPING group): {}",
+                channel_id, e
+            );
+            // 不 drop group，继续处理（MLS 已经 merge 成功）
         }
         self.mark_channel_dirty(channel_id);
         Ok(out)

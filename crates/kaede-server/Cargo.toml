@@ -33,7 +33,7 @@ sha2               = { workspace = true }
 subtle             = { workspace = true }
 rand               = "0.8"
 futures-util       = "0.3"
-tower-http         = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 ipnet              = "2"
 # LiveKit RoomService 管理 API（踢人/回收媒体会话）。必须 rustls-tls：
 # 生产 LiveKit 走 wss/https，且服务端不使用 OpenSSL（与 Android 交叉编译约定一致）。
@@ -45,3 +45,7 @@ tokio             = { workspace = true }
 futures-util      = "0.3"
 # reqwest 由 [dependencies] 提供（含 json + rustls-tls），测试直接复用。
 serde_json        = "1"
+
+[features]
+default = []
+dev-mode = []

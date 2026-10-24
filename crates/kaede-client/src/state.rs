@@ -4,7 +4,8 @@
 //! 任何非法跳转都返回 [`TransitionError`]。
 
 /// 客户端生命周期状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+
 pub enum ClientState {
     /// 初始态。未连接，未认证。
     Idle,
@@ -57,14 +58,16 @@ impl ClientState {
 }
 
 /// 状态转移错误。
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, serde::Serialize, serde::Deserialize)]
+
 pub enum TransitionError {
     #[error("invalid state transition: {from:?} -> {to:?}")]
     Invalid { from: ClientState, to: ClientState },
 }
 
 /// 客户端状态容器。可被 UI 订阅。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+
 pub struct ClientStateMachine {
     state: ClientState,
 }

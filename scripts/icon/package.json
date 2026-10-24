@@ -1,0 +1,10 @@
+{
+  "name": "kaede-icon-tools",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "sharp": "^0.34.0",
+    "png-to-ico": "^2.1.8"
+  }
+}

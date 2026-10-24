@@ -19,14 +19,29 @@ if (!fs.existsSync(ASSETS)) {
 }
 
 const FILES = [
-  'manifest.json',
-  'sw.js',
-  'icon.svg',
-  'favicon.svg',
-  'icon-512.png',
-  'boot.js',
-  'livekit-client.umd.min.js',
-  'livekit-client.e2ee.worker.js',
+  "manifest.json",
+  "sw.js",
+  "boot.js",
+  "livekit-client.umd.min.js",
+  "livekit-client.e2ee.worker.js",
+  "icon.svg",
+  "favicon.svg",
+  "favicon.ico",
+  "icon-16.png",
+  "icon-32.png",
+  "icon-48.png",
+  "icon-64.png",
+  "icon-96.png",
+  "icon-128.png",
+  "icon-144.png",
+  "icon-152.png",
+  "icon-167.png",
+  "icon-180.png",
+  "icon-192.png",
+  "icon-256.png",
+  "icon-384.png",
+  "icon-512.png",
+  "icon-512-maskable.png",
 ];
 for (const f of FILES) {
   const src = path.join(ASSETS, f);
@@ -51,7 +66,7 @@ if (fs.existsSync(indexHtml)) {
       'SW register',
       boot.includes('serviceWorker') && boot.includes('.register('),
     ],
-    ['icon link', html.includes('icon.svg')],
+    ['icon link', html.includes('icon-32.png')],
     ['viewport-fit', html.includes('viewport-fit=cover')],
   ];
   console.log('\n  index.html 引用检查:');

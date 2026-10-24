@@ -24,6 +24,7 @@ base64        = "0.22"
 async-channel = "2"
 futures-lite  = "2"
 futures-util  = "0.3"
+hkdf           = { workspace = true }
 sha2          = { workspace = true }
 zeroize       = { workspace = true }
 

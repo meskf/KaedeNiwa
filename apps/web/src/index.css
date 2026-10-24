@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@theme {
+  --color-discord-bg: #313338;
+  --color-discord-sidebar: #2b2d31;
+  --color-discord-serverRail: #1e1f22;
+  --color-discord-channel: #b5bac1;
+}
+
+@layer base {
+  html, body, #root {
+    @apply h-full w-full m-0 p-0 overflow-hidden bg-discord-bg text-gray-200 font-sans antialiased;
+  }
+}

@@ -5,7 +5,17 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings"] }
 serde     = { workspace = true }
 serde_bytes = { workspace = true }
 ciborium  = { workspace = true }
 thiserror = { workspace = true }
+
+[features]
+default = []
+ts-export = []
+
+[dev-dependencies]
+quickcheck = "1"
+quickcheck_macros = "1"
+

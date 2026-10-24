@@ -170,9 +170,10 @@ impl ServerConnection {
     }
 
     /// 广播一条已经加密好的 MLS 应用消息。
-    pub async fn mls_send_ciphertext(&self, ciphertext: Vec<u8>) -> Result<(), ClientError> {
+    pub async fn mls_send_ciphertext(&self, channel_id: String, ciphertext: Vec<u8>) -> Result<(), ClientError> {
         self.transport
             .send(ClientMessage::MlsAppMessage {
+                channel_id,
                 payload: ciphertext,
             })
             .await

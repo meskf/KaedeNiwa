@@ -661,8 +661,20 @@ impl AppState {
             room.peers.get(target).map(|p| p.tx.clone())
         };
         if let Some(tx) = tx {
-            tx.try_send(msg).is_ok()
+            match tx.try_send(msg) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        "[send_to] failed for {}: {} (tx_capacity={})",
+                        target,
+                        e,
+                        tx.capacity()
+                    );
+                    false
+                }
+            }
         } else {
+            tracing::warn!("[send_to] peer {} not found (offline?)", target);
             false
         }
     }

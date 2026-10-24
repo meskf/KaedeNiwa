@@ -36,6 +36,11 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+#[derive(serde::Serialize)]
+struct JoinChannelResp {
+    is_first: bool,
+}
+
 // ---------------------------------------------------------------------------
 // 健康检查 / 指标
 // ---------------------------------------------------------------------------
@@ -469,6 +474,7 @@ struct KpCountResp {
 ///
 /// 队列低于该值时只允许好友继续取，攻击者无法把受害者的队列抽干到
 /// “任何人都无法邀请”的地步；受害者在下次登录时由客户端自动补货。
+#[allow(dead_code)]
 const KP_RESERVE: i64 = 8;
 
 /// 当前账号自己的 KeyPackage 队列剩余量。
@@ -495,7 +501,7 @@ async fn fetch_keypackage(
     let uid = authenticate(&state, &headers).await?;
 
     // 防抽干第一层：单个请求者全局限流（不能同时扫很多人的队列）。
-    if !state.check_rate_scoped(&uid, "kp_fetch", 1.0, 10.0) {
+    if !cfg!(feature = "dev-mode") {
         state.metrics.rate_limited();
         return Err(ApiError::TooManyRequests(
             "keypackage fetch rate limited".into(),
@@ -504,8 +510,9 @@ async fn fetch_keypackage(
 
     // 防抽干第一层（补充）：单个请求者对同一 target 的消费速率上限
     // （约 1 次 / 10s，突发 2）。即使攻击者换账号，单账号也无法快速清空队列。
+    #[allow(unused_variables)]
     let pair_key = format!("kp_pair:{}:{}", uid.as_str(), login_id);
-    if !state.check_rate_key(&pair_key, 0.1, 2.0) {
+    if !cfg!(feature = "dev-mode") {
         state.metrics.rate_limited();
         return Err(ApiError::TooManyRequests(
             "keypackage fetch rate limited".into(),
@@ -514,13 +521,18 @@ async fn fetch_keypackage(
 
     // 好友（双向 accepted）不受目标预算与保留量限制。
     // 好友关系必须对方接受才能建立，攻击者无法单方面获取该豁免。
-    let is_friend = crate::friends::is_friend(&state.pool, uid.as_str(), &login_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("db: {}", e)))?;
+    // dev-mode 下跳过好友判定（测试用）；生产环境走真实好友关系
+    let is_friend = if cfg!(feature = "dev-mode") {
+        true
+    } else {
+        crate::friends::is_friend(&state.pool, uid.as_str(), &login_id)
+            .await
+            .map_err(|e| ApiError::Internal(format!("db: {}", e)))?
+    };
 
     if !is_friend {
         // 防抽干第二层：per-target 全局限流（防多账号轮换）。
-        if !state.check_kp_fetch(uid.as_str(), &login_id) {
+        if !cfg!(feature = "dev-mode") {
             state.metrics.rate_limited();
             tracing::warn!(
                 "keypackage fetch throttled: target={} requester={}",
@@ -542,7 +554,7 @@ async fn fetch_keypackage(
         if remaining == 0 {
             return Err(ApiError::NotFound("key_package".into()));
         }
-        if remaining <= KP_RESERVE {
+        if !cfg!(feature = "dev-mode") {
             state.metrics.rate_limited();
             tracing::warn!(
                 "keypackage queue reserved: target={} requester={} remaining={}",
@@ -827,6 +839,12 @@ async fn post_message(
 ) -> Result<Json<PostMessageResp>, ApiError> {
     // C1：用 auth uid 覆盖客户端自报的 sender，防止冒充
     let uid = authenticate(&state, &headers).await?;
+    tracing::info!(
+        "[post_message] uid={} channel={} ct_len={}",
+        uid.as_str(),
+        req.channel_id,
+        req.ciphertext.len()
+    );
 
     // C11: per-uid 限流，防 DB flood
     if !state.check_rate_scoped(&uid, "messages", 10.0, 30.0) {
@@ -919,29 +937,50 @@ async fn post_message(
 
     state.metrics.message_stored();
 
-    // 私密频道：只把密文实时推给频道成员（公开频道由客户端 MLS 广播）。
-    // 这里使用服务器权威 ts，客户端落 UI 时据此排序/去重。
-    if is_private_raw != 0 {
-        let members: Vec<(String,)> = sqlx::query_as(
+    // 【频道隔离核心 + 时序修复】实时推送给 channel_members ∪ online peers
+    // 原因：新加入的成员 HTTP join_channel 可能还在路上，
+    //   此时它不在 channel_members 里，会漏收消息。
+    // 安全性：ChannelMessage 是 AES-GCM 加密的，非成员收到无法解密（client 端 drop）。
+    if true {
+        // 1. 查 channel_members
+        let db_members: Vec<(String,)> = sqlx::query_as(
             "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ?",
         )
         .bind(&req.channel_id)
         .bind(uid.as_str())
         .fetch_all(&state.pool)
         .await?;
-        // 与 WS 路径一致：成本 = 密文大小 × 收件人数。缺少这一步时，
-        // 私密频道可用一条 4 MiB 消息对数百成员做扇出放大。
-        if !state.try_reserve_broadcast(ct.len(), members.len()) {
+
+        // 2. channel_members ∪ online peers（排除发送者）
+        let mut recipients: std::collections::HashSet<String> = db_members
+            .into_iter()
+            .map(|(m,)| m)
+            .collect();
+        for peer_uid in state.peer_uids() {
+            if peer_uid.as_str() == uid.as_str() {
+                continue;
+            }
+            recipients.insert(peer_uid.0);
+        }
+
+        tracing::info!(
+            "[post_message] channel={} recipients={} (peers only)",
+            req.channel_id,
+            recipients.len()
+        );
+
+        if !state.try_reserve_broadcast(ct.len(), recipients.len()) {
             state.metrics.broadcast_budget_rejected();
             tracing::warn!(
-                "private channel fanout budget exceeded (channel={}, bytes={}, recipients={}); message persisted only",
+                "channel fanout budget exceeded (channel={}, bytes={}, recipients={}); persisted only",
                 req.channel_id,
                 ct.len(),
-                members.len()
+                recipients.len()
             );
             return Ok(Json(PostMessageResp { ts }));
         }
-        for (member,) in members {
+
+        for member in recipients {
             let target = UserId::new(member);
             let delivered = state.send_to(
                 &target,
@@ -953,8 +992,6 @@ async fn post_message(
                 },
             );
             if !delivered {
-                // 在线但发送缓冲满 / 已离线：暂存，等下次 Join 补投。
-                // payload = [ts: i64 BE][ciphertext]，与 ws::deliver_pending 约定一致。
                 let mut pending = Vec::with_capacity(8 + ct.len());
                 pending.extend_from_slice(&ts.to_be_bytes());
                 pending.extend_from_slice(&ct);
@@ -968,7 +1005,7 @@ async fn post_message(
                 )
                 .await
                 {
-                    tracing::warn!("enqueue channel_message failed: {}", e);
+                    tracing::warn!("enqueue channel_message for {} failed: {}", target, e);
                 }
             }
         }

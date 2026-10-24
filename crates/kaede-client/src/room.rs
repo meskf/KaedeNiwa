@@ -656,6 +656,33 @@ impl RoomSession {
     /// **P1-4**：fetch KP / send welcome / send commit 都带指数退避重试；幂等（已在群里则 no-op）。
     /// **P1-5**：碰撞错误信息改为可操作的用户指引（不再建议用户"改 login_id"）。
     /// **P1-15**：本地 epoch 已前进但广播失败 → 返回 Err。
+    /// 将 peer 加入指定频道的独立 MLS 群组（Discord 频道隔离核心）。
+    pub async fn channel_add_peer(&self, channel_id: &str, peer: &UserId) -> Result<(), ClientError> {
+        let _op_guard = self.mls_op_lock.lock().await;
+        // 检查成员是否已经在当前频道群组里
+        let current_members = self.conn.mls_member_uids();
+        if current_members.iter().any(|u| u == peer.as_str()) {
+            tracing::info!("[channel_add_peer] {} already in group, skipping", peer);
+            return Ok(());
+        }
+
+        // 2. 拉 KeyPackage
+        let kp = self.fetch_kp_with_retry(peer).await?;
+
+        // 3. 本地加成员
+        let (commit, welcome) = self.conn.channel_add_member(channel_id, &kp, peer.as_str())?;
+        // 4. 发 Welcome 给新成员（0x04）
+        let mut welcome_payload = Vec::with_capacity(1 + welcome.len());
+        welcome_payload.push(0x04u8);
+        welcome_payload.extend_from_slice(&welcome);
+        self.conn.send_channel_sync(peer.clone(), channel_id, welcome_payload).await?;
+
+        // 5. 广播 Commit 给其他老成员（排除新成员，避免其 WrongEpoch）
+        self.conn.send_channel_commit(channel_id, Some(peer.clone()), commit).await?;
+
+        Ok(())
+    }
+
     pub async fn host_add_peer(&self, peer: &UserId) -> Result<(), ClientError> {
         // 所有 epoch 变更串行化：否则并发 Add 的 Commit 会带错 epoch 标签。
         let _op_guard = self.mls_op_lock.lock().await;
@@ -911,11 +938,12 @@ impl RoomSession {
     /// 同一 key + generation 会再次加密，造成 AES-GCM nonce 复用。
     async fn encrypt_persist_and_broadcast(
         &self,
+        channel_id: &str,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, ClientError> {
         let ciphertext = self.conn.mls_encrypt_app(plaintext)?;
         self.save_snapshot().await?;
-        self.conn.mls_send_ciphertext(ciphertext.clone()).await?;
+        self.conn.mls_send_ciphertext(channel_id.to_string(), ciphertext.clone()).await?;
         Ok(ciphertext)
     }
 
@@ -1397,6 +1425,12 @@ impl RoomSession {
     /// 两种场景：
     /// - **已有本地 group**（之前加入过）：只验证密码，不重新走 Welcome
     /// - **没有本地 group**（首次加入）：验证密码 + KP + Welcome 交换
+    /// 仅把当前用户注册为频道成员（HTTP DB 层），不触发 MLS Welcome 交换。
+    /// 用于公开频道的“自动入表”，后续由权威成员主动拉人。
+    pub async fn join_channel_only(&self, channel_id: &str) -> Result<(), ClientError> {
+        self.http.join_channel(channel_id, "", None).await
+    }
+
     pub async fn join_channel(&self, channel_id: &str, password: &str) -> Result<(), ClientError> {
         // 该 API 只用于私密频道；标记后即使 Welcome 失败也不会回退主群加密。
         self.note_channel_privacy(channel_id, true);
@@ -1855,7 +1889,7 @@ impl RoomSession {
             out.extend_from_slice(&sealed);
             out
         } else {
-            self.encrypt_persist_and_broadcast(&bytes).await?
+            self.encrypt_persist_and_broadcast(channel_id, &bytes).await?
         };
 
         match self
@@ -1930,8 +1964,15 @@ impl RoomSession {
             .to_bytes()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
 
+        // [DEBUG] 打印走哪条路径
+        let has_group = self.conn.channel_has_group(channel_id);
+        tracing::info!(
+            "[send_text] channel={} has_group={}",
+            channel_id, has_group
+        );
+
         // 私密频道：走 channel group 的 AES-GCM key（首字节 0x03 标记）
-        let ciphertext = if self.conn.channel_has_group(channel_id) {
+        let ciphertext = if has_group {
             let key = self.conn.channel_export_key(channel_id)?;
             let sealed =
                 kaede_crypto::dm_cipher::seal(&key, channel_id, self.uid.as_str(), "", &bytes)
@@ -1941,7 +1982,7 @@ impl RoomSession {
             out.extend_from_slice(&sealed);
             out
         } else {
-            self.encrypt_persist_and_broadcast(&bytes).await?
+            self.encrypt_persist_and_broadcast(channel_id, &bytes).await?
         };
         match self
             .http
@@ -2001,7 +2042,7 @@ impl RoomSession {
         }
 
         // 主群 reaction 同样推进 ratchet：先落盘再广播。
-        let _ = self.encrypt_persist_and_broadcast(&bytes).await?;
+        let _ = self.encrypt_persist_and_broadcast(channel_id, &bytes).await?;
         // reaction 不入历史（只广播）
         Ok(())
     }
@@ -2127,7 +2168,7 @@ impl RoomSession {
 
         // 公开频道：与消息同路径——MLS encrypt（推进 ratchet）→ 落盘 → 广播，
         // 再 POST /api/messages 入历史；本地副本用服务器权威 ts 落盘。
-        let ciphertext = self.encrypt_persist_and_broadcast(bytes).await?;
+        let ciphertext = self.encrypt_persist_and_broadcast(channel_id, bytes).await?;
         match self
             .http
             .post_message(channel_id, now_ms(), self.uid.as_str(), &ciphertext)
@@ -2492,72 +2533,26 @@ impl RoomSession {
             )));
         }
 
-        // C14 已开启（v0.0.1-alpha.2）：DM / 私密频道 / 主群三条路径
-        // 各自从本地 group state 派生 LiveKit E2EE key。三方均注入
-        // room-level seed，保证同一媒体会话内所有参与者拿到同一个 key。
+        // 2. 房间级 E2EE key：HKDF(seed, "kaede-livekit-e2ee-v1", channel_id)
         //
-        // 优先级：DM → 私密频道 → 主群。三者 channel_id 语义独立：
-        // - DM：conv_id 形如 "dm:a:b"
-        // - 私密频道：channel_id 与公开频道共享 namespace，由 channel_has_group 区分
-        // - 主群：以上两者都不命中时的默认路径
-        //
-        // 降级路径（保留 C14 语义）：group 缺失时返回 None —— 这是**显式**降级，
-        // 调用方 UI 会根据 None 提示"E2EE 未启用"，不是静默失败。
+        // 为什么不用 MLS exporter：
+        //   MLS exporter 输出依赖本地 group epoch 状态。
+        //   多人场景下，每人加入时 epoch 可能不同（A 单独时 epoch=1，
+        //   B 加入后 epoch=2），导致派生的 key 不一致，无法互通。
+        //   Seed 由服务端按房间统一签发（TLS 内传输，同房间共享），
+        //   直接 HKDF 即可得到所有人一致且不可预测的 AES-256 key。
+        use hkdf::Hkdf;
+        use sha2::Sha256;
+        let hk = Hkdf::<Sha256>::new(Some(b"kaede-livekit-e2ee-v1"), &seed);
+        let mut key = [0u8; 32];
+        hk.expand(channel_id.as_bytes(), &mut key)
+            .map_err(|e| ClientError::Protocol(format!("hkdf expand: {}", e)))?;
 
-        if self.conn.dm_has_group(channel_id) {
-            match self.conn.dm_export_media_key(channel_id, &seed) {
-                Ok(k) => {
-                    tracing::info!(
-                        "[begin_media_session] DM {} -> E2EE enabled (dm group)",
-                        channel_id
-                    );
-                    return Ok((token, Some(zeroize::Zeroizing::new(k))));
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "[begin_media_session] DM {} group present but export failed: {}; refusing plaintext media",
-                        channel_id,
-                        e
-                    );
-                    return Err(ClientError::Protocol(format!(
-                        "媒体 E2EE 密钥派生失败（DM {}）：{e}",
-                        channel_id
-                    )));
-                }
-            }
-        }
-
-        if self.conn.channel_has_group(channel_id) {
-            match self.conn.channel_export_media_key(channel_id, &seed) {
-                Ok(k) => {
-                    tracing::info!(
-                        "[begin_media_session] private channel {} -> E2EE enabled (channel group)",
-                        channel_id
-                    );
-                    return Ok((token, Some(zeroize::Zeroizing::new(k))));
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "[begin_media_session] channel {} group present but export failed: {}; refusing plaintext media",
-                        channel_id,
-                        e
-                    );
-                    return Err(ClientError::Protocol(format!(
-                        "媒体 E2EE 密钥派生失败（频道 {}）：{e}",
-                        channel_id
-                    )));
-                }
-            }
-        }
-
-        // 主群路径（默认）
-        let key = self.conn.mls_export_sframe_key_for_with_extra(
-            channel_id,
-            kaede_mls::SframePurpose::LivekitE2ee,
-            &seed,
-        )?;
-
-        Ok((token, Some(zeroize::Zeroizing::new(key))))
+        tracing::info!(
+            "[begin_media_session] channel {} -> room-level E2EE key derived",
+            channel_id
+        );
+        return Ok((token, Some(zeroize::Zeroizing::new(key))));
     }
 
     /// 告诉服务器本用户已离开媒体房间。
@@ -2621,7 +2616,7 @@ impl RoomSession {
         let bytes = payload
             .to_bytes()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
-        let _ = self.encrypt_persist_and_broadcast(&bytes).await?;
+        let _ = self.encrypt_persist_and_broadcast(channel_id, &bytes).await?;
         Ok(())
     }
 
@@ -2639,7 +2634,7 @@ impl RoomSession {
         let bytes = payload
             .to_bytes()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
-        let _ = self.encrypt_persist_and_broadcast(&bytes).await?;
+        let _ = self.encrypt_persist_and_broadcast(channel_id, &bytes).await?;
         Ok(())
     }
 }

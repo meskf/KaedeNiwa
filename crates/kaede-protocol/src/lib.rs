@@ -28,6 +28,7 @@
 //! 对服务器是不透明字节流。`from` 字段由服务器注入，客户端不能伪造。
 
 #![forbid(unsafe_code)]
+use ts_rs::TS;
 
 pub mod video;
 pub use video::{
@@ -112,7 +113,7 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 // ============================================================================
 
 /// 用户 ID。登录名（GitHub 风格：小写字母、数字、连字符）。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(transparent)]
 pub struct UserId(pub String);
 
@@ -160,7 +161,7 @@ impl AsRef<str> for UserId {
 // ============================================================================
 
 /// 客户端发给服务器的消息。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ClientMessage {
     // ---- 握手 ----
@@ -192,6 +193,7 @@ pub enum ClientMessage {
         to: UserId,
         channel_id: String,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         payload: Vec<u8>,
     },
 
@@ -202,6 +204,7 @@ pub enum ClientMessage {
     ChannelReaction {
         channel_id: String,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         ciphertext: Vec<u8>,
     },
 
@@ -217,6 +220,7 @@ pub enum ClientMessage {
         #[serde(default)]
         exclude: Option<UserId>,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         payload: Vec<u8>,
     },
 
@@ -239,6 +243,7 @@ pub enum ClientMessage {
     MlsWelcome {
         to: UserId,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         payload: Vec<u8>,
     },
 
@@ -248,6 +253,7 @@ pub enum ClientMessage {
         #[serde(default)]
         epoch: u64,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         payload: Vec<u8>,
     },
 
@@ -261,12 +267,15 @@ pub enum ClientMessage {
     /// 广播 Proposal。
     MlsProposal {
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         payload: Vec<u8>,
     },
 
     /// 广播 Application Message（聊天 / 数据）。
     MlsAppMessage {
+        channel_id: String,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         payload: Vec<u8>,
     },
 
@@ -299,7 +308,7 @@ pub enum ClientMessage {
 // ============================================================================
 
 /// 频道。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Channel {
     pub id: String,
     pub name: String,
@@ -317,7 +326,7 @@ pub struct Channel {
 }
 
 /// 在线状态。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Presence {
     pub login_id: String,
     /// `"online"` | `"idle"` | `"dnd"` | `"offline"`。
@@ -325,7 +334,7 @@ pub struct Presence {
 }
 
 /// 引用消息的引用信息。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ReplyRef {
     /// 被引用消息的 ts（用 ts 当 id）。
     pub ts: i64,
@@ -335,7 +344,7 @@ pub struct ReplyRef {
 }
 
 /// 表情回复。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Reaction {
     pub emoji: String,
     pub users: Vec<String>,
@@ -346,7 +355,7 @@ pub struct Reaction {
 /// 附件 blob 由客户端加密后上传（`0x04` 包装），服务端只存密文。
 /// 消息里的这个结构位于 E2EE payload 内，因此 `sha256` 字段本身不可被服务端篡改；
 /// 接收方下载后必须校验密文哈希，防止服务端替换/降级附件内容。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Attachment {
     /// 服务器分配的 id。
     pub id: String,
@@ -372,7 +381,7 @@ pub struct Attachment {
 }
 
 /// 成员。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Member {
     pub login_id: String,
     pub nickname: String,
@@ -389,7 +398,7 @@ pub struct Member {
 // ============================================================================
 
 /// 服务器发给客户端的消息。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ServerMessage {
     // ---- 握手 ----
@@ -435,6 +444,7 @@ pub enum ServerMessage {
         channel_id: String,
         /// 首字节 0x04 = Welcome, 0x05 = Commit
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         payload: Vec<u8>,
     },
 
@@ -465,6 +475,7 @@ pub enum ServerMessage {
         ts: i64,
         /// 与历史中完全相同的 `0x03` 封装密文。
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         ciphertext: Vec<u8>,
     },
 
@@ -476,6 +487,7 @@ pub enum ServerMessage {
         channel_id: String,
         from: UserId,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         ciphertext: Vec<u8>,
     },
 
@@ -525,6 +537,7 @@ pub enum ServerMessage {
     KeyPackageFor {
         target: UserId,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         package: Vec<u8>,
     },
 
@@ -532,6 +545,7 @@ pub enum ServerMessage {
     MlsWelcome {
         from: UserId,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         payload: Vec<u8>,
     },
 
@@ -540,18 +554,22 @@ pub enum ServerMessage {
         #[serde(default)]
         epoch: u64,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         payload: Vec<u8>,
     },
 
     MlsProposal {
         from: UserId,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         payload: Vec<u8>,
     },
 
     MlsAppMessage {
         from: UserId,
+        channel_id: String,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         payload: Vec<u8>,
     },
 
@@ -567,6 +585,7 @@ pub enum ServerMessage {
         from: UserId,
         ts: i64,
         #[serde(with = "serde_bytes")]
+        #[ts(type = "number[]")]
         ciphertext: Vec<u8>,
     },
 
@@ -586,7 +605,7 @@ pub enum ServerMessage {
 // ============================================================================
 
 /// 结构化错误码。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// 协议版本不兼容。
@@ -771,6 +790,7 @@ mod tests {
     #[test]
     fn mls_app_message_round_trip() {
         round_trip_client(ClientMessage::MlsAppMessage {
+            channel_id: "general".into(),
             payload: vec![0xde, 0xad, 0xbe, 0xef],
         });
     }
@@ -854,6 +874,7 @@ mod tests {
     #[test]
     fn oversize_rejected_on_encode() {
         let big = ClientMessage::MlsAppMessage {
+            channel_id: "general".into(),
             payload: vec![0; MAX_MESSAGE_BYTES + 1],
         };
         assert!(matches!(
@@ -911,7 +932,7 @@ mod tests {
     #[test]
     fn cbor_is_compact() {
         // 空 MlsAppMessage 应该 < 40 字节（对比 JSON 约 60+）
-        let msg = ClientMessage::MlsAppMessage { payload: vec![] };
+        let msg = ClientMessage::MlsAppMessage { channel_id: "general".into(), payload: vec![] };
         let bytes = msg.encode().unwrap();
         assert!(
             bytes.len() < 40,
@@ -919,4 +940,31 @@ mod tests {
             bytes.len()
         );
     }
+}
+// ============================================================================
+// TypeScript 导出（feature = "ts-export"）
+// ============================================================================
+
+#[cfg(feature = "ts-export")]
+pub fn export_typescript(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(dir)?;
+    UserId::export_all_to(dir)?;
+    Channel::export_all_to(dir)?;
+    Member::export_all_to(dir)?;
+    Presence::export_all_to(dir)?;
+    ReplyRef::export_all_to(dir)?;
+    Reaction::export_all_to(dir)?;
+    Attachment::export_all_to(dir)?;
+    ClientMessage::export_all_to(dir)?;
+    ServerMessage::export_all_to(dir)?;
+    ErrorCode::export_all_to(dir)?;
+    Ok(())
+}
+
+#[cfg(feature = "ts-export")]
+#[test]
+fn export_ts() {
+    let dir = std::path::Path::new("../../apps/web/src/protocol");
+    export_typescript(dir).expect("ts-rs export failed");
+    eprintln!("TS types written to {:?}", dir);
 }

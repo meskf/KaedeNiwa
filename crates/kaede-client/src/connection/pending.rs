@@ -58,6 +58,7 @@ impl ServerConnection {
     /// - pending 保留（用户仍可拒绝）
     /// - emit `MlsSyncError`
     pub fn accept_pending_welcome(&self, sender_login_id: &str) -> Result<(), ClientError> {
+        tracing::info!("[pending] 开始处理来自 {} 的 Welcome", sender_login_id);
         let pending = {
             let mut map = self
                 .pending_main_welcomes
@@ -75,6 +76,9 @@ impl ServerConnection {
         let was_ready = self.mls_is_ready();
         let (gid, welcome) = unpack_welcome_payload(&pending.payload);
         let result = self.mls_join_or_reset_welcome(welcome, gid, pending.from.as_str());
+        if let Err(ref e) = result {
+            tracing::warn!("[pending] mls_join_or_reset_welcome 失败: {}", e);
+        }
         match result {
             Ok(false) => {
                 // 重复（理论上收到时已过滤，但用户可能在 pending 存活期间

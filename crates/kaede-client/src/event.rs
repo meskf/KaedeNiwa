@@ -4,7 +4,14 @@ use kaede_protocol::UserId;
 
 /// 客户端事件流。
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize)]
 pub enum ClientEvent {
+    /// 收到群组应用消息（明文载荷，由 UI 决定如何展示）
+    AppMessageReceived {
+        from: String,
+        channel_id: String,
+        payload: Vec<u8>,
+    },
     /// 状态变化。
     StateChanged {
         server_id: String,
