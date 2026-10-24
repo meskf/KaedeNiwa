@@ -1,7 +1,7 @@
 KaedeNiwa STATUS
 ================
 
-Last updated: 2026-10-24 (after P0-1 + P0-2 completion)
+Last updated: 2026-10-24 (P0-1 + P0-2 complete, e2e 10/10 green)
 
 Commit history (this session)
 -----------------------------
@@ -10,6 +10,9 @@ Commit history (this session)
   224ff32  P0-2 r2: per-channel commit gap buffering + drain + reconnect backfill
   4c65547  P0-2 r1: mls_commits channel_id dimension + protocol ReportEpoch/MlsCommit.channel_id
   3550cb7  fix(wasm): rebuild with correct out-dir + fix build:wasm script; test-10 green
+  8a68d79  chore: wasm rebuild wired into start-all + run-all-tests; STATUS.md
+  8a544a8  fix(run-all-tests): trailing comma after test-9 entry
+  9c9fa70  fix(run-all-tests): wasm rebuild path uses $PSScriptRoot directly
 
 Completed
 ---------
@@ -29,8 +32,17 @@ Completed
 Test status (as of this commit)
 -------------------------------
   Rust unit:  cargo test -p protocol -p client -p server --no-run  OK
-  test-8:     PASS (10 用户 epoch=9 全一致)
-  test-10:    PASS (reload 后 backfill epoch 追上)
+  e2e (10):   run-all-tests.ps1 -FreshEachMediaTest  ✅ 10/10 PASS
+    - test-1  自动拉人          PASS  11.2s
+    - test-2  频道隔离          PASS  10.4s
+    - test-3  断线重连          PASS  10.5s
+    - test-4  屏幕共享          PASS   9.0s
+    - test-5  麦克风+降噪       PASS  12.6s
+    - test-6  画质切换          PASS  13.1s
+    - test-7  多人测试          PASS  19.2s
+    - test-8  10用户规模        PASS  86.7s
+    - test-9  Authority 退出    PASS  26.9s
+    - test-10 Commit 补发       PASS  14.8s
   fuzz build: cargo +nightly fuzz build  OK
 
 !!!!! 踩过的坑（必读，避免重复） !!!!!
