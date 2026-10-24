@@ -1,0 +1,28 @@
+[package]
+name = "kaede-protocol-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kaede-protocol = { path = ".." }
+
+[[bin]]
+name = "decode_client"
+path = "fuzz_targets/decode_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_server"
+path = "fuzz_targets/decode_server.rs"
+test = false
+doc = false
+bench = false

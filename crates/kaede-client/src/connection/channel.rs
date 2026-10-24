@@ -250,7 +250,7 @@ impl ServerConnection {
             channel_id, welcome.len()
         ).into());
         // 先对照服务端权威成员列表。查询失败直接拒绝，不能退化为“跳过校验”。
-    let allowed = match self.wait_for_channel_members(channel_id).await {
+    let mut allowed = match self.wait_for_channel_members(channel_id).await {
         Ok(m) => {
             #[cfg(target_arch = "wasm32")]
             web_sys::console::log_1(&format!(
@@ -294,21 +294,48 @@ impl ServerConnection {
         };
         let me = self.self_uid()?;
         let members: HashSet<String> = probe.member_uids().into_iter().collect();
-        // 【时序修复】Welcome 来自 authority，是可信的授权凭证。
-        // 服务端 channel_members 可能还没包含本端自己（HTTP join_channel 未落库），
-        // 或包含其他新拉入的成员。此时不应拒绝 Welcome，只记录 warn。
-        match Self::ensure_channel_group_members(&members, &allowed, &me, channel_id) {
-            Ok(()) => {},
-            Err(e) => {
+        // 【P0-1 安全修复】强验证 Welcome 解出的 group 成员集合：
+        //   1. 必须包含本端（me）
+        //   2. 所有成员必须 ⊆ 服务端 channel_members
+        // 失败必须拒绝——否则攻击者可用恶意 Welcome 把本端拉入包含未授权
+        // 第三方的 group，之后本端所有消息都会加密给第三方。
+        //
+        // 时序容忍：authority 拉人时，服务端 channel_members 落库可能滞后于
+        // Welcome 抵达。短暂重试（最多 2 次，间隔 500ms），仍失败则拒绝。
+        let mut ensure_result =
+            Self::ensure_channel_group_members(&members, &allowed, &me, channel_id);
+        if ensure_result.is_err() {
+            for attempt in 0..2u32 {
                 #[cfg(target_arch = "wasm32")]
-                web_sys::console::warn_1(&format!(
-                    "[channel_join_via_welcome] member mismatch (ACCEPTING): {}", e
-                ).into());
-                tracing::warn!(
-                    "[channel_join_via_welcome] member mismatch (ACCEPTING): {}",
-                    e
-                );
+                gloo_timers::future::TimeoutFuture::new(500).await;
+                #[cfg(not(target_arch = "wasm32"))]
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Ok(new_allowed) = self.channel_member_set(channel_id).await {
+                    allowed = new_allowed;
+                }
+                ensure_result =
+                    Self::ensure_channel_group_members(&members, &allowed, &me, channel_id);
+                if ensure_result.is_ok() {
+                    tracing::info!(
+                        "[channel_join_via_welcome] member check passed after retry {}",
+                        attempt + 1
+                    );
+                    break;
+                }
             }
+        }
+        if let Err(e) = ensure_result {
+            tracing::warn!(
+                "[channel_join_via_welcome] member mismatch (REJECTING): {}",
+                e
+            );
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::warn_1(&format!(
+                "[channel_join_via_welcome] member mismatch (REJECTING): {}", e
+            ).into());
+            // 不在此处 emit / try_send：调用方（inbound.rs ChannelSync 0x04 分支）
+            // 会统一处理 Err 并通过 pending_welcome 通知 UI，避免双重错误提示。
+            return Err(e);
         }
 
         let new_group_id = probe.group_id().map(|g| g.to_vec());

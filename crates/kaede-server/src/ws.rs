@@ -731,6 +731,23 @@ async fn handle_message(
                 });
                 return Ok(());
             }
+            // Authority gate：无论 target 是否已在 channel_members，
+            // 都必须由当前 channel authority 发送 Welcome / Commit。
+            //
+            // 【P0-1 安全修复】原代码把 authority 检查放在 target_member 检查之后，
+            // 导致 target 不是 member 的分支（HTTP join 未落库时的 enqueue +
+            // direct_send 路径）绕过了 authority 检查 —— 任何频道成员都能向尚未
+            // 入群的 target 投递恶意 Welcome，进而把它拉入包含未授权第三方的 group。
+            // 现在前置到 target 检查之前，覆盖所有路径。
+            let authority = channel_authority(state, &channel_id).await?;
+            if authority.as_deref() != Some(from.as_str()) {
+                let _ = tx.try_send(ServerMessage::Error {
+                    code: ErrorCode::TargetNotFound,
+                    message: format!("sender is not the channel authority of {}", channel_id),
+                });
+                return Ok(());
+            }
+
             // 收件人必须是同频道成员，否则任意成员都能向陌生人投递任意密文。
             let target_member: Option<(i64,)> = sqlx::query_as(
                 "SELECT 1 FROM channel_members WHERE channel_id = ? AND login_id = ?",
@@ -775,16 +792,6 @@ async fn handle_message(
                     !direct_ok, // enqueue 成功则 !direct_ok == false，语义反了，用下面日志
                     direct_ok
                 );
-                return Ok(());
-            }
-            // 只有当前权威成员（最早加入且在线）能下发 Welcome / Commit，
-            // 任意成员都能发送会让所有人被拉入攻击者构造的 channel group。
-            let authority = channel_authority(state, &channel_id).await?;
-            if authority.as_deref() != Some(from.as_str()) {
-                let _ = tx.try_send(ServerMessage::Error {
-                    code: ErrorCode::TargetNotFound,
-                    message: format!("sender is not the channel authority of {}", channel_id),
-                });
                 return Ok(());
             }
             if !state.send_to(

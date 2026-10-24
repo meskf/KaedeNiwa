@@ -113,3 +113,7 @@ _local_trash/
 *.prebak
 *.postbak
 *.pretmp
+
+crates/kaede-protocol/fuzz/target/
+crates/kaede-protocol/fuzz/corpus/
+crates/kaede-protocol/fuzz/artifacts/
