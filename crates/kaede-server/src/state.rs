@@ -469,6 +469,9 @@ impl AppState {
     /// 不同端点（发言 / 拉 KP / 语音 token / 上传）的速率和容量差异很大，
     /// 共用一个桶会让聊天把 KeyPackage 拉取额度挤掉。scope 用于隔离它们。
     pub fn check_rate_scoped(&self, uid: &UserId, scope: &str, rate: f64, capacity: f64) -> bool {
+        if cfg!(feature = "dev-mode") {
+            return true;
+        }
         self.check_rate_scoped_cost(uid, scope, rate, capacity, 1.0)
     }
 
@@ -487,6 +490,9 @@ impl AppState {
 
     /// 按任意 key 限流（用于未登录请求，例如按来源 IP 限制注册）。
     pub fn check_rate_key(&self, key: &str, rate: f64, capacity: f64) -> bool {
+        if cfg!(feature = "dev-mode") {
+            return true;
+        }
         self.check_rate_key_cost(key, rate, capacity, 1.0)
     }
 

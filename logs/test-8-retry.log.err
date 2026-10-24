@@ -1,0 +1,12 @@
+warning: struct `JoinChannelResp` is never constructed
+  --> crates\kaede-server\src\http.rs:40:8
+   |
+40 | struct JoinChannelResp {
+   |        ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kaede-server` (lib) generated 1 warning
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.39s
+     Running `target\debug\kaede-server.exe`
+error: process didn't exit successfully: `target\debug\kaede-server.exe` (exit code: 0xffffffff)

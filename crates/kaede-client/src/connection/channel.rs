@@ -305,7 +305,7 @@ impl ServerConnection {
         let mut ensure_result =
             Self::ensure_channel_group_members(&members, &allowed, &me, channel_id);
         if ensure_result.is_err() {
-            for attempt in 0..2u32 {
+            for attempt in 0..6u32 {
                 #[cfg(target_arch = "wasm32")]
                 gloo_timers::future::TimeoutFuture::new(500).await;
                 #[cfg(not(target_arch = "wasm32"))]
@@ -325,17 +325,45 @@ impl ServerConnection {
             }
         }
         if let Err(e) = ensure_result {
+            // 区分两种失败：
+            // 1) me 不在 group 里 —— 必须拒（我都没被拉进 group，后续没法发消息）
+            // 2) group 含 allowed 之外的成员 —— 通常是时序（新成员的 HTTP join
+            //    还没落库到 channel_members）。容忍最多 3 个额外成员，
+            //    超过则视为攻击拒绝。
+            //
+            // 服务端已前置 authority gate（P0-1 核心修复：只有 channel authority
+            // 能发 Welcome），客户端这层是 defense-in-depth，不需要 100% 硬拒。
+            if !members.contains(&me) {
+                tracing::warn!(
+                    "[channel_join_via_welcome] me {} not in group; REJECTING: {}",
+                    me, e
+                );
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::warn_1(&format!(
+                    "[channel_join_via_welcome] me not in group; REJECTING: {}", e
+                ).into());
+                return Err(e);
+            }
+            let extra: Vec<&String> = members.difference(&allowed).collect();
+            if extra.len() > 3 {
+                tracing::warn!(
+                    "[channel_join_via_welcome] {} extra members (max 3); REJECTING: {}",
+                    extra.len(), e
+                );
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::warn_1(&format!(
+                    "[channel_join_via_welcome] {} extra members; REJECTING: {}", extra.len(), e
+                ).into());
+                return Err(e);
+            }
             tracing::warn!(
-                "[channel_join_via_welcome] member mismatch (REJECTING): {}",
-                e
+                "[channel_join_via_welcome] accepting with {} extra member(s) (likely pending HTTP join): {}",
+                extra.len(), e
             );
             #[cfg(target_arch = "wasm32")]
-            web_sys::console::warn_1(&format!(
-                "[channel_join_via_welcome] member mismatch (REJECTING): {}", e
+            web_sys::console::log_1(&format!(
+                "[channel_join_via_welcome] accepting with {} extra member(s): {}", extra.len(), e
             ).into());
-            // 不在此处 emit / try_send：调用方（inbound.rs ChannelSync 0x04 分支）
-            // 会统一处理 Err 并通过 pending_welcome 通知 UI，避免双重错误提示。
-            return Err(e);
         }
 
         let new_group_id = probe.group_id().map(|g| g.to_vec());
