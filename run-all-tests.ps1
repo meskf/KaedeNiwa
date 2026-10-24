@@ -65,7 +65,7 @@ $env:LIVEKIT_WS_URL = 'ws://127.0.0.1:7880'
 $env:RUST_LOG = 'info,kaede_server=debug'
 
     Write-Host "   重建 wasm（客户端 Rust 改动）..." -ForegroundColor Cyan
-    Push-Location (Join-Path (Split-Path $PSScriptRoot -Parent) "apps\web")
+    Push-Location (Join-Path $PSScriptRoot "apps\web")
     npm run build:wasm 2>&1 | Out-Null
     $wasmExit = $LASTEXITCODE
     Pop-Location
