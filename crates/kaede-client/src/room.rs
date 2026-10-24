@@ -624,6 +624,20 @@ impl RoomSession {
     /// 错过的 Commit，避免 epoch 永久落后。
     pub async fn join_room(&self) -> Result<(), ClientError> {
         self.conn.join().await?;
+        // P0-2 诊断：确认 reload 后 snapshot 是否恢复
+        tracing::info!(
+            "[client:{}] join_room: mls_is_ready={} mls_epoch={}",
+            self.conn.server_id(),
+            self.conn.mls_is_ready(),
+            self.conn.mls_epoch()
+        );
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&format!(
+            "[join_room] mls_is_ready={} mls_epoch={} channel_groups={}",
+            self.conn.mls_is_ready(),
+            self.conn.mls_epoch(),
+            self.conn.channel_groups_len()
+        ).into());
         if self.conn.mls_is_ready() {
             self.conn.report_epoch(self.conn.mls_epoch()).await?;
         // P0-2：对所有本地已有 group 的频道也主动请求 backfill（重连后追平频道 epoch）。

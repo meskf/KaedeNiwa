@@ -426,8 +426,26 @@ impl ServerConnection {
             .keys()
             .cloned()
             .collect();
+        tracing::info!(
+            "[client:{}] backfill_all_channel_epochs: {} channels {:?}",
+            self.server_id,
+            channels.len(),
+            channels
+        );
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&format!(
+            "[backfill_all] chs={:?}", channels
+        ).into());
         for ch in channels {
             let epoch = self.channel_epoch(&ch).unwrap_or(0);
+            tracing::info!(
+                "[client:{}] report_channel_epoch ch={} epoch={}",
+                self.server_id, ch, epoch
+            );
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(&format!(
+                "[backfill_all] report ch={} epoch={}", ch, epoch
+            ).into());
             let _ = self.report_channel_epoch(ch, epoch).await;
         }
     }
@@ -515,6 +533,14 @@ impl ServerConnection {
 
     pub fn server_id(&self) -> &str {
         &self.server_id
+    }
+
+    /// 诊断用：本地 channel_groups 数量（WASM 构建里 room.rs 引用）。
+    pub fn channel_groups_len(&self) -> usize {
+        self.channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     pub fn state(&self) -> ClientState {

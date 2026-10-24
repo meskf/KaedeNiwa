@@ -1209,6 +1209,10 @@ async fn handle_message(
 
         ClientMessage::ReportEpoch { epoch, channel_id: report_channel } => {
             let uid = ensure_joined(state, my_uid, my_session_id)?;
+            tracing::info!(
+                "[ReportEpoch] uid={} epoch={} channel={:?}",
+                uid, epoch, report_channel
+            );
             if epoch > u32::MAX as u64 {
                 return Ok(());
             }
@@ -1239,6 +1243,10 @@ async fn handle_message(
                 .await?
             };
 
+            tracing::info!(
+                "[ReportEpoch] channel={:?} epoch>{} returned {} rows",
+                report_channel, epoch, rows.len()
+            );
             let mut budget = MAX_REPORT_EPOCH_BYTES;
             for (commit_epoch, from_uid, payload) in rows {
                 if payload.len() > budget {
