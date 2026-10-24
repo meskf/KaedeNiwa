@@ -126,7 +126,7 @@ $tests = @(
     @{ name = 'test-6 画质切换';   file = 'test-6-quality.cjs';           media = $true },
     @{ name = 'test-7 多人测试';   file = 'test-7-multi-user.cjs';        media = $true },
     @{ name = 'test-8 10用户规模';  file = 'test-8-ten-users.cjs';         media = $true },
-    @{ name = 'test-9 Authority 退出'; file = 'test-9-authority-leave.cjs'; media = $true }
+    @{ name = 'test-9 Authority 退出'; file = 'test-9-authority-leave.cjs'; media = $true },
     @{ name = 'test-10 Commit 补发'; file = 'test-10-commit-replay.cjs'; media = $true }
 )
 
