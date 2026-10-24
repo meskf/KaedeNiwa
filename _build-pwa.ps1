@@ -15,4 +15,4 @@ if ($LASTEXITCODE -ne 0) { Write-Host 'postbuild 失败'; exit 1 }
 
 Write-Host ''
 Write-Host '✓ PWA build 完成，dist 位置：'
-Write-Host '  targetdxkaede-wasmdebugwebpublic'
+Write-Host '  target\dx\kaede-wasm\debug\web\public'
