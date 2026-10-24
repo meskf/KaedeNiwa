@@ -84,6 +84,9 @@ impl JsClient {
 
         let room = Arc::new(room);
         room.spawn_event_loop();
+        // P0-2：启动心跳（每 20s Ping，30s 无 Pong 断开）
+        // P0-2: room.connection() 返回 &Arc，spawn_heartbeat 要 owned，先 clone
+        room.connection().clone().spawn_heartbeat();
         room.join_room().await.map_err(|e| JsValue::from_str(&format!("Join error: {}", e)))?;
         
         // 【核心】让新用户自动上传 KeyPackage，供别人拉进频道群组使用

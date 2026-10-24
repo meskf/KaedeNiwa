@@ -1444,7 +1444,8 @@ impl RoomSession {
     /// 仅把当前用户注册为频道成员（HTTP DB 层），不触发 MLS Welcome 交换。
     /// 用于公开频道的“自动入表”，后续由权威成员主动拉人。
     pub async fn join_channel_only(&self, channel_id: &str) -> Result<(), ClientError> {
-        self.http.join_channel(channel_id, "", None).await
+        // P1-4：429 指数退避（生产环境 rate=0.5/s cap=3 很容易触发）
+        crate::http::retry_429(|| self.http.join_channel(channel_id, "", None)).await
     }
 
     pub async fn join_channel(&self, channel_id: &str, password: &str) -> Result<(), ClientError> {

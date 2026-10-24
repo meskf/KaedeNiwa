@@ -200,7 +200,8 @@ impl ServerConnection {
         &self,
         channel_id: &str,
     ) -> Result<HashSet<String>, ClientError> {
-        const MAX_ATTEMPTS: u32 = 6;
+        // P1-5: 10s 容忍（原 6×500ms=3s 在生产环境 join_channel 限流 / SQLite 锁时太紧）
+        const MAX_ATTEMPTS: u32 = 20;
         const DELAY_MS: u64 = 500;
 
         let me = self.self_uid()?;

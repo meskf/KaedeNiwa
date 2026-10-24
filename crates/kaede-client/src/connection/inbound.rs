@@ -829,7 +829,10 @@ impl ServerConnection {
             }
 
             // 其他类型：暂不处理
-            ServerMessage::KeyPackageFor { .. } | ServerMessage::Pong { .. } => {}
+            ServerMessage::KeyPackageFor { .. } => {}
+            ServerMessage::Pong { .. } => {
+                self.record_pong();
+            }
             ServerMessage::ServerHello { .. } => {}
         }
         Ok(())

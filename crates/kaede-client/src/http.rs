@@ -265,6 +265,50 @@ struct ErrorResp {
 // 实现
 // ---------------------------------------------------------------------------
 
+
+/// P1-4：429 指数退避重试。仅重试 429，其他错误立即返回。
+/// 用于 join_channel / livekit token 等高并发端点，避免 VPS 网络抖动时直接掉队。
+pub(crate) async fn retry_429<F, Fut, T>(mut f: F) -> Result<T, ClientError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ClientError>>,
+{
+    const DELAYS_MS: [u64; 4] = [500, 1000, 2000, 4000];
+    let mut last_err = None;
+    for (i, delay_ms) in DELAYS_MS.iter().enumerate() {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(ClientError::Http { status: 429, .. }) => {
+                if i + 1 < DELAYS_MS.len() {
+                    tracing::warn!(
+                        "[http] 429 on attempt {}, retry in {}ms",
+                        i + 1,
+                        delay_ms
+                    );
+                    #[cfg(target_arch = "wasm32")]
+                    gloo_timers::future::TimeoutFuture::new(*delay_ms as u32).await;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+                    last_err = Some(ClientError::Http {
+                        status: 429,
+                        message: "rate limited after retries".into(),
+                    });
+                } else {
+                    last_err = Some(ClientError::Http {
+                        status: 429,
+                        message: "rate limited: max retries exceeded".into(),
+                    });
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| ClientError::Http {
+        status: 429,
+        message: "retry exhausted".into(),
+    }))
+}
+
 impl HttpApi {
     /// 新建。`base_url` 形如 `http://localhost:18080`。
     pub fn new(base_url: impl Into<String>) -> Result<Self, ClientError> {

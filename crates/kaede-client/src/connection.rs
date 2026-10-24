@@ -32,7 +32,7 @@
 //! - [`pending`]：主群 Welcome 的用户确认队列
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use kaede_protocol::{ClientMessage, ServerMessage, UserId};
@@ -133,6 +133,8 @@ pub struct ServerConnection {
     /// 防止服务端返回一份无法应用的陈旧 Commit 时，客户端反复重拉同一份
     /// 数据形成死循环（每次失败都 ReportEpoch → 又拿到同一份 → 又失败）。
     last_epoch_report: Mutex<Option<(u64, web_time::Instant)>>,
+    /// P0-2: 上次 Pong 收到的毫秒时间戳
+    last_pong_ms: AtomicU64,
     /// 频道成员校验来源。生产由 `RoomSession` 注入；用于在加入/推进频道 group
     /// 前对照服务端 `channel_members`，拒绝把群外成员带进 MLS group。
     http: Mutex<Option<HttpApi>>,
@@ -232,6 +234,7 @@ impl ServerConnection {
             pending_commits: Mutex::new(std::collections::BTreeMap::new()),
             channel_pending_commits: Mutex::new(std::collections::HashMap::new()),
             last_epoch_report: Mutex::new(None),
+            last_pong_ms: AtomicU64::new(0),
             http: Mutex::new(None),
             pending_main_welcomes: Mutex::new(std::collections::HashMap::new()),
         }
@@ -763,7 +766,66 @@ impl ServerConnection {
     ///
     /// 调用方负责 spawn：native 用 `tokio::spawn`，wasm 用
     /// `wasm_bindgen_futures::spawn_local`。返回即连接关闭。
-pub async fn run_event_loop(self: Arc<Self>) {
+pub fn spawn_heartbeat(self: Arc<Self>) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            wasm_bindgen_futures::spawn_local(async move {
+                self.heartbeat_loop().await;
+            });
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tokio::spawn(async move {
+                self.heartbeat_loop().await;
+            });
+        }
+    }
+
+    async fn heartbeat_loop(self: Arc<Self>) {
+        use std::sync::atomic::Ordering;
+        let interval_ms = 20_000u64;
+        let timeout_ms = 30_000u64;
+        loop {
+            #[cfg(target_arch = "wasm32")]
+            gloo_timers::future::TimeoutFuture::new(interval_ms as u32).await;
+            #[cfg(not(target_arch = "wasm32"))]
+            tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+
+            let now = crate::room::now_ms() as u64;
+            let last = self.last_pong_ms.load(Ordering::Relaxed);
+            if last != 0 && now.saturating_sub(last) > timeout_ms {
+                tracing::warn!(
+                    "[client:{}] heartbeat timeout: no Pong for {}ms, closing",
+                    self.server_id,
+                    now.saturating_sub(last)
+                );
+                self.emit(ClientEvent::Disconnected {
+                    server_id: self.server_id.clone(),
+                    reason: "heartbeat timeout".to_string(),
+                });
+                let _ = self.transport.close().await;
+                return;
+            }
+
+            let nonce = now;
+            if self.transport.send(ClientMessage::Ping { nonce }).await.is_err() {
+                tracing::warn!("[client:{}] heartbeat send failed, closing", self.server_id);
+                self.emit(ClientEvent::Disconnected {
+                    server_id: self.server_id.clone(),
+                    reason: "heartbeat send failed".to_string(),
+                });
+                let _ = self.transport.close().await;
+                return;
+            }
+        }
+    }
+
+    fn record_pong(&self) {
+        use std::sync::atomic::Ordering;
+        self.last_pong_ms.store(crate::room::now_ms() as u64, Ordering::Relaxed);
+    }
+
+    pub async fn run_event_loop(self: Arc<Self>) {
         // 定期把 dirty 快照落盘（每 250ms）
         let flush_interval = std::time::Duration::from_millis(250);
         let mut last_flush = web_time::Instant::now();
