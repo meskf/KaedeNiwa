@@ -54,6 +54,16 @@ export default function App() {
         }
       },
       ping: () => 'pong',
+      forceDisconnect: async () => {
+        const c = getClient()
+        if (!c) return { error: 'client not ready' }
+        try {
+          await (c as any).forceDisconnect()
+          return { ok: true }
+        } catch (e) {
+          return { error: String(e) }
+        }
+      },
     }
     return () => { delete (window as any).__kaede_debug__ }
   }, [booting])

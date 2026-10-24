@@ -112,6 +112,10 @@ pub struct ServerConnection {
     snapshot_broken: AtomicBool,
     /// P0-1: run_event_loop 退出时置 true，heartbeat_loop 检查后停止（防旧 heartbeat 二次 emit Disconnected）
     shutdown: AtomicBool,
+    /// P0-1 测试钩子：force_close_for_reconnect 设置此标记后，
+    /// run_event_loop 会把 Closed 视为"网络错误"并 emit Disconnected，
+    /// 从而触发 JS 层自动重连。
+    test_force_disconnect: AtomicBool,
     /// 当前用户是否是主群 host（op5）。由 RoomSession 注入。
     is_host: AtomicBool,
     /// DM / 私密频道 v2 密文的 in-memory 重放窗口。
@@ -229,6 +233,7 @@ impl ServerConnection {
             snapshot_write: futures_util::lock::Mutex::new(()),
             snapshot_broken: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            test_force_disconnect: AtomicBool::new(false),
             is_host: AtomicBool::new(false),
             dm_replay: Mutex::new(ReplayGuard::default()),
             channel_replay: Mutex::new(ReplayGuard::default()),
@@ -828,6 +833,15 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
         self.last_pong_ms.store(crate::room::now_ms() as u64, Ordering::Relaxed);
     }
 
+    /// P0-1 测试钩子：模拟"网络错误"断连，触发 JS 层自动重连。
+    ///
+    /// 和普通 transport.close() 的区别：设置 test_force_disconnect 标记，
+    /// run_event_loop 收到 Closed 时会 emit Disconnected（普通关闭不 emit）。
+    pub async fn force_close_for_reconnect(&self) -> Result<(), ClientError> {
+        self.test_force_disconnect.store(true, std::sync::atomic::Ordering::Release);
+        self.transport.close().await
+    }
+
     pub async fn run_event_loop(self: Arc<Self>) {
         // 定期把 dirty 快照落盘（每 250ms）
         let flush_interval = std::time::Duration::from_millis(250);
@@ -851,10 +865,26 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
                 // 只 log 不 emit Disconnected，避免 JS 层重连触发无限循环。
                 // 真正的断网错误（Timeout/Transport/Connection）才 emit。
                 Err(ClientError::Closed) => {
-                    tracing::info!(
-                        "[client:{}] event loop closed (transport dropped)",
-                        self.server_id
+                    let force = self.test_force_disconnect.swap(
+                        false,
+                        std::sync::atomic::Ordering::AcqRel,
                     );
+                    if force {
+                        let reason = "test force disconnect".to_string();
+                        tracing::info!(
+                            "[client:{}] test force disconnect, emitting Disconnected for reconnect",
+                            self.server_id
+                        );
+                        self.emit(ClientEvent::Disconnected {
+                            server_id: self.server_id.clone(),
+                            reason,
+                        });
+                    } else {
+                        tracing::info!(
+                            "[client:{}] event loop closed (transport dropped)",
+                            self.server_id
+                        );
+                    }
                     self.flush_dirty_snapshots().await;
                     self.shutdown.store(true, std::sync::atomic::Ordering::Release);
                     return;

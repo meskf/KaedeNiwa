@@ -98,6 +98,17 @@ impl JsClient {
         Ok(())
     }
 
+    /// P0-1 测试钩子：模拟网络错误断开 WS，触发 JS 层自动重连。
+    #[wasm_bindgen(js_name = forceDisconnect)]
+    pub async fn force_disconnect(&self) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.connection()
+            .force_close_for_reconnect()
+            .await
+            .map_err(|e| JsValue::from_str(&format!("force_disconnect error: {}", e)))
+    }
+
     // 确保频道拥有独立的 MLS 群组
     /// 确保频道 group 存在。返回 true 表示本次新建（即当前用户是 authority 候选）。
     pub fn ensure_channel(&self, channel_id: String) -> Result<bool, JsValue> {
