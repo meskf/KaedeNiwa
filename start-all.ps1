@@ -67,6 +67,18 @@ cargo run -p kaede-server --features dev-mode
 Start-Process pwsh -ArgumentList '-NoExit', '-Command', $backendCmd -WindowStyle Normal
 
 # ---- 5. 启动前端 ----
+# [4.5/6] 重建 wasm（客户端 Rust 改动必须重新编译进 wasm，否则 e2e 会跑旧代码）
+Write-Host "[4.5/6] 重建 wasm..." -ForegroundColor Cyan
+Push-Location (Join-Path $root "apps\web")
+npm run build:wasm 2>&1 | Out-Null
+$wasmExit = $LASTEXITCODE
+Pop-Location
+if ($wasmExit -ne 0) {
+    Write-Host "wasm build failed (exit $wasmExit)" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  ✅ wasm 已重建" -ForegroundColor Green
+
 Write-Host "[5/6] 启动前端..." -ForegroundColor Yellow
 $frontendCmd = "Set-Location '$root\apps\web'; Write-Host '=== Vite 前端 ===' -ForegroundColor Cyan; npm run dev"
 Start-Process pwsh -ArgumentList '-NoExit', '-Command', $frontendCmd -WindowStyle Normal

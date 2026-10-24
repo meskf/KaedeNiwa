@@ -64,6 +64,16 @@ $env:LIVEKIT_API_SECRET = 'secret'
 $env:LIVEKIT_WS_URL = 'ws://127.0.0.1:7880'
 $env:RUST_LOG = 'info,kaede_server=debug'
 
+    Write-Host "   重建 wasm（客户端 Rust 改动）..." -ForegroundColor Cyan
+    Push-Location (Join-Path (Split-Path $PSScriptRoot -Parent) "apps\web")
+    npm run build:wasm 2>&1 | Out-Null
+    $wasmExit = $LASTEXITCODE
+    Pop-Location
+    if ($wasmExit -ne 0) {
+        Write-Host "   wasm build failed (exit $wasmExit)" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "   OK wasm" -ForegroundColor Green
 Write-Host "   预编译后端..." -ForegroundColor DarkGray
 Push-Location $root
 try { cargo build -p kaede-server --features dev-mode 2>&1 | Out-Null } finally { Pop-Location }
@@ -117,6 +127,7 @@ $tests = @(
     @{ name = 'test-7 多人测试';   file = 'test-7-multi-user.cjs';        media = $true },
     @{ name = 'test-8 10用户规模';  file = 'test-8-ten-users.cjs';         media = $true },
     @{ name = 'test-9 Authority 退出'; file = 'test-9-authority-leave.cjs'; media = $true }
+    @{ name = 'test-10 Commit 补发'; file = 'test-10-commit-replay.cjs'; media = $true }
 )
 
 $results = @()
