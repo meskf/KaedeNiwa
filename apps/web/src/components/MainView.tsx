@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
-import { getClient, scheduleReconnect } from '../wasm/client'
+import { getClient, scheduleReconnect, recordLoginArgs, allowReconnect } from '../wasm/client'
 import { connectMedia, disconnectMedia } from '../lib/livekit'
 import { useMediaState } from '../hooks/useLiveKitRoom'
 import { MediaBar } from './MediaBar'
@@ -82,6 +82,14 @@ export function MainView() {
 
   // 监听事件
   useEffect(() => {
+    // P0-1: 记录登录参数用于自动重连（手动登录路径也走这里）
+    {
+      const st = useAuthStore.getState()
+      if (st.serverUrl && st.wsUrl && st.loginId && st.token) {
+        recordLoginArgs({ serverUrl: st.serverUrl, wsUrl: st.wsUrl, loginId: st.loginId, token: st.token })
+        allowReconnect()
+      }
+    }
     const client = getClient()
     if (client) {
       client.setOnEvent((rawEv: any) => {
