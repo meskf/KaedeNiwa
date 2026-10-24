@@ -1,7 +1,7 @@
 KaedeNiwa STATUS
 ================
 
-Last updated: 2026-10-24 (P0-1 + P0-2 complete, e2e 10/10 green)
+Last updated: 2026-10-25 (P0-1 + P0-2 + 网络健壮性完成, e2e 11/11 green)
 
 Commit history (this session)
 -----------------------------
@@ -32,17 +32,9 @@ Completed
 Test status (as of this commit)
 -------------------------------
   Rust unit:  cargo test -p protocol -p client -p server --no-run  OK
-  e2e (10):   run-all-tests.ps1 -FreshEachMediaTest  ✅ 10/10 PASS
-    - test-1  自动拉人          PASS  11.2s
-    - test-2  频道隔离          PASS  10.4s
-    - test-3  断线重连          PASS  10.5s
-    - test-4  屏幕共享          PASS   9.0s
-    - test-5  麦克风+降噪       PASS  12.6s
-    - test-6  画质切换          PASS  13.1s
-    - test-7  多人测试          PASS  19.2s
-    - test-8  10用户规模        PASS  86.7s
-    - test-9  Authority 退出    PASS  26.9s
-    - test-10 Commit 补发       PASS  14.8s
+  e2e (11):   run-all-tests.ps1 -FreshEachMediaTest  ✅ 11/11 PASS
+    - test-1 ~ test-10  PASS（同前 10/10）
+    - test-11 断线重连  PASS  (forceDisconnect → 自动重连 → backfill，ws_auth=3)
   fuzz build: cargo +nightly fuzz build  OK
 
 !!!!! 踩过的坑（必读，避免重复） !!!!!
