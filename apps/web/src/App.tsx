@@ -44,7 +44,14 @@ export default function App() {
     // P1: 多 tab 锁 —— 同一账号只允许一个 tab 活跃。
     // MLS identity 在 IndexedDB 里，多 tab 共享会导致 ratchet 分叉。
     const TAB_KEY = 'kaede-active-tab'
-    const tabId = Math.random().toString(36).slice(2) + Date.now().toString(36)
+    const TAB_ID_KEY = 'kaede-tab-id'
+    // P1-fix: reload 后 sessionStorage 保留 tabId，新 tab 独立生成
+    // 这样 reload 不会被误判为"另一个 tab"
+    let tabId = sessionStorage.getItem(TAB_ID_KEY)
+    if (!tabId) {
+      tabId = Math.random().toString(36).slice(2) + Date.now().toString(36)
+      sessionStorage.setItem(TAB_ID_KEY, tabId)
+    }
 
     // 启动时检查是否已有活跃 tab
     const existing = localStorage.getItem(TAB_KEY)
