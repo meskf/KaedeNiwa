@@ -40,6 +40,44 @@ export default function App() {
     boot()
   }, [])
 
+  useEffect(() => {
+    // P1: 多 tab 锁 —— 同一账号只允许一个 tab 活跃。
+    // MLS identity 在 IndexedDB 里，多 tab 共享会导致 ratchet 分叉。
+    const TAB_KEY = 'kaede-active-tab'
+    const tabId = Math.random().toString(36).slice(2) + Date.now().toString(36)
+
+    // 启动时检查是否已有活跃 tab
+    const existing = localStorage.getItem(TAB_KEY)
+    if (existing && existing !== tabId) {
+      // 已有 tab → 当前 tab 不抢占，直接 logout（另一 tab 继续工作）
+      console.log('[tab-lock] another tab active, logging out current tab')
+      useAuthStore.getState().logout()
+      sessionStorage.setItem('kaede-tab-conflict', '1')
+      setBooting(false)
+      return
+    }
+
+    // 抢占
+    localStorage.setItem(TAB_KEY, tabId)
+
+    // 监听其他 tab 抢占
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === TAB_KEY && e.newValue && e.newValue !== tabId) {
+        console.log('[tab-lock] another tab took over, logging out')
+        useAuthStore.getState().logout()
+        sessionStorage.setItem('kaede-tab-conflict', '1')
+      }
+    }
+    window.addEventListener('storage', onStorage)
+
+    return () => {
+      window.removeEventListener('storage', onStorage)
+      if (localStorage.getItem(TAB_KEY) === tabId) {
+        localStorage.removeItem(TAB_KEY)
+      }
+    }
+  }, [])
+
   // 暴露 debug 接口（DEV 模式，boot 完成后）
   useEffect(() => {
     ;(window as any).__kaede_debug__ = {

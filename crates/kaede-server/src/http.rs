@@ -615,6 +615,19 @@ async fn issue_session(
     .bind(&session_id)
     .execute(&state.pool)
     .await?;
+
+    // P1: kick old sessions — 同一账号只保留最新一个 session
+    // 多设备/多 tab 同时在线会破坏 MLS identity 的 ratchet 状态
+    // （每个设备独立建 group，导致 epoch 分叉）
+    // 简单方案：新 login 踢掉同 login_id 的所有旧 session
+    if let Err(e) = sqlx::query("DELETE FROM sessions WHERE login_id = ? AND token != ?")
+        .bind(login_id)
+        .bind(db::hash_token(&token))
+        .execute(&state.pool)
+        .await
+    {
+        tracing::warn!("kick old sessions failed: {}", e);
+    }
     Ok(token)
 }
 
