@@ -2521,43 +2521,55 @@ impl RoomSession {
         ),
         ClientError,
     > {
-        // 1. 拿 token（含房间级 seed）
-        let token = self.http.get_livekit_token(channel_id).await?;
-        let seed_b64 = token.e2ee_seed.as_deref().ok_or_else(|| {
-            ClientError::Protocol(
-                "server did not return e2ee_seed; please upgrade the server".into(),
-            )
-        })?;
-        let seed = URL_SAFE_NO_PAD
-            .decode(seed_b64)
-            .map_err(|e| ClientError::Protocol(format!("bad e2ee_seed base64: {}", e)))?;
-        if seed.len() != 32 {
-            return Err(ClientError::Protocol(format!(
-                "e2ee_seed length {} != 32",
-                seed.len()
-            )));
-        }
-
-        // 2. 房间级 E2EE key：HKDF(seed, "kaede-livekit-e2ee-v1", channel_id)
+        // P0-Z: 真 E2EE —— 媒体 key 从频道 MLS exporter 派生，server 完全不参与。
         //
-        // 为什么不用 MLS exporter：
-        //   MLS exporter 输出依赖本地 group epoch 状态。
-        //   多人场景下，每人加入时 epoch 可能不同（A 单独时 epoch=1，
-        //   B 加入后 epoch=2），导致派生的 key 不一致，无法互通。
-        //   Seed 由服务端按房间统一签发（TLS 内传输，同房间共享），
-        //   直接 HKDF 即可得到所有人一致且不可预测的 AES-256 key。
-        use hkdf::Hkdf;
-        use sha2::Sha256;
-        let hk = Hkdf::<Sha256>::new(Some(b"kaede-livekit-e2ee-v1"), &seed);
-        let mut key = [0u8; 32];
-        hk.expand(channel_id.as_bytes(), &mut key)
-            .map_err(|e| ClientError::Protocol(format!("hkdf expand: {}", e)))?;
+        // 之前用 server 签发的 room-level seed 派生（HKDF(seed, "livekit-e2ee")），
+        // server 知道 seed 就能推导 key → 不是真 E2EE。现在改为：
+        //   1. 从 channel MLS group 的 exporter 派生 key（只有群成员能算出）
+        //   2. 用派生出的 key base64 覆盖 token.e2ee_seed（JS 层以为来自 server，实际不是）
+        //
+        // 时序处理：如果本地 epoch 落后，exporter 会失败。触发 report_channel_epoch
+        // → 等 P0-2 backfill 追平 → 重试一次。
+        let mut token = self.http.get_livekit_token(channel_id).await?;
 
-        tracing::info!(
-            "[begin_media_session] channel {} -> room-level E2EE key derived",
-            channel_id
+        let key = match self.conn.channel_export_key_for(channel_id, kaede_mls::SframePurpose::LivekitE2ee) {
+            Ok(k) => {
+                tracing::info!(
+                    "[media] ch={} e2ee key from MLS exporter (true E2EE)",
+                    channel_id
+                );
+                k
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[media] ch={} export key failed: {}; report epoch + retry",
+                    channel_id, e
+                );
+                // P0-2 路径：上报本地 epoch，触发服务端补发
+                let local = self.conn.channel_epoch(channel_id).unwrap_or(0);
+                let _ = self
+                    .conn
+                    .report_channel_epoch(channel_id.to_string(), local)
+                    .await;
+                // 等 backfill 完成（P0-2 服务端延迟 < 200ms，1s 是保守上限）
+                sleep_ms(1000).await;
+                self.conn.channel_export_key_for(channel_id, kaede_mls::SframePurpose::LivekitE2ee).map_err(|e2| {
+                    ClientError::Mls(format!(
+                        "cannot derive media key for {}: {} (after epoch sync retry: {})",
+                        channel_id, e, e2
+                    ))
+                })?
+            }
+        };
+
+        // 覆盖 token.e2ee_seed —— JS 层（livekit.ts）读它注入 ExternalE2EEKeyProvider
+        // 实际 key 现在是 MLS exporter 派生的，server 不知道
+        use base64::Engine as _;
+        token.e2ee_seed = Some(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.as_slice()),
         );
-        return Ok((token, Some(zeroize::Zeroizing::new(key))));
+
+        Ok((token, Some(zeroize::Zeroizing::new(key))))
     }
 
     /// 告诉服务器本用户已离开媒体房间。
