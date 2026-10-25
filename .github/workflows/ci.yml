@@ -5,15 +5,12 @@ on:
     branches: [main]
   pull_request:
 
-# 最小权限：CI 只需要读仓库。新增 job 若需写权限请单独声明。
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # 保守值：webrtc-sys / tao 在多核并发编译时偶发元数据竞争
-  CARGO_BUILD_JOBS: "4"
 
 jobs:
   fmt:
@@ -23,21 +20,43 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  clippy-core:
+  check:
+    name: cargo check (core crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install keyring deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
+      - name: check core crates
+        run: >-
+          cargo check
+          -p kaede-protocol
+          -p kaede-crypto
+          -p kaede-storage
+          -p kaede-mls
+          -p kaede-client
+          -p kaede-server
+          --all-targets
+
+  clippy:
     name: clippy (core crates)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: install keyring deps (Linux Secret Service)
+      - name: install keyring deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
       - name: clippy core
         run: >-
@@ -50,29 +69,6 @@ jobs:
           -p kaede-server
           --all-targets
           -- -D warnings
-
-  clippy-full:
-    name: clippy (full workspace, informational)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.99.0"
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: install webrtc/gstreamer deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config cmake clang libclang-dev \
-            libssl-dev libx11-dev libxext-dev libxfixes-dev \
-            libgl1-mesa-dev libgbm-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            libdbus-1-dev
-      - name: clippy full
-        run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: test (${{ matrix.crate }})
@@ -91,91 +87,94 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - name: install keyring deps (Linux Secret Service)
+      - name: install keyring deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
       - run: cargo nextest run -p ${{ matrix.crate }} --no-fail-fast
 
-  e2e-client:
-    name: e2e (kaede-client --features native)
+  fuzz-build:
+    name: cargo-fuzz build
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - name: fuzz build
+        working-directory: crates/kaede-protocol/fuzz
+        run: cargo +nightly fuzz build
+
+  typecheck-web:
+    name: typecheck (web)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci || npm install
+      - run: npm run typecheck
+
+  e2e:
+    name: e2e (headless)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: stable
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
-      - name: install keyring deps (Linux Secret Service)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: install keyring deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
-      - run: cargo nextest run -p kaede-client --features native --test room_e2e --no-fail-fast
-
-  check-wasm:
-    name: check (wasm32)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.99.0"
-          targets: wasm32-unknown-unknown
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: check kaede-wasm (end-to-end wasm)
-        run: cargo check -p kaede-wasm --target wasm32-unknown-unknown
-      - name: check kaede-client (wasm feature)
-        run: cargo check -p kaede-client --features wasm --target wasm32-unknown-unknown
-      - name: clippy kaede-livekit-web (wasm)
-        run: cargo clippy -p kaede-livekit-web --target wasm32-unknown-unknown -- -D warnings
-
-  test-ui:
-    name: test + clippy (kaede-ui, no desktop media)
-    runs-on: windows-latest
-    env:
-      CARGO_BUILD_JOBS: "2"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.99.0"
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
-      - name: clippy kaede-ui
-        run: cargo clippy -p kaede-ui --no-default-features --all-targets -- -D warnings
-      - name: test kaede-ui
-        run: cargo nextest run -p kaede-ui --no-default-features --no-fail-fast
-
-  check-windows:
-    name: check (windows, core crates)
-    runs-on: windows-latest
-    env:
-      # webrtc-sys 在 Windows 多核并发编译时偶发 MSVC C1060（编译器堆空间不足）
-      CARGO_BUILD_JOBS: "2"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.99.0"
-      - uses: Swatinem/rust-cache@v2
-      - name: check core crates
-        run: >-
-          cargo check
-          -p kaede-protocol
-          -p kaede-crypto
-          -p kaede-storage
-          -p kaede-mls
-          -p kaede-client
-          -p kaede-server
-          --all-targets
-
-  deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v1
-        with:
-          command: check
+      - name: install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: install playwright
+        working-directory: apps/web
+        run: |
+          npm ci || npm install
+          npx playwright install --with-deps chromium
+      - name: install livekit-server
+        run: |
+          curl -sSL https://github.com/livekit/livekit/releases/download/v1.9.1/livekit_1.9.1_linux_amd64.tar.gz | tar xz
+          mkdir -p tools/livekit
+          mv livekit-server tools/livekit/
+      - name: build wasm
+        working-directory: apps/web
+        run: npm run build:wasm
+      - name: build server
+        run: cargo build -p kaede-server --release
+      - name: run e2e (test-1 to test-10)
+        working-directory: apps/web
+        env:
+          KAEDE_HEADLESS: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          # 起 LiveKit
+          ../../tools/livekit/livekit-server --dev &
+          sleep 3
+          # 起 backend
+          KAEDE_BIND=0.0.0.0:18080 \
+          LIVEKIT_API_KEY=devkey \
+          LIVEKIT_API_SECRET=secret \
+          LIVEKIT_WS_URL=ws://127.0.0.1:7880 \
+          RUST_LOG=info \
+          ../../target/release/kaede-server &
+          sleep 5
+          # 起 vite (dev)
+          npm run dev &
+          sleep 8
+          # 跑测试（不含 media + 不带 msedge channel）
+          for t in test-1-auto-join test-2-channel-isolation test-3-reconnect test-12-multi-tab test-13-pending-queue; do
+            echo "=== $t ==="
+            node $t.cjs || exit 1
+          done

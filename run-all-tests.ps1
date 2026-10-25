@@ -129,7 +129,8 @@ $tests = @(
     @{ name = 'test-9 Authority 退出'; file = 'test-9-authority-leave.cjs'; media = $true },
     @{ name = 'test-10 Commit 补发'; file = 'test-10-commit-replay.cjs'; media = $true },
     @{ name = 'test-11 断线重连'; file = 'test-11-reconnect-offline.cjs'; media = $true },
-    @{ name = 'test-12 多 tab/设备'; file = 'test-12-multi-tab.cjs'; media = $false }
+    @{ name = 'test-12 多 tab/设备'; file = 'test-12-multi-tab.cjs'; media = $false },
+    @{ name = 'test-13 pending 队列'; file = 'test-13-pending-queue.cjs'; media = $false }
 )
 
 $results = @()
