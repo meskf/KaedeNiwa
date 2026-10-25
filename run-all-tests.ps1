@@ -128,7 +128,8 @@ $tests = @(
     @{ name = 'test-8 10用户规模';  file = 'test-8-ten-users.cjs';         media = $true },
     @{ name = 'test-9 Authority 退出'; file = 'test-9-authority-leave.cjs'; media = $true },
     @{ name = 'test-10 Commit 补发'; file = 'test-10-commit-replay.cjs'; media = $true },
-    @{ name = 'test-11 断线重连'; file = 'test-11-reconnect-offline.cjs'; media = $true }
+    @{ name = 'test-11 断线重连'; file = 'test-11-reconnect-offline.cjs'; media = $true },
+    @{ name = 'test-12 多 tab/设备'; file = 'test-12-multi-tab.cjs'; media = $false }
 )
 
 $results = @()
