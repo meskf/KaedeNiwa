@@ -232,4 +232,56 @@ impl JsClient {
         }).collect();
         Ok(JsValue::from_str(&serde_json::to_string(&json_msgs).unwrap()))
     }
+
+    // ============ DM wasm 桥 ============
+    // 对应的 RoomSession 方法已存在，这里只做 JSON 序列化 + JsValue 包装
+
+    #[wasm_bindgen(js_name = listDmConversations)]
+    pub async fn list_dm_conversations(&self) -> Result<JsValue, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let convs = room.list_dm_conversations().await
+            .map_err(|e| JsValue::from_str(&format!("list dm conversations: {}", e)))?;
+        let json = serde_json::to_string(&convs)
+            .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
+        Ok(JsValue::from_str(&json))
+    }
+
+    #[wasm_bindgen(js_name = openDm)]
+    pub async fn open_dm(&self, peer: String) -> Result<JsValue, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let conv = room.open_dm(&peer).await
+            .map_err(|e| JsValue::from_str(&format!("open dm: {}", e)))?;
+        let json = serde_json::to_string(&conv)
+            .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
+        Ok(JsValue::from_str(&json))
+    }
+
+    #[wasm_bindgen(js_name = dmLoadHistory)]
+    pub async fn dm_load_history(&self, conv_id: String, limit: usize) -> Result<JsValue, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let history = room.dm_load_history(&conv_id, None, limit).await
+            .map_err(|e| JsValue::from_str(&format!("dm history: {}", e)))?;
+        let json = serde_json::to_string(&history)
+            .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
+        Ok(JsValue::from_str(&json))
+    }
+
+    #[wasm_bindgen(js_name = sendDm)]
+    pub async fn send_dm(&self, conv_id: String, text: String) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.send_dm(&conv_id, &text).await
+            .map_err(|e| JsValue::from_str(&format!("send dm: {}", e)))
+    }
+
+    #[wasm_bindgen(js_name = markDmRead)]
+    pub async fn mark_dm_read(&self, conv_id: String, ts: i64) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.mark_dm_read(&conv_id, ts).await
+            .map_err(|e| JsValue::from_str(&format!("mark dm read: {}", e)))
+    }
 }

@@ -138,6 +138,23 @@ async fn open_conversation(
     let conv_id = conv_id_for(me, &peer);
     let nick = get_nickname(&state, &peer).await;
 
+    // P1-dm: open_conversation 也要写 dm_conversations 表，
+    // 否则发起方 list_conversations 看不到自己刚打开的会话
+    // （peer 侧在 send 消息时由 post_message 写表，反方向不对称）
+    let (a, b) = if me < peer.as_str() { (me.to_string(), peer.clone()) } else { (peer.clone(), me.to_string()) };
+    if let Err(e) = sqlx::query(
+        "INSERT OR IGNORE INTO dm_conversations (conv_id, a, b, last_ts) \
+         VALUES (?, ?, ?, 0)"
+    )
+    .bind(&conv_id)
+    .bind(&a)
+    .bind(&b)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!("open_conversation insert dm_conversations failed: {}", e);
+    }
+
     Ok(Json(OpenConversationResp {
         conv_id,
         peer_login_id: peer,

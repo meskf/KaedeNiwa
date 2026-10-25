@@ -99,6 +99,12 @@ export default function App() {
         }
       },
       ping: () => 'pong',
+      dm: {
+        list: async () => { const c = getClient(); if (!c) throw new Error('no client'); return await (c as any).listDmConversations(); },
+        open: async (peer: string) => { const c = getClient(); if (!c) throw new Error('no client'); return await (c as any).openDm(peer); },
+        history: async (convId: string, limit = 50) => { const c = getClient(); if (!c) throw new Error('no client'); return await (c as any).dmLoadHistory(convId, limit); },
+        send: async (convId: string, text: string) => { const c = getClient(); if (!c) throw new Error('no client'); return await (c as any).sendDm(convId, text); },
+      },
       forceDisconnect: async () => {
         const c = getClient()
         if (!c) return { error: 'client not ready' }

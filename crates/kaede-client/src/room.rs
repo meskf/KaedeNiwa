@@ -65,7 +65,7 @@ pub const DEFAULT_CHANNEL: &str = "general";
 pub const DEFAULT_KP_BATCH_SIZE: usize = 20;
 
 /// 从历史拉取的一条消息（已解密）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct HistoryMessage {
     pub sender: String,
     pub ts: i64,
