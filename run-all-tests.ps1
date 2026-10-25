@@ -130,7 +130,8 @@ $tests = @(
     @{ name = 'test-10 Commit 补发'; file = 'test-10-commit-replay.cjs'; media = $true },
     @{ name = 'test-11 断线重连'; file = 'test-11-reconnect-offline.cjs'; media = $true },
     @{ name = 'test-12 多 tab/设备'; file = 'test-12-multi-tab.cjs'; media = $false },
-    @{ name = 'test-13 pending 队列'; file = 'test-13-pending-queue.cjs'; media = $false }
+    @{ name = 'test-13 pending 队列'; file = 'test-13-pending-queue.cjs'; media = $false },
+    @{ name = 'test-14 DM wasm 桥'; file = 'test-14-dm-wasm.cjs'; media = $false }
 )
 
 $results = @()
