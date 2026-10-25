@@ -2538,6 +2538,12 @@ impl RoomSession {
                     "[media] ch={} e2ee key from MLS exporter (true E2EE)",
                     channel_id
                 );
+                // P0-Z console log（wasm 里 tracing 可能不输出到 console）
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(&format!(
+                    "[media] ch={} e2ee key from MLS exporter (TRUE E2EE)",
+                    channel_id
+                ).into());
                 k
             }
             Err(e) => {
