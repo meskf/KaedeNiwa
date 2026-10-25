@@ -10,7 +10,7 @@ import { ScreenShareView } from './ScreenShareView'
 export function MainView() {
   const logout = useAuthStore(s => s.logout)
   const loginId = useAuthStore(s => s.loginId)
-  const { currentChannel, setChannel } = useChatStore()
+  const { currentChannel, setChannel, pendingMessages, addPending, removePending, markPendingFailed, incrementRetry } = useChatStore()
   const [messages, setMessages] = useState<any[]>([])
   const [input, setInput] = useState('')
   const [peerStatus, setPeerStatus] = useState('')
@@ -259,22 +259,53 @@ export function MainView() {
     if (!input.trim()) return
     const text = input.trim()
     setInput('')
-    
-    setMessages(prev => [...prev, {
-      sender: loginId || 'Me',
-      plaintext: text,
-      ts: Date.now()
-    }])
-    
-    const client = getClient()
-    if (client) {
-      try {
-        await client.send_message(currentChannel, text)
-      } catch (e) {
-        console.error('发送失败:', e)
-      }
+
+    // P1-pending: 先入 pending 队列（sending 状态），失败后保留并可重试
+    const id = (crypto.randomUUID && crypto.randomUUID()) || ('p-' + Date.now() + '-' + Math.random())
+    const ts = Date.now()
+    addPending({ id, channelId: currentChannel, text, ts, status: 'sending', retries: 0 })
+
+    try {
+      const client = getClient()
+      if (!client) throw new Error('client not ready')
+      await client.send_message(currentChannel, text)
+      removePending(id)
+      setMessages(prev => [...prev, {
+        sender: loginId || 'Me',
+        plaintext: text,
+        ts
+      }])
+    } catch (e) {
+      console.error('发送失败（保留在 pending 队列）:', e)
+      markPendingFailed(id)
     }
   }
+
+  // P1-pending: 定时重试 failed 消息（最多 5 次，5 秒一轮）
+  useEffect(() => {
+    const timer = setInterval(async () => {
+      const failed = useChatStore.getState().pendingMessages.filter(
+        p => p.status === 'failed' && p.channelId === currentChannel && p.retries < 5
+      )
+      for (const p of failed) {
+        try {
+          const client = getClient()
+          if (!client) continue
+          incrementRetry(p.id)
+          await client.send_message(p.channelId, p.text)
+          removePending(p.id)
+          setMessages(prev => [...prev, {
+            sender: loginId || 'Me',
+            plaintext: p.text,
+            ts: p.ts
+          }])
+        } catch (e) {
+          markPendingFailed(p.id)
+        }
+      }
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [currentChannel, loginId])
 
   const getInitial = (str: any) => {
     if (!str || typeof str !== 'string' || str.length === 0) return '?'
@@ -359,7 +390,53 @@ export function MainView() {
                </div>
              ))
            )}
-           <div ref={messagesEndRef} />
+           {/* P1-pending: 渲染未发送消息 */}
+           {pendingMessages.filter(p => p.channelId === currentChannel).map(p => (
+             <div key={p.id} className="flex gap-4 -mx-4 px-4 py-1 opacity-60">
+               <div className="w-10 h-10 rounded-full bg-gray-500 flex items-center justify-center text-white font-bold shrink-0">
+                 {getInitial(loginId || 'Me')}
+               </div>
+               <div className="flex-1">
+                 <div className="flex items-baseline gap-2">
+                   <span className="text-gray-300 font-medium text-sm">{loginId || 'Me'}</span>
+                   <span className="text-xs text-gray-400">{new Date(p.ts).toLocaleTimeString()}</span>
+                   {p.status === 'failed' && (
+                     <span className="text-xs text-red-400 ml-2">
+                       {p.retries >= 5 ? '发送失败（已放弃）' : ('发送失败（重试 ' + p.retries + '/5）')}
+                     </span>
+                   )}
+                   {p.status === 'sending' && (
+                     <span className="text-xs text-yellow-400 ml-2">发送中…</span>
+                   )}
+                 </div>
+                 <div className="text-gray-400 text-sm mt-0.5 whitespace-pre-wrap">{p.text}</div>
+                 {p.status === 'failed' && p.retries < 5 && (
+                   <button
+                     onClick={async () => {
+                       try {
+                         const client = getClient()
+                         if (!client) return
+                         incrementRetry(p.id)
+                         await client.send_message(p.channelId, p.text)
+                         removePending(p.id)
+                         setMessages(prev => [...prev, {
+                           sender: loginId || 'Me',
+                           plaintext: p.text,
+                           ts: p.ts
+                         }])
+                       } catch (e) {
+                         markPendingFailed(p.id)
+                       }
+                     }}
+                     className="text-xs text-blue-400 hover:text-blue-300 mt-1"
+                   >
+                     立即重试
+                   </button>
+                 )}
+               </div>
+             </div>
+           ))}
+                      <div ref={messagesEndRef} />
         </div>
 
         <div className="px-4 text-xs text-yellow-400">{peerStatus}</div>
