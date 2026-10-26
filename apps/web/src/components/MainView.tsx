@@ -2,6 +2,10 @@ import { useState, useEffect, useRef } from 'react'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import { getClient, scheduleReconnect } from '../wasm/client'
+import { connectMedia, disconnectMedia, updateE2EEKey } from '../lib/livekit'
+import { useMediaState } from '../hooks/useLiveKitRoom'
+import { MediaBar } from './MediaBar'
+import { ScreenShareView } from './ScreenShareView'
 
 const CHANNELS = ['general', 'dev', 'random']
 const VOICE_CHANNELS = ['Lounge']
@@ -20,8 +24,13 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const addMemberQueueRef = useRef<Promise<void>>(Promise.resolve())
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
+  const media = useMediaState()
+  const mediaRef = useRef(media)
+  useEffect(() => { mediaRef.current = media }, [media])
+
   const currentMessages = messages[currentChannel] || []
   const currentPending = pendingMessages.filter(p => p.channelId === currentChannel)
+  const inVoice = media.connected && media.channelId === currentChannel
 
   useEffect(() => {
     const initChannel = async () => {
@@ -62,7 +71,6 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         const all = document.querySelectorAll('[data-testid="raw-event"]')
         if (all.length > 500) all[0].remove()
 
-        // 关键：每次都用 useChatStore.getState() 实时读，不用事件注册时的快照
         const st = useChatStore.getState()
         const ch = st.currentChannel
 
@@ -103,6 +111,21 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           client.process_channel_sync(channelId, payload).then(() => {
             useChatStore.getState().setPeerStatus('Synced')
           }).catch((e: any) => useChatStore.getState().setPeerStatus(`Sync failed: ${e}`))
+        }
+        if (ev.MlsEpochChanged) {
+          const m = mediaRef.current
+          const curCh = useChatStore.getState().currentChannel
+          if (m.connected && m.channelId === curCh) {
+            (async () => {
+              try {
+                const c = getClient()
+                if (!c) return
+                const tokenJson = await c.begin_media_session(curCh)
+                const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
+                if (tokenData.e2ee_seed) await updateE2EEKey(tokenData.e2ee_seed)
+              } catch (e) { console.error('E2EE key rotate failed:', e) }
+            })()
+          }
         }
         if (ev.ChannelMessage) {
           if (ev.ChannelMessage.channel_id !== useChatStore.getState().currentChannel) return
@@ -164,6 +187,35 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark')
   }, [theme])
+
+  const handleJoinMedia = async () => {
+    const client = getClient()
+    if (!client) return
+    try {
+      useChatStore.getState().setPeerStatus('Joining voice...')
+      const tokenJson = await client.begin_media_session(currentChannel)
+      const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
+      await connectMedia({
+        wsUrl: tokenData.ws_url,
+        token: tokenData.token,
+        channelId: currentChannel,
+        e2eeKeyB64: tokenData.e2ee_seed,
+        disableAdaptive: (window as any).__KAEDE_TEST_DISABLE_ADAPTIVE__ === true,
+      })
+      useChatStore.getState().setPeerStatus('Joined voice' + (tokenData.e2ee_seed ? ' (E2EE)' : ''))
+    } catch (e: any) {
+      useChatStore.getState().setPeerStatus('Join voice failed: ' + e)
+    }
+  }
+
+  const handleLeaveMedia = async () => {
+    const client = getClient()
+    if (client) {
+      try { await client.leave_media_room(currentChannel) } catch (e) { /* ignore */ }
+    }
+    await disconnectMedia()
+    useChatStore.getState().setPeerStatus('')
+  }
 
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault()
@@ -260,11 +312,28 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                   <span className="font-bold text-[16px]">{currentChannel}</span>
                 </div>
                 <div className="flex items-center gap-3">
-                  <button className="text-xs px-3 py-1.5 rounded bg-[#248046] text-white font-bold" title="Media wiring pending">
-                    Join Voice
-                  </button>
+                  {inVoice ? (
+                    <button
+                      data-testid="media-leave"
+                      onClick={handleLeaveMedia}
+                      className="text-xs px-3 py-1.5 rounded bg-[#da373c] hover:bg-[#a12829] text-white font-bold"
+                    >
+                      Leave Voice
+                    </button>
+                  ) : (
+                    <button
+                      data-testid="media-join"
+                      onClick={handleJoinMedia}
+                      className="text-xs px-3 py-1.5 rounded bg-[#248046] hover:bg-[#1a6334] text-white font-bold"
+                    >
+                      Join Voice
+                    </button>
+                  )}
                 </div>
               </div>
+
+              <MediaBar channelId={currentChannel} />
+              <ScreenShareView />
 
               <div className="flex-1 overflow-y-auto px-6 py-4">
                 {(currentMessages.length > 0 || currentPending.length > 0) && (
