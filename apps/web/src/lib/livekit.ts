@@ -271,7 +271,7 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
       height: { ideal: preset.height, max: preset.height },
       frameRate: { ideal: preset.fps, max: preset.fps },
     },
-    audio: false,
+    audio: true, // 捕获系统/标签页音频
   }
   
   try {
@@ -323,9 +323,10 @@ export async function enableMicrophone(noiseSuppression: boolean): Promise<void>
   if (!currentRoom) throw new Error('未加入媒体房间')
 
   // 麦克风：浏览器原生降噪（RNNoise AudioWorklet 集成放下轮）
+  const disableEcho = typeof window !== 'undefined' && (window as any).__KAEDE_TEST_DISABLE_ECHO__ === true
   micSourceStream = await navigator.mediaDevices.getUserMedia({
     audio: {
-      echoCancellation: true,
+      echoCancellation: !disableEcho,
       noiseSuppression: noiseSuppression,
       autoGainControl: true,
       sampleRate: 48000,
