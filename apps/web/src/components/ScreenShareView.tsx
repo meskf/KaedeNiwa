@@ -40,18 +40,27 @@ export function ScreenShareView() {
 
   const uniqueShares = Array.from(new Map(media.screenShares.map(s => [s.trackSid, s])).values())
   const count = uniqueShares.length
+  // 动态列数：1人占满，2-4人两列，5人以上三列
   const cols = count === 1 ? 1 : count <= 4 ? 2 : 3
   const rows = Math.ceil(count / cols)
 
-  // 悬浮画中画样式：固定宽高，绝对定位于右上角，带阴影
-  // 宽高会随着人数微调，但不挤压底层布局
   return (
-    <div className="absolute top-4 right-4 z-40 w-[45%] max-w-[700px] h-[35vh] min-h-[220px] bg-[#1e1f22]/95 backdrop-blur-sm rounded-xl shadow-2xl border border-[#2b2d31] flex flex-col p-1.5 animate-in fade-in zoom-in-95">
+    <div 
+      className="absolute top-16 right-4 z-50 bg-[#1e1f22] rounded-xl shadow-2xl border border-[#2b2d31] p-2 flex flex-col animate-in fade-in zoom-in-95"
+      style={{ 
+        // 强制写死宽度，彻底避免被外层 Flex 挤压变形成竖条
+        width: count === 1 ? '480px' : '640px', 
+        maxWidth: '60vw'
+      }}
+    >
       <div
-        className="w-full h-full grid gap-1.5"
+        className="w-full grid gap-2"
         style={{
           gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
           gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
+          // 如果是单人共享，强制保持 16:9 的标准比例
+          aspectRatio: count === 1 ? '16/9' : 'auto',
+          minHeight: count === 1 ? 'auto' : '300px'
         }}
       >
         {uniqueShares.map(share => (
