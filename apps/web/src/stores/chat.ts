@@ -15,6 +15,14 @@ export interface ChatMessage {
   ts: number;
 }
 
+export interface ChannelInfo {
+  id: string;
+  name: string;
+  kind: string;
+  position: number;
+  is_private: boolean;
+}
+
 export interface DmConversation {
   conv_id: string;
   peer_login_id: string;
@@ -45,6 +53,7 @@ interface ChatState {
   isAuthority: boolean;
   peerStatus: string;
 
+  channelList: ChannelInfo[];
   dmConversations: DmConversation[];
   activeConvId: string | null;
   dmMessages: Record<string, DmMessage[]>;
@@ -62,6 +71,7 @@ interface ChatState {
   setIsAuthority: (val: boolean) => void;
   setPeerStatus: (status: string) => void;
 
+  setChannelList: (list: ChannelInfo[]) => void;
   setDmConversations: (c: DmConversation[]) => void;
   addDmConversation: (c: DmConversation) => void;
   setActiveConv: (id: string | null) => void;
@@ -79,6 +89,7 @@ export const useChatStore = create<ChatState>((set) => ({
   isAuthority: false,
   peerStatus: '',
 
+  channelList: [],
   dmConversations: [],
   activeConvId: null,
   dmMessages: {},
@@ -115,6 +126,7 @@ export const useChatStore = create<ChatState>((set) => ({
   setIsAuthority: (isAuthority) => set({ isAuthority }),
   setPeerStatus: (peerStatus) => set({ peerStatus }),
 
+  setChannelList: (channelList) => set({ channelList }),
   setDmConversations: (dmConversations) => set({ dmConversations }),
   addDmConversation: (c) => set((state) => {
     if (state.dmConversations.some(x => x.conv_id === c.conv_id)) return state;

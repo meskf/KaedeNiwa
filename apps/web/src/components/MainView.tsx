@@ -10,11 +10,10 @@ import { IconHash, IconVolume, IconSun, IconMoon, IconSend, IconSearch, IconUser
 import { DMView } from './DMView'
 import { FriendsView } from './FriendsView'
 
-const CHANNELS = ['general', 'dev', 'random']
-const VOICE_CHANNELS = ['Lounge']
-
 export function MainView({ onLogout }: { onLogout: () => void }) {
   const loginId = useAuthStore(s => s.loginId)
+  const channelList = useChatStore(s => s.channelList)
+  const setChannelList = useChatStore(s => s.setChannelList)
   const {
     currentChannel, setChannel,
     activeView, setActiveView,
@@ -35,6 +34,31 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const currentMessages = messages[currentChannel] || []
   const currentPending = pendingMessages.filter(p => p.channelId === currentChannel)
   const inVoice = media.connected && media.channelId === currentChannel
+
+  useEffect(() => {
+    let cancelled = false
+    const loadChannels = async () => {
+      const client = getClient()
+      if (!client) { setTimeout(loadChannels, 200); return }
+      try {
+        const raw = await client.listChannels()
+        const arr = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (cancelled) return
+        const mapped = (arr || []).map((c: any) => ({
+          id: c.id,
+          name: c.name,
+          kind: c.kind,
+          position: Number(c.position),
+          is_private: !!c.is_private,
+        }))
+        setChannelList(mapped)
+      } catch (e) {
+        console.error('[channels] list:', e)
+      }
+    }
+    loadChannels()
+    return () => { cancelled = true }
+  }, [setChannelList])
 
   useEffect(() => {
     const initChannel = async () => {
@@ -155,6 +179,30 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           } catch (err) { console.error('Parse message failed:', err) }
           return
         }
+        if (ev.DmReceived) {
+          try {
+            const plaintext = ev.DmReceived.plaintext
+            let text = ''
+            if (Array.isArray(plaintext)) text = new TextDecoder().decode(new Uint8Array(plaintext))
+            else if (typeof plaintext === 'string') text = plaintext
+            useChatStore.getState().appendDmMessage(ev.DmReceived.conv_id, {
+              sender: ev.DmReceived.from || 'Unknown',
+              plaintext: text,
+              ts: ev.DmReceived.ts || Date.now(),
+            })
+          } catch (err) { console.error('Parse DM failed:', err) }
+          return
+        }
+        if (ev.FriendsChanged) {
+          const c = getClient()
+          if (c) {
+            c.listFriends().then((raw: any) => {
+              const arr = typeof raw === 'string' ? JSON.parse(raw) : raw
+              useChatStore.getState().setFriends(arr || [])
+            }).catch((e: any) => console.error('[friends] refresh:', e))
+          }
+          return
+        }
         if (ev.AppMessageReceived) {
           if (ev.AppMessageReceived.channel_id !== useChatStore.getState().currentChannel) return
           try {
@@ -251,6 +299,11 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
   const getInitial = (str: string) => str ? str.charAt(0).toUpperCase() : '?'
 
+  const textChannels = channelList.filter(c => c.kind === 'text')
+  const voiceChannels = channelList.filter(c => c.kind === 'voice')
+  const currentChannelInfo = channelList.find(c => c.id === currentChannel)
+  const currentChannelName = currentChannelInfo?.name || currentChannel
+
   return (
     <div className="h-screen w-screen bg-[var(--bg-app)] flex flex-col text-[var(--text-main)] overflow-hidden font-sans">
       
@@ -309,32 +362,38 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               <div className="mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
                 Text Channels
               </div>
-              {CHANNELS.map(ch => (
-                <div
-                  key={ch}
-                  data-testid={`channel-item-${ch}`}
-                  onClick={() => { setChannel(ch); setActiveView('chat'); }}
-                  className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex items-center gap-2.5 transition-colors ${
-                    currentChannel === ch && activeView === 'chat'
-                      ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
-                      : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
-                  }`}
-                >
-                  <IconHash className="w-4 h-4 opacity-50" /> {ch}
-                </div>
-              ))}
+              {textChannels.map(ch => (
+  <div
+    key={ch.id}
+    data-testid={`channel-item-${ch.id}`}
+    onClick={() => { setChannel(ch.id); setActiveView('chat'); }}
+    className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex items-center gap-2.5 transition-colors ${
+      currentChannel === ch.id && activeView === 'chat'
+        ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
+        : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
+    }`}
+  >
+    <IconHash className="w-4 h-4 opacity-50" /> {ch.name}
+  </div>
+))}
 
               <div className="mt-8 mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
                 Voice Channels
               </div>
-              {VOICE_CHANNELS.map(vc => (
-                <div
-                  key={vc}
-                  className="px-3 py-2 rounded-md text-[14px] text-[var(--text-muted)] flex items-center gap-2.5 hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)] cursor-pointer transition-colors"
-                >
-                  <IconVolume className="w-4 h-4 opacity-50" /> {vc}
-                </div>
-              ))}
+              {voiceChannels.map(vc => (
+  <div
+    key={vc.id}
+    data-testid={`channel-item-${vc.id}`}
+    onClick={() => { setChannel(vc.id); setActiveView('chat'); }}
+    className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex items-center gap-2.5 transition-colors ${
+      currentChannel === vc.id && activeView === 'chat'
+        ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
+        : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
+    }`}
+  >
+    <IconVolume className="w-4 h-4 opacity-50" /> {vc.name}
+  </div>
+))}
             </div>
           </aside>
 
@@ -370,7 +429,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                       #{currentChannel}
                     </h1>
                     <p className="text-[13px] text-[var(--text-muted)]">
-                      Welcome to the beginning of the #{currentChannel} channel.
+                      Welcome to the beginning of the #{currentChannelName} channel.
                     </p>
                   </div>
                   <div className="flex items-center gap-3 pb-2">
