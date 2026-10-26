@@ -285,6 +285,19 @@ impl JsClient {
             .map_err(|e| JsValue::from_str(&format!("mark dm read: {}", e)))
     }
 
+    // ============ Channel list wasm 桥 ============
+
+    #[wasm_bindgen(js_name = listChannels)]
+    pub async fn list_channels(&self) -> Result<JsValue, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let channels = room.list_channels().await
+            .map_err(|e| JsValue::from_str(&format!("list channels: {}", e)))?;
+        let json = serde_json::to_string(&channels)
+            .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
+        Ok(JsValue::from_str(&json))
+    }
+
     // ============ Friend wasm 桥 ============
     // 对应的 RoomSession 方法在 room.rs:2399-2414 已实现
 
