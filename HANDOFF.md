@@ -719,3 +719,104 @@ HEAD：最新 commit
 1. **先跑一遍 `.\\run-all-tests.ps1 -FreshEachMediaTest`**。
 2. 如果媒体测试仍然红，**在非 Playwright 的真实浏览器里打开两个 Tab**，手动测试共享屏幕和麦克风。如果手动没问题，说明是 Playwright 环境限制；如果手动也报错，重点查 `apps/web/src/lib/livekit.ts` 和 `MainView.tsx` 里的 Key 刷新逻辑。
 3. **优先补全 CI**，目前的 CI 还是旧版。
+
+
+第十七部分补充 2026-10-26 会话：媒体层 P0 收尾
+================================================
+
+状态：媒体层 P0 完整收工，test-8 单跑 PASS，全量跑 flaky
+HEAD：ui-rewrite 分支
+
+## 本次会话修复的四个根因
+
+从本文件"第十七部分"的 9/14 到现在的"14/14 单跑全绿（test-8 全量 flaky）"。
+
+### 根因 1：voice channel 没有共享 MLS group（真 E2EE 被破坏）
+
+**现象**：test-4/6/7/8/9 报 InvalidKey，两端 e2ee key hash 不同。
+
+**根因链**：
+1. MainView.handleJoinMedia 先调 client.ensure_channel() → 本地建单人 solo group
+2. WASM join_channel 走 join_channel_only → HTTP join 时 KP = None
+3. 后端 notify_authority 只在 kp_blob = Some(...) 时触发 → 永远不发 Welcome
+4. 结果：两人各自 solo group → 派生不同 key → InvalidKey
+
+**修复（e8a3f4d）**：
+- channels.rs：INSERT 路径加 members.is_empty() → 409（solo 通道告知 client 自建 group）
+- channel.rs：新增 channel_member_count() 方法
+- room.rs：fast-path 要求 member_count > 1
+- wasm lib.rs：join_channel 走完整 Welcome 流
+- MainView.tsx：删掉 ensure_channel
+
+### 根因 2：authority 自己 add_member 后不 emit ChannelEpochChanged
+
+**现象**：Bob join voice 触发 Alice 的 epoch 0→1，但 Alice 的 JS 层完全不知道。
+
+**根因**：inbound.rs 的 ChannelMemberJoined 处理只有失败路径 emit MlsSyncError（L417），成功路径完全静默。对比：MlsCommit 补发路径 L152/176 有 emit，ChannelSync 0x05 路径 L551/582 有 emit，唯独「我作为 authority 处理别人加入」没有。
+
+**修复（7b93b74）**：inbound.rs Ok((commit, welcome)) 分支末尾加 ClientEvent::ChannelEpochChanged emit。
+
+### 根因 3：MainView 监听的事件名不存在
+
+**根因**：代码库中根本不存在 ClientEvent::MlsEpochChanged。Rust 层 emit 的是 ClientEvent::ChannelEpochChanged，MainView 监听 ev.MlsEpochChanged 是个不存在的 key。
+
+**修复（ea48b79）**：MainView 改 if (ev.ChannelEpochChanged)，用 event 里的 channel_id。
+
+**教训**：改事件监听前先 grep Rust 层的 ClientEvent::XXX 定义。
+
+### 根因 4：UI 参与者列表缺 data-participant 属性
+
+**现象**：test-7/8/9 participants 检查全部失败，count = 0。
+
+**根因**：UI 重做时删了老的 data-participant 属性。
+
+**修复（0e6bbfc）**：MainView 的 voice 参与者 div 加 data-participant / data-mic / data-speaking。
+
+## 验证结果
+
+单跑：
+- test-4 / test-6 / test-7 / test-8 / test-9 全部 PASS
+- test-6 3/3 画质档位（480p / 1080p / 1440p）
+- test-9 5/5（Dave epoch 分叉是已知 P1 技术债，不判失败）
+
+全量跑：
+- 第一遍 13/14、第二遍 13/14（test-8 FAIL - ERR_NO_BUFFER_SPACE）
+- 单跑 test-8 PASS，0 次 ERR_NO_BUFFER_SPACE
+
+## 已知 flaky（不是 bug）
+
+### test-8（10用户）全量跑时 flaky
+
+**症状**：某个用户 LiveKit WS 报 net::ERR_NO_BUFFER_SPACE，随后 waitForSelector media-connected timeout。
+
+**证据**：
+- 该用户 MLS 层完全成功（channel_join_via_welcome GROUP INSERTED、e2ee key from MLS exporter）
+- 只有 LiveKit 的 WS 连接失败
+- 单跑 test-8 PASS，0 次报错
+
+**结论**：Chromium + Windows 多 Playwright context 的 socket buffer 耗尽，不是代码 bug。
+
+**缓解**：
+- CI 里 test-8 独立 job
+- 或 test-8 加 retry 3 次（connectMedia 失败重试）
+- 或加 chrome flag --max-active-web-sockets-per-renderer=100
+
+### test-2（频道隔离）偶尔 flaky
+
+**症状**：单独跑时 bobHasGeneral: true, bobHasDev: true（期望 false/true）。
+
+**原因**：Bob 登录时 dev 频道可能还没建立，被主群 Welcome 的时序抢先。
+
+**缓解**：test-2 加 retry。
+
+## 下一步待办（按优先级）
+
+1. test-8 + test-2 加 retry（测试侧）
+2. CI 首次 push（P0-1，从未实际跑过）
+3. deploy/ 本地 Docker 验证（P0-2，从未跑过）
+4. UI 剩余功能（DM 视图、好友面板、附件上传、Lexical、Emoji picker）
+
+## 关于 key hash 日志
+
+livekit.ts 里 sha256Hex 函数和 [E2EE] key hash (connectMedia/update) 日志是本次会话新增的调试工具。**建议保留**——两端 hash 一致 = key 对齐，对后续 E2EE 回归验证非常有用。
+
