@@ -195,6 +195,18 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
       emit()
     })
     .on(RoomEvent.TrackSubscribed, (track: RemoteTrack, pub: RemoteTrackPublication, p: RemoteParticipant) => {
+      // 1. 处理所有音频轨道（麦克风、屏幕共享音频等）
+      if (track.kind === 'audio') {
+        const el = track.attach() as HTMLAudioElement
+        el.autoplay = true
+        el.style.display = 'none'
+        document.body.appendChild(el)
+        el.play().catch(e => console.warn('[Audio] 播放失败:', e))
+        console.log(`[Audio] 已挂载并播放 ${p.identity} 的音频轨道 (${pub.source})`)
+        return // 音频处理完就返回，不再走视频逻辑
+      }
+
+      // 2. 处理屏幕共享视频
       if (pub.source === Track.Source.ScreenShare) {
         // 强制订阅最高档，避免默认订阅 mid/low 层导致分辨率减半
         try {
@@ -218,7 +230,11 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
         emit()
       }
     })
-    .on(RoomEvent.TrackUnsubscribed, (_t: RemoteTrack, pub: RemoteTrackPublication, p: RemoteParticipant) => {
+    .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, pub: RemoteTrackPublication, p: RemoteParticipant) => {
+      if (track.kind === 'audio') {
+        track.detach().forEach(el => el.remove())
+        return
+      }
       if (pub.source === Track.Source.ScreenShare) {
         screenShareCache.delete(p.identity)
         emit()
