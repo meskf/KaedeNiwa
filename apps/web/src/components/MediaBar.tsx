@@ -74,16 +74,16 @@ export function MediaBar({ channelId }: Props) {
   return (
     <div className="bg-[#2b2d31] border-b border-[#1f2023] px-4 py-2 shrink-0">
       <div className="flex items-center gap-3 flex-wrap">
-        <div className="flex items-center gap-1">
+        <div data-testid="media-connected" data-channel={channelId} className="flex items-center gap-1">
           <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
           <span className="text-xs text-green-400 font-medium">已连接 #{channelId}</span>
         </div>
         {media.e2eeEnabled ? (
-          <span className="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-300 font-medium" title="AES-256-GCM 端到端加密">
+          <span data-testid="media-e2ee" data-e2ee="true" className="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-300 font-medium" title="AES-256-GCM 端到端加密">
             🔒 E2EE
           </span>
         ) : (
-          <span className="text-xs px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-300" title="未启用端到端加密">
+          <span data-testid="media-e2ee" data-e2ee="false" className="text-xs px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-300" title="未启用端到端加密">
             ⚠️ 明文
           </span>
         )}
@@ -92,6 +92,7 @@ export function MediaBar({ channelId }: Props) {
             <div
               key={p.identity}
               data-participant={p.identity}
+              data-mic={p.isMicrophoneEnabled ? 'on' : 'off'}
               className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs ${
                 p.isSpeaking ? 'bg-green-500/20 text-green-300' : 'bg-[#383a40] text-gray-300'
               }`}
@@ -107,6 +108,8 @@ export function MediaBar({ channelId }: Props) {
 
         {/* 麦克风 */}
         <button
+          data-testid="media-mic-toggle"
+          data-mic={micOn ? 'on' : 'off'}
           onClick={handleToggleMic}
           className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
             micOn ? 'bg-green-500 hover:bg-green-600 text-white' : 'bg-[#404249] hover:bg-[#4e5058] text-gray-200'
@@ -119,6 +122,8 @@ export function MediaBar({ channelId }: Props) {
         {/* 降噪 */}
         {micOn && (
           <button
+            data-testid="media-noise-toggle"
+            data-noise={noiseOn ? 'on' : 'off'}
             onClick={handleToggleNoise}
             className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
               noiseOn ? 'bg-indigo-500 hover:bg-indigo-600 text-white' : 'bg-[#404249] text-gray-200'
@@ -131,6 +136,7 @@ export function MediaBar({ channelId }: Props) {
 
         {/* 画质选择 */}
         <select
+          data-testid="media-quality"
           value={presetId}
           onChange={(e) => setPresetId(e.target.value)}
           className="text-xs px-2 py-1 rounded bg-[#404249] text-gray-200 border border-[#2b2d31]"
@@ -145,6 +151,8 @@ export function MediaBar({ channelId }: Props) {
         </select>
 
         <button
+          data-testid="media-share-toggle"
+          data-sharing={sharing ? 'on' : 'off'}
           onClick={handleToggleShare}
           className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
             sharing ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-indigo-500 hover:bg-indigo-600 text-white'

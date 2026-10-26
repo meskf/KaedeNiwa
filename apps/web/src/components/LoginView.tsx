@@ -77,6 +77,7 @@ export function LoginView() {
               value={loginId} 
               onChange={e => setLoginId(e.target.value)}
               placeholder="例如: admin"
+              data-testid="login-id"
               className="w-full bg-[#1e1f22] border-none outline-none rounded p-2.5 text-sm"
             />
           </div>

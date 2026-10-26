@@ -107,7 +107,7 @@ export function MainView() {
 
         // 调试事件
         const eventDiv = document.createElement('div')
-        eventDiv.className = 'raw-event'
+        eventDiv.setAttribute('data-testid', 'raw-event')
         eventDiv.innerText = 'EVENT: ' + JSON.stringify(ev)
         eventDiv.style.display = 'none'
         document.body.appendChild(eventDiv)
@@ -392,7 +392,7 @@ export function MainView() {
            )}
            {/* P1-pending: 渲染未发送消息 */}
            {pendingMessages.filter(p => p.channelId === currentChannel).map(p => (
-             <div key={p.id} className="flex gap-4 -mx-4 px-4 py-1 opacity-60">
+             <div key={p.id} data-testid="pending-msg" data-status={p.status} className="flex gap-4 -mx-4 px-4 py-1 opacity-60">
                <div className="w-10 h-10 rounded-full bg-gray-500 flex items-center justify-center text-white font-bold shrink-0">
                  {getInitial(loginId || 'Me')}
                </div>
@@ -439,7 +439,7 @@ export function MainView() {
                       <div ref={messagesEndRef} />
         </div>
 
-        <div className="px-4 text-xs text-yellow-400">{peerStatus}</div>
+        <div data-testid="peer-status" className="px-4 text-xs text-yellow-400">{peerStatus}</div>
         <div className="p-4 shrink-0">
           <div className="bg-[#383a40] rounded-lg flex items-center px-4 py-2">
             <input 
