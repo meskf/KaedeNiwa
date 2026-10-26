@@ -1,17 +1,49 @@
 import { useState } from 'react'
+import { useAuthStore } from '../stores/auth'
+import { initWasm, getClient, recordLoginArgs, allowReconnect } from '../wasm/client'
 
 export function LoginView({ onLogin }: { onLogin: () => void }) {
   const [isRegister, setIsRegister] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [serverUrl, setServerUrl] = useState('http://127.0.0.1:18080')
+  const [loginId, setLoginId] = useState('')
+  const [password, setPassword] = useState('')
+  const setAuth = useAuthStore(s => s.setAuth)
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (!loginId || !password) { setError('Please enter account and password'); return }
     setLoading(true)
-    // 纯本地模拟登录成功
-    setTimeout(() => {
-      setLoading(false)
+    setError('')
+    try {
+      const endpoint = isRegister ? '/api/register' : '/api/login'
+      const res = await fetch(serverUrl + endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ login_id: loginId, password })
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || 'Request failed')
+      }
+      const data = await res.json()
+      const token = data.token || data.session_token
+      if (!token) throw new Error('Server did not return a token: ' + JSON.stringify(data))
+      const wsUrl = data.ws_url || serverUrl.replace(/^http/, 'ws') + '/ws'
+      await initWasm()
+      const client = getClient()
+      if (!client) throw new Error('WASM not initialized')
+      await client.login(serverUrl, wsUrl, loginId, token)
+      setAuth({ serverUrl, wsUrl, token, loginId })
+      recordLoginArgs({ serverUrl, wsUrl, loginId, token })
+      allowReconnect()
       onLogin()
-    }, 300)
+    } catch (e: any) {
+      setError(String(e.message || e))
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -25,7 +57,9 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
             <label className="block text-[11px] font-semibold uppercase mb-1.5 tracking-wider text-[var(--text-muted)]">Server Address</label>
             <input
               type="text"
-              defaultValue="http://127.0.0.1:18080"
+              value={serverUrl}
+              onChange={e => setServerUrl(e.target.value)}
+              data-testid="login-server-url"
               className="w-full rounded-lg px-3 py-2.5 text-sm outline-none bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-color)]"
             />
           </div>
@@ -34,6 +68,8 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
             <input
               type="text"
               placeholder="admin"
+              value={loginId}
+              onChange={e => setLoginId(e.target.value)}
               data-testid="login-id"
               className="w-full rounded-lg px-3 py-2.5 text-sm outline-none bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-color)]"
             />
@@ -42,10 +78,13 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
             <label className="block text-[11px] font-semibold uppercase mb-1.5 tracking-wider text-[var(--text-muted)]">Password</label>
             <input
               type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
               data-testid="login-password"
               className="w-full rounded-lg px-3 py-2.5 text-sm outline-none bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-color)]"
             />
           </div>
+          {error && <div className="text-xs text-red-500">{error}</div>}
           <button
             type="submit"
             disabled={loading}
