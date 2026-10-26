@@ -610,7 +610,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           </div>
 
           <div className="ml-auto w-[200px] text-right text-[11px] text-[var(--text-muted)] font-mono">
-            v0.0.1-alpha
+            v0.0.5
           </div>
         </div>
       </footer>

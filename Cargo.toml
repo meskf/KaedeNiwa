@@ -18,11 +18,11 @@ license      = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # internal
-kaede-protocol = { path = "crates/kaede-protocol", version = "0.0.3" }
-kaede-crypto   = { path = "crates/kaede-crypto", version = "0.0.3" }
-kaede-mls      = { path = "crates/kaede-mls", version = "0.0.3" }
-kaede-storage  = { path = "crates/kaede-storage", version = "0.0.3" }
-kaede-client   = { path = "crates/kaede-client", version = "0.0.3" }
+kaede-protocol = { path = "crates/kaede-protocol", version = "0.0.5" }
+kaede-crypto   = { path = "crates/kaede-crypto", version = "0.0.5" }
+kaede-mls      = { path = "crates/kaede-mls", version = "0.0.5" }
+kaede-storage  = { path = "crates/kaede-storage", version = "0.0.5" }
+kaede-client   = { path = "crates/kaede-client", version = "0.0.5" }
 
 # serialization
 serde    = { version = "1", features = ["derive"] }
