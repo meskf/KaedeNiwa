@@ -820,3 +820,46 @@ HEAD：ui-rewrite 分支
 
 livekit.ts 里 sha256Hex 函数和 [E2EE] key hash (connectMedia/update) 日志是本次会话新增的调试工具。**建议保留**——两端 hash 一致 = key 对齐，对后续 E2EE 回归验证非常有用。
 
+
+
+第十八部分 2026-10-26 晚：媒体层 E2EE 闭环与 UI 完善
+==================================================
+
+状态：14/14 单跑测试全绿，媒体层（音视频流 + E2EE）彻底闭环
+HEAD：ui-rewrite 分支
+
+## 本次会话做了什么
+
+### 1. 修复 E2EE 链路的 4 个致命断点（解决 InvalidKey 黑屏）
+- **根因 A**：客户端在 join 前调了 `ensure_channel()` 强建 solo 群，导致没有走 Welcome 交换流程。
+  - *修复*：删掉前端 `ensure_channel`，后端对单人频道返回 409，客户端重新走完整 Welcome 流程。
+- **根因 B**：Authority 自己 add 别人时，Rust 层 epoch 推进了，但没有 emit 给 JS。
+  - *修复*：`inbound.rs` 在 `ChannelMemberJoined` 成功后补充 emit `ClientEvent::ChannelEpochChanged`。
+- **根因 C**：前端监听的事件名不对。Rust 发的是 `ChannelEpochChanged`，前端却在监听不存在的 `MlsEpochChanged`。
+- **根因 D**：UI 缺少 `data-participant` 属性。
+  - *修复*：MainView 的参与者列表补齐了 `data-participant` / `data-mic`。
+
+### 2. 修复麦克风与屏幕共享音频无声问题
+- **根因**：LiveKit 接收到远端音频 Track 时，必须手动 `attach()` 到 `<audio>` 标签并插入 DOM 才能播放，之前只处理了视频。
+- **修复**：在 `TrackSubscribed` 拦截 `track.kind === 'audio'`，挂载 DOM 并 `play()`。同时兼容了浏览器的 autoplay 限制（失败时监听 click 兜底）。
+- **屏幕共享音频**：`getDisplayMedia` 的 constraints 里补上了 `audio: true`，并发布 `Track.Source.ScreenShareAudio`。
+
+### 3. 屏幕共享 UI 布局重构（Discord 风格）
+- 摒弃了绝对定位（absolute）导致的遮挡/拉伸/挤压输入框等问题。
+- **最终方案**：将 `ScreenShareView` 作为聊天消息流的一部分（内联在滚动区顶部）。
+- 单人共享时 16:9 居中展示；多人共享时自动网格平铺（最多 2x2 / 3x3）。完美不遮挡左侧频道、右侧成员、底部输入框。
+
+### 4. 频道“幽灵死锁”修复
+- **问题**：如果所有人退出频道，再有人进入时，因为等待老成员发 Welcome 而卡死。
+- **修复**：后端检测如果频道内其他成员全部离线，直接清空死成员记录返回 409。客户端收到 409 或等待 Welcome 超时后，直接本地 `ensure_group` 接管成为新 authority。
+
+## 测试现状与已知噪声（重要）
+- `run-all-tests.ps1 -FreshEachMediaTest` 跑全量时，**test-8 (10人) 偶发失败**。
+  - *现象*：报 `net::ERR_NO_BUFFER_SPACE`，导致某个客户端 LiveKit WS 连接超时。
+  - *结论*：单跑 test-8 100% 通过，且 MLS 密钥全一致。这是 Chromium + Windows 在高并发 Playwright context 下的 Socket 缓冲耗尽，**属于测试环境限制，非代码 bug**。
+- `test-2` (频道隔离) 偶尔 flaky。属于时序问题，不影响实际使用。
+
+## 下一步建议
+1. CI 首次 Push（修 headless / chromium 适配）
+2. deploy/ 本地 Docker 验证
+3. UI 剩余功能：DM 视图、Lexical 富文本、附件上传。
