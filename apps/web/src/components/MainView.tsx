@@ -13,6 +13,8 @@ import { FriendsView } from './FriendsView'
 export function MainView({ onLogout }: { onLogout: () => void }) {
   const loginId = useAuthStore(s => s.loginId)
   const channelList = useChatStore(s => s.channelList)
+  const serverMembers = useChatStore(s => s.serverMembers)
+  const setServerMembers = useChatStore(s => s.setServerMembers)
   const setChannelList = useChatStore(s => s.setChannelList)
   const {
     currentChannel, setChannel,
@@ -22,7 +24,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     peerStatus,
   } = useChatStore()
   const [input, setInput] = useState('')
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark')
+  const [theme, setTheme] = useState<'dark' | 'light'>('light')
   const [showMembers, setShowMembers] = useState(true)
   const addMemberQueueRef = useRef<Promise<void>>(Promise.resolve())
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -104,6 +106,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
         if (ev.Joined) {
           const peers = ev.Joined.peers || []
+          setServerMembers([loginId, ...peers])
           if (peers.length === 0) {
             try {
               const created = client.ensure_channel(ch)
@@ -121,6 +124,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         }
         if (ev.PeerJoined) {
           const uid = ev.PeerJoined.uid
+          setServerMembers(Array.from(new Set([...useChatStore.getState().serverMembers, uid])))
           if (!useChatStore.getState().isAuthority) return
           useChatStore.getState().setPeerStatus(`Adding ${uid}...`)
           addMemberQueueRef.current = addMemberQueueRef.current.then(async () => {
@@ -138,9 +142,20 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           const payload = new Uint8Array(ev.ChannelSync.payload)
           const firstByte = payload.length > 0 ? payload[0] : -1
           console.log(`[ChannelSync] ch=${channelId} epoch=${ev.ChannelSync.epoch} len=${payload.length} first=0x${firstByte.toString(16).padStart(2,'0')}`)
-          client.process_channel_sync(channelId, payload).then(() => {
+          client.process_channel_sync(channelId, payload).then(async () => {
             useChatStore.getState().setPeerStatus('Synced')
             console.log(`[ChannelSync] ch=${channelId} OK`)
+            const m = mediaRef.current
+            if (m.connected && m.channelId === channelId) {
+              try {
+                const c = getClient()
+                if (!c) return
+                const tokenJson = await c.begin_media_session(channelId)
+                const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
+                if (tokenData.e2ee_seed) await updateE2EEKey(tokenData.e2ee_seed)
+                console.log(`[E2EE] Key rotated for ${channelId} after ChannelSync`)
+              } catch (e) { console.error('E2EE key rotate failed:', e) }
+            }
           }).catch((e: any) => {
             console.error(`[ChannelSync] ch=${channelId} FAILED:`, String(e))
             useChatStore.getState().setPeerStatus(`Sync failed: ${e}`)
@@ -254,6 +269,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     if (!client) return
     try {
       useChatStore.getState().setPeerStatus('Joining voice...')
+      const created = client.ensure_channel(currentChannel)
+      if (created) {
+        useChatStore.getState().setIsAuthority(true)
+      }
+      await client.join_channel(currentChannel)
+      await new Promise(r => setTimeout(r, 1000))
       const tokenJson = await client.begin_media_session(currentChannel)
       const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
       await connectMedia({
@@ -303,6 +324,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const voiceChannels = channelList.filter(c => c.kind === 'voice')
   const currentChannelInfo = channelList.find(c => c.id === currentChannel)
   const currentChannelName = currentChannelInfo?.name || currentChannel
+  const isVoiceChannel = currentChannelInfo ? currentChannelInfo.kind === 'voice' : false
 
   return (
     <div className="h-screen w-screen bg-[var(--bg-app)] flex flex-col text-[var(--text-main)] overflow-hidden font-sans">
@@ -381,38 +403,54 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 Voice Channels
               </div>
               {voiceChannels.map(vc => (
-  <div
-    key={vc.id}
-    data-testid={`channel-item-${vc.id}`}
-    onClick={() => { setChannel(vc.id); setActiveView('chat'); }}
-    className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex items-center gap-2.5 transition-colors ${
-      currentChannel === vc.id && activeView === 'chat'
-        ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
-        : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
-    }`}
-  >
-    <IconVolume className="w-4 h-4 opacity-50" /> {vc.name}
-  </div>
-))}
+                <div
+                  key={vc.id}
+                  data-testid={`channel-item-${vc.id}`}
+                  onClick={() => { setChannel(vc.id); setActiveView('chat'); }}
+                  className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex flex-col gap-2 transition-colors ${
+                    currentChannel === vc.id && activeView === 'chat'
+                      ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
+                      : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <IconVolume className="w-4 h-4 opacity-50" /> {vc.name}
+                  </div>
+                  {inVoice && currentChannel === vc.id && (
+                    <div className="pl-6 flex flex-col gap-1 mt-1">
+                      {Object.values(media.participants || {}).map((p: any) => (
+                        <div key={p.identity} className="flex items-center gap-2">
+                          <div className="w-5 h-5 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[10px] font-bold text-[var(--text-main)]">
+                            {getInitial(p.identity)}
+                          </div>
+                          <span className="text-[12px] text-[var(--text-main)]">{p.identity}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           </aside>
 
           {/* 右侧成员列表 */}
           {showMembers && activeView === 'chat' && (
             <aside className="absolute right-0 top-0 bottom-0 w-[200px] flex flex-col z-10 hidden md:flex">
-              <div className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-4 mt-[52px]">
+              <div className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-4 mt-0">
                 Members
               </div>
               <div className="flex flex-col gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="relative">
-                    <div className="w-7 h-7 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[11px] font-bold text-[var(--text-main)]">
-                      {getInitial(loginId)}
+                {(serverMembers.length > 0 ? serverMembers : [loginId]).map(uid => (
+                  <div key={uid} className="flex items-center gap-3">
+                    <div className="relative">
+                      <div className="w-7 h-7 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[11px] font-bold text-[var(--text-main)]">
+                        {getInitial(uid)}
+                      </div>
+                      <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 border-2 border-[var(--bg-app)] rounded-full"></div>
                     </div>
-                    <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 border-2 border-[var(--bg-app)] rounded-full"></div>
+                    <span className="text-[13px] font-medium text-[var(--text-main)]">{uid}</span>
                   </div>
-                  <span className="text-[13px] font-medium text-[var(--text-main)]">{loginId}</span>
-                </div>
+                ))}
               </div>
             </aside>
           )}
@@ -421,19 +459,19 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           <main className="flex-1 flex flex-col min-w-0 px-[220px]">
             {activeView === 'chat' ? (
               <div className="flex-1 flex flex-col w-full max-w-[900px] mx-auto min-h-0">
-                
+
                 {/* 超大标题区 */}
                 <div className="shrink-0 flex items-end justify-between mb-8 mt-0 w-full">
                   <div>
                     <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight mb-3 text-[var(--text-main)]">
-                      #{currentChannel}
+                      #{currentChannelName}
                     </h1>
                     <p className="text-[13px] text-[var(--text-muted)]">
                       Welcome to the beginning of the #{currentChannelName} channel.
                     </p>
                   </div>
                   <div className="flex items-center gap-3 pb-2">
-                    {inVoice ? (
+                    {isVoiceChannel && (inVoice ? (
                       <button
                         data-testid="media-leave"
                         onClick={handleLeaveMedia}
@@ -449,12 +487,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                       >
                         Join Voice
                       </button>
-                    )}
+                    ))}
                   </div>
                 </div>
 
-                <MediaBar channelId={currentChannel} />
-                <ScreenShareView />
+                {inVoice && <MediaBar channelId={currentChannel} />}
+                {inVoice && <ScreenShareView />}
 
                 {/* 消息列表 */}
                 <div className="flex-1 overflow-y-auto overflow-x-hidden mb-2 pr-2 w-full">
@@ -496,23 +534,20 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 </div>
 
                 <div data-testid="peer-status" className="text-[11px] text-[var(--text-muted)] h-5 w-full mt-2">{peerStatus}</div>
-                
-                {/* 输入框 */}
-                <div className="pb-2 shrink-0 w-full">
-                  <form onSubmit={handleSend} className="w-full flex items-center gap-3 rounded-md px-4 py-3 bg-[var(--bg-hover)]">
-                    <input
-                      type="text"
-                      value={input}
-                      onChange={e => setInput(e.target.value)}
-                      placeholder={`Message #${currentChannel}`}
-                      data-testid="message-input"
-                      className="bg-transparent outline-none flex-1 text-[14px] placeholder-[var(--text-muted)] text-[var(--text-main)]"
-                    />
-                    <button type="submit" className="text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors" title="Send">
-                      <IconSend className="w-4 h-4" />
-                    </button>
-                  </form>
-                </div>
+
+                <form onSubmit={handleSend} className="w-full flex items-center gap-2 bg-[var(--bg-hover)] rounded-md px-4 py-3 shrink-0 mb-2">
+                  <input
+                    data-testid="message-input"
+                    type="text"
+                    value={input}
+                    onChange={e => setInput(e.target.value)}
+                    placeholder={`Message #${currentChannelName}`}
+                    className="flex-1 bg-transparent outline-none text-[14px] placeholder-[var(--text-muted)] text-[var(--text-main)]"
+                  />
+                  <button type="submit" className="text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors p-1" title="Send">
+                    <IconSend className="w-4 h-4" />
+                  </button>
+                </form>
               </div>
             ) : activeView === 'dms' ? (
               <div className="flex-1 py-4">

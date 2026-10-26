@@ -88,23 +88,6 @@ export function MediaBar({ channelId }: Props) {
             <IconShield className="w-3 h-3 inline mr-1 opacity-50" /> PLAIN
           </span>
         )}
-        <div className="flex items-center gap-2">
-          {media.participants.map((p) => (
-            <div
-              key={p.identity}
-              data-participant={p.identity}
-              data-mic={p.isMicrophoneEnabled ? 'on' : 'off'}
-              className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs ${
-                p.isSpeaking ? 'bg-[var(--bg-active)] text-[var(--text-primary)]' : 'bg-[#383a40] text-gray-300'
-              }`}
-              title={p.identity + (p.isLocal ? ' (你)' : '')}
-            >
-              <span>{p.identity[0].toUpperCase()}</span>
-              <span className="truncate max-w-[80px]">{p.identity}</span>
-              {p.isMicrophoneEnabled && <IconMic className='w-3 h-3 ml-1' />}
-            </div>
-          ))}
-        </div>
         <div className="flex-1" />
 
         {/* 麦克风 */}

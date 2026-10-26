@@ -58,6 +58,7 @@ interface ChatState {
   activeConvId: string | null;
   dmMessages: Record<string, DmMessage[]>;
   friends: FriendEntry[];
+  serverMembers: string[];
 
   setChannels: (chs: string[]) => void;
   setChannel: (ch: string) => void;
@@ -78,6 +79,7 @@ interface ChatState {
   setDmMessages: (convId: string, msgs: DmMessage[]) => void;
   appendDmMessage: (convId: string, msg: DmMessage) => void;
   setFriends: (f: FriendEntry[]) => void;
+  setServerMembers: (m: string[]) => void;
 }
 
 export const useChatStore = create<ChatState>((set) => ({
@@ -94,6 +96,7 @@ export const useChatStore = create<ChatState>((set) => ({
   activeConvId: null,
   dmMessages: {},
   friends: [],
+  serverMembers: [],
 
   setChannels: (channels) => set({ channels }),
   setChannel: (currentChannel) => set({ currentChannel }),
@@ -143,4 +146,5 @@ export const useChatStore = create<ChatState>((set) => ({
     }
   })),
   setFriends: (friends) => set({ friends }),
+  setServerMembers: (serverMembers) => set({ serverMembers }),
 }));

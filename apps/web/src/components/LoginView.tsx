@@ -84,7 +84,7 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
               type="text"
               value={loginId}
               onChange={e => setLoginId(e.target.value)}
-              placeholder="e.g. admin"
+              data-testid="login-id" placeholder="e.g. admin"
               className="w-full bg-[var(--bg-hover)] rounded-lg px-3 py-2.5 text-[14px] outline-none text-[var(--text-main)] placeholder-[var(--text-muted)] focus:ring-1 focus:ring-[var(--bg-active)] transition-all"
             />
           </div>
@@ -94,7 +94,7 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
               type="password"
               value={password}
               onChange={e => setPassword(e.target.value)}
-              placeholder="••••••••"
+              data-testid="login-password" placeholder="••••••••"
               className="w-full bg-[var(--bg-hover)] rounded-lg px-3 py-2.5 text-[14px] outline-none text-[var(--text-main)] placeholder-[var(--text-muted)] focus:ring-1 focus:ring-[var(--bg-active)] transition-all"
             />
           </div>
@@ -106,7 +106,7 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
           )}
 
           <button
-            type="submit"
+            type="submit" data-testid="login-submit"
             disabled={loading}
             className="w-full mt-2 py-2.5 rounded-lg bg-[var(--text-main)] text-[var(--bg-app)] text-[14px] font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
           >
@@ -115,7 +115,7 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
         </form>
 
         <div className="mt-8 text-center">
-          <button
+          <button data-testid="login-toggle-register"
             type="button"
             onClick={() => { setIsRegister(!isRegister); setError(''); }}
             className="text-[13px] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors"
