@@ -117,28 +117,10 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         }
         if (ev.ChannelMemberJoined) {
           const { channel_id, requester } = ev.ChannelMemberJoined
-          const st = useChatStore.getState()
-          console.log(`[CMJ] ENTER ch=${channel_id} req=${requester} isAuth=${st.isAuthority} curCh=${st.currentChannel}`)
-          if (channel_id !== st.currentChannel) { console.log('[CMJ] SKIP: not current channel'); return }
-          if (!st.isAuthority) { console.log('[CMJ] SKIP: not authority'); return }
-          console.log('[CMJ] calling add_member_to_channel...')
-          client.add_member_to_channel(useChatStore.getState().currentChannel, requester).then(async () => {
-            console.log('[CMJ] add_member_to_channel OK')
+          if (channel_id !== useChatStore.getState().currentChannel) return
+          if (!useChatStore.getState().isAuthority) return
+          client.add_member_to_channel(useChatStore.getState().currentChannel, requester).then(() => {
             useChatStore.getState().setPeerStatus(`Added ${requester}`)
-            // ★ epoch 已推进，必须刷新 E2EE key（否则本端 keyProvider 还是旧 epoch 的 key）
-            try {
-              const m = mediaRef.current
-              const c = getClient()
-              console.log(`[CMJ] rotation check: hasClient=${!!c} connected=${m.connected} mediaCh=${m.channelId} target=${channel_id}`)
-              if (c && m.connected && m.channelId === channel_id) {
-                const tokenJson = await c.begin_media_session(channel_id)
-                const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
-                if (tokenData.e2ee_seed) {
-                  await updateE2EEKey(tokenData.e2ee_seed)
-                  console.log(`[E2EE] Key rotated for ${channel_id} after add_member`)
-                }
-              }
-            } catch (e) { console.error('E2EE key rotate after add failed:', e) }
           }).catch((e: any) => useChatStore.getState().setPeerStatus(`Add failed: ${e}`))
         }
         if (ev.PeerJoined) {
@@ -150,19 +132,6 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             try {
               await client.add_member_to_channel(useChatStore.getState().currentChannel, uid)
               useChatStore.getState().setPeerStatus(`Added ${uid}`)
-              // ★ 同 ChannelMemberJoined：epoch 变了要刷新 key
-              try {
-                const m = mediaRef.current
-                const curCh = useChatStore.getState().currentChannel
-                if (m.connected && m.channelId === curCh) {
-                  const tokenJson = await client.begin_media_session(curCh)
-                  const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
-                  if (tokenData.e2ee_seed) {
-                    await updateE2EEKey(tokenData.e2ee_seed)
-                    console.log(`[E2EE] Key rotated for ${curCh} after PeerJoined add`)
-                  }
-                }
-              } catch (e) { console.error('E2EE key rotate after peer add failed:', e) }
               await new Promise<void>(r => setTimeout(r, 150))
             } catch (e) {
               useChatStore.getState().setPeerStatus(`Add failed: ${e}`)
@@ -196,19 +165,26 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         if (ev.MlsCommit) {
           console.log(`[MlsCommit] ch=${ev.MlsCommit.channel_id} epoch=${ev.MlsCommit.epoch} len=${ev.MlsCommit.payload?.length}`)
         }
-        if (ev.MlsEpochChanged) {
+        if (ev.ChannelEpochChanged) {
+          const chId = ev.ChannelEpochChanged.channel_id
+          const newEpoch = ev.ChannelEpochChanged.epoch
+          console.log(`[EpochChanged] ch=${chId} epoch=${newEpoch}`)
           const m = mediaRef.current
-          const curCh = useChatStore.getState().currentChannel
-          if (m.connected && m.channelId === curCh) {
+          if (m.connected && m.channelId === chId) {
             (async () => {
               try {
                 const c = getClient()
                 if (!c) return
-                const tokenJson = await c.begin_media_session(curCh)
+                const tokenJson = await c.begin_media_session(chId)
                 const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
-                if (tokenData.e2ee_seed) await updateE2EEKey(tokenData.e2ee_seed)
+                if (tokenData.e2ee_seed) {
+                  await updateE2EEKey(tokenData.e2ee_seed)
+                  console.log(`[E2EE] Key rotated for ${chId} after epoch=${newEpoch}`)
+                }
               } catch (e) { console.error('E2EE key rotate failed:', e) }
             })()
+          } else {
+            console.log(`[EpochChanged] skip rotate: media connected=${m.connected} mediaCh=${m.channelId}`)
           }
         }
         if (ev.ChannelMessage) {
