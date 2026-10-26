@@ -222,7 +222,7 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
         el.playsInline = true
         el.muted = true
         el.play().catch(() => {})
-        screenShareCache.set(p.identity, {
+        screenShareCache.set(track.sid || p.identity, {
           participantIdentity: p.identity,
           trackSid: track.sid || '',
           element: el,
@@ -236,7 +236,7 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
         return
       }
       if (pub.source === Track.Source.ScreenShare) {
-        screenShareCache.delete(p.identity)
+        screenShareCache.delete(track.sid || p.identity)
         emit()
       }
     })
@@ -275,8 +275,11 @@ export async function disconnectMedia() {
 /**
  * 开启屏幕共享（simulcast + 用户选定档位）。
  */
+let isStartingShare = false
 export async function startScreenShare(presetId: string): Promise<boolean> {
   if (!currentRoom) throw new Error('未加入媒体房间')
+  if (isStartingShare) return false
+  isStartingShare = true
   const preset = findPreset(presetId)
   currentPresetId = presetId
   
@@ -310,8 +313,10 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
     
     console.log(`[ScreenShare] 已启动: ${preset.label} (${preset.bitrate/1e6} Mbps)`)
     emit()
+    setTimeout(() => { isStartingShare = false }, 1000)
     return true
   } catch (e: any) {
+    setTimeout(() => { isStartingShare = false }, 1000)
     console.error('屏幕共享启动失败:', e)
     // 若 getDisplayMedia 被用户取消或浏览器不支持 4K，降级重试
     if (preset.width > 1920) {
