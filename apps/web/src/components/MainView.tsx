@@ -502,7 +502,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 </div>
 
                 {inVoice && <MediaBar channelId={currentChannel} />}
-                {inVoice && }
+                
 
                 {/* 消息列表 */}
                 {media.screenShares.length > 0 && (
@@ -511,7 +511,19 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           </div>
         )}
         <div className="flex-1 overflow-y-auto overflow-x-hidden mb-2 pr-2 w-full">
-                  <div className="flex flex-col gap-4 w-full">
+                  {media.screenShares.length > 0 && (
+              <div className="flex-1 min-h-0 w-full flex bg-[#1e1f22]">
+                <ScreenShareView />
+              </div>
+            )}
+            
+            {media.screenShares.length > 0 && (
+              <div className="flex-1 min-h-0 w-full flex bg-[#1e1f22]">
+                <ScreenShareView />
+              </div>
+            )}
+            
+            <div className={`${media.screenShares.length > 0 ? 'h-[30%] shrink-0' : 'flex-1'} overflow-y-auto`}>
                     {currentMessages.map((msg, idx) => (
                       <div key={(msg as any).id || `${msg.ts}-${msg.sender}-${idx}`} className="group flex gap-3 hover:bg-[var(--bg-hover)] -mx-3 px-3 py-2 rounded-md transition-colors">
                         <div className="w-9 h-9 rounded-full flex items-center justify-center text-[13px] font-medium shrink-0 bg-[var(--bg-active)] text-[var(--text-main)] mt-0.5">
