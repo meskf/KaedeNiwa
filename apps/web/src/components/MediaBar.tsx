@@ -10,6 +10,7 @@ import {
 } from '../lib/livekit'
 import { VIDEO_PRESETS } from '../lib/videoPresets'
 import { getClient } from '../wasm/client'
+import { IconMic, IconMicOff, IconMonitor, IconShield } from './icons'
 
 interface Props {
   channelId: string
@@ -72,19 +73,19 @@ export function MediaBar({ channelId }: Props) {
   }
 
   return (
-    <div className="bg-[#2b2d31] border-b border-[#1f2023] px-4 py-2 shrink-0">
+    <div className="bg-[var(--bg-surface)] px-4 py-2 shrink-0">
       <div className="flex items-center gap-3 flex-wrap">
         <div data-testid="media-connected" data-channel={channelId} className="flex items-center gap-1">
-          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-          <span className="text-xs text-green-400 font-medium">已连接 #{channelId}</span>
+          <span className="w-2 h-2 rounded-full bg-[var(--text-primary)] animate-pulse" />
+          <span className="text-xs text-[var(--text-primary)] font-medium">已连接 #{channelId}</span>
         </div>
         {media.e2eeEnabled ? (
-          <span data-testid="media-e2ee" data-e2ee="true" className="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-300 font-medium" title="AES-256-GCM 端到端加密">
-            🔒 E2EE
+          <span data-testid="media-e2ee" data-e2ee="true" className="text-xs px-2 py-0.5 rounded bg-[var(--bg-active)] text-[var(--text-primary)] font-medium" title="AES-256-GCM 端到端加密">
+            <IconShield className="w-3 h-3 inline mr-1" /> E2EE
           </span>
         ) : (
-          <span data-testid="media-e2ee" data-e2ee="false" className="text-xs px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-300" title="未启用端到端加密">
-            ⚠️ 明文
+          <span data-testid="media-e2ee" data-e2ee="false" className="text-xs px-2 py-0.5 rounded bg-[var(--bg-active)] text-[var(--text-secondary)]" title="未启用端到端加密">
+            <IconShield className="w-3 h-3 inline mr-1 opacity-50" /> PLAIN
           </span>
         )}
         <div className="flex items-center gap-2">
@@ -94,13 +95,13 @@ export function MediaBar({ channelId }: Props) {
               data-participant={p.identity}
               data-mic={p.isMicrophoneEnabled ? 'on' : 'off'}
               className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs ${
-                p.isSpeaking ? 'bg-green-500/20 text-green-300' : 'bg-[#383a40] text-gray-300'
+                p.isSpeaking ? 'bg-[var(--bg-active)] text-[var(--text-primary)]' : 'bg-[#383a40] text-gray-300'
               }`}
               title={p.identity + (p.isLocal ? ' (你)' : '')}
             >
               <span>{p.identity[0].toUpperCase()}</span>
               <span className="truncate max-w-[80px]">{p.identity}</span>
-              {p.isMicrophoneEnabled && <span>🎤</span>}
+              {p.isMicrophoneEnabled && <IconMic className='w-3 h-3 ml-1' />}
             </div>
           ))}
         </div>
@@ -112,11 +113,11 @@ export function MediaBar({ channelId }: Props) {
           data-mic={micOn ? 'on' : 'off'}
           onClick={handleToggleMic}
           className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-            micOn ? 'bg-green-500 hover:bg-green-600 text-white' : 'bg-[#404249] hover:bg-[#4e5058] text-gray-200'
+            micOn ? 'bg-[var(--text-primary)] text-[var(--bg-base)]' : 'bg-[var(--bg-active)] hover:bg-[#3f3f46] text-[var(--text-secondary)]'
           }`}
           title={micOn ? '关闭麦克风' : '开启麦克风'}
         >
-          {micOn ? '🎤 开' : '🎤 关'}
+          {micOn ? <IconMic className='w-4 h-4 mx-auto'/> : <IconMicOff className='w-4 h-4 mx-auto'/>}
         </button>
 
         {/* 降噪 */}
@@ -126,11 +127,11 @@ export function MediaBar({ channelId }: Props) {
             data-noise={noiseOn ? 'on' : 'off'}
             onClick={handleToggleNoise}
             className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-              noiseOn ? 'bg-indigo-500 hover:bg-indigo-600 text-white' : 'bg-[#404249] text-gray-200'
+              noiseOn ? 'bg-[var(--text-primary)] text-[var(--bg-base)]' : 'bg-[var(--bg-active)] text-[var(--text-secondary)]'
             }`}
             title="RNNoise 降噪"
           >
-            {noiseOn ? '🔇 降噪' : '降噪关'}
+            {noiseOn ? 'NS ON' : 'NS OFF'}
           </button>
         )}
 
@@ -139,7 +140,7 @@ export function MediaBar({ channelId }: Props) {
           data-testid="media-quality"
           value={presetId}
           onChange={(e) => setPresetId(e.target.value)}
-          className="text-xs px-2 py-1 rounded bg-[#404249] text-gray-200 border border-[#2b2d31]"
+          className="text-xs px-2 py-1 rounded bg-[var(--bg-active)] text-[var(--text-secondary)] border border-[#2b2d31]"
           disabled={sharing}
           title="屏幕共享画质（修改后需重新点击共享）"
         >
@@ -155,16 +156,16 @@ export function MediaBar({ channelId }: Props) {
           data-sharing={sharing ? 'on' : 'off'}
           onClick={handleToggleShare}
           className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-            sharing ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-indigo-500 hover:bg-indigo-600 text-white'
+            sharing ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-[var(--text-primary)] text-[var(--bg-base)]'
           }`}
         >
-          {sharing ? '停止共享' : '共享屏幕'}
+          {sharing ? 'Stop Share' : <><IconMonitor className='w-3 h-3 inline mr-1'/> Share</>}
         </button>
         <button
           onClick={handleLeave}
-          className="px-3 py-1 rounded text-xs font-medium bg-[#404249] hover:bg-red-600 text-gray-200 transition-colors"
+          className="px-3 py-1 rounded text-xs font-medium bg-[var(--bg-active)] hover:bg-red-500 hover:text-white text-[var(--text-secondary)] transition-colors"
         >
-          离开
+          Leave
         </button>
       </div>
       {error && <div className="mt-1 text-xs text-red-400">{error}</div>}

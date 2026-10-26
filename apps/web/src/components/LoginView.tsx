@@ -84,12 +84,12 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
               className="w-full rounded-lg px-3 py-2.5 text-sm outline-none bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-color)]"
             />
           </div>
-          {error && <div className="text-xs text-red-500">{error}</div>}
+          {error && <div className="text-xs text-red-400">{error}</div>}
           <button
             type="submit"
             disabled={loading}
             data-testid="login-submit"
-            className="w-full mt-2 py-2.5 rounded-lg font-bold text-white transition-colors disabled:opacity-50 bg-[#5865f2] hover:bg-[#4752c4]"
+            className="w-full mt-2 py-2.5 rounded-lg font-bold text-white transition-colors disabled:opacity-50 bg-[var(--text-primary)] text-[var(--bg-base)] hover:opacity-90"
           >
             {loading ? 'Processing...' : (isRegister ? 'Register' : 'Login')}
           </button>
