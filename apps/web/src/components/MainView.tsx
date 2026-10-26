@@ -481,7 +481,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                     </p>
                   </div>
                   <div className="relative flex items-center gap-3 pb-2">
-        <ScreenShareView />
+        
         
                     {isVoiceChannel && (inVoice ? (
                       <button
@@ -510,6 +510,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 
         <div className="flex-1 overflow-y-auto overflow-x-hidden mb-2 pr-2 w-full">
                   
+        <ScreenShareView />
+        
             
             
             
