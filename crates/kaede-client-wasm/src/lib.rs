@@ -284,4 +284,42 @@ impl JsClient {
         room.mark_dm_read(&conv_id, ts).await
             .map_err(|e| JsValue::from_str(&format!("mark dm read: {}", e)))
     }
+
+    // ============ Friend wasm 桥 ============
+    // 对应的 RoomSession 方法在 room.rs:2399-2414 已实现
+
+    #[wasm_bindgen(js_name = listFriends)]
+    pub async fn list_friends(&self) -> Result<JsValue, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let friends = room.list_friends().await
+            .map_err(|e| JsValue::from_str(&format!("list friends: {}", e)))?;
+        let json = serde_json::to_string(&friends)
+            .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
+        Ok(JsValue::from_str(&json))
+    }
+
+    #[wasm_bindgen(js_name = sendFriendRequest)]
+    pub async fn send_friend_request(&self, login_id: String) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.send_friend_request(&login_id).await
+            .map_err(|e| JsValue::from_str(&format!("send friend request: {}", e)))
+    }
+
+    #[wasm_bindgen(js_name = acceptFriend)]
+    pub async fn accept_friend(&self, from_login_id: String) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.accept_friend(&from_login_id).await
+            .map_err(|e| JsValue::from_str(&format!("accept friend: {}", e)))
+    }
+
+    #[wasm_bindgen(js_name = removeFriend)]
+    pub async fn remove_friend(&self, login_id: String) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.remove_friend(&login_id).await
+            .map_err(|e| JsValue::from_str(&format!("remove friend: {}", e)))
+    }
 }
