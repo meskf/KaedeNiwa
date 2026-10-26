@@ -133,6 +133,11 @@ function base64ToUint8(s: string): Uint8Array {
   return bytes
 }
 
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const h = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16)
+}
+
 export async function connectMedia(opts: ConnectOptions): Promise<Room> {
   const { wsUrl, token, channelId, e2eeKeyB64 } = opts
 
@@ -150,6 +155,7 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
       await keyProvider.setKey(keyBytes.buffer as ArrayBuffer)
       e2eeEnabled = true
       console.log('[E2EE] AES-256 key 已注入')
+      console.log('[E2EE] key hash (connectMedia):', await sha256Hex(keyBytes))
     } catch (e) {
       console.error('[E2EE] key 注入失败:', e)
     }
@@ -370,6 +376,7 @@ export async function updateE2EEKey(newKeyB64: string): Promise<void> {
     const keyProvider = e2eeManager.keyProvider
     if (keyProvider?.setKey) {
       await keyProvider.setKey(keyBytes.buffer as ArrayBuffer)
+      console.log('[E2EE] key hash (update):', await sha256Hex(keyBytes))
       console.log('[E2EE] key 已轮换')
       emit()
     }
