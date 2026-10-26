@@ -269,12 +269,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     if (!client) return
     try {
       useChatStore.getState().setPeerStatus('Joining voice...')
-      const created = client.ensure_channel(currentChannel)
-      if (created) {
-        useChatStore.getState().setIsAuthority(true)
-      }
       await client.join_channel(currentChannel)
-      await new Promise(r => setTimeout(r, 1000))
+      await new Promise(r => setTimeout(r, 500))
       const tokenJson = await client.begin_media_session(currentChannel)
       const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
       await connectMedia({

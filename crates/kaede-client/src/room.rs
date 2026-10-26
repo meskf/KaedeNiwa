@@ -1439,14 +1439,22 @@ impl RoomSession {
     pub async fn join_channel(&self, channel_id: &str, password: &str) -> Result<(), ClientError> {
         // 该 API 只用于私密频道；标记后即使 Welcome 失败也不会回退主群加密。
         self.note_channel_privacy(channel_id, true);
-        // 已有 group：只验证密码（server 会先验密码，通过后 204 幂等返回）
+        // 快速路径：本地已有**多人** group → 只验证密码
+        // 单人 group 可能是历史遗留的占位群组（曾用 ensure_channel 创建），必须重走 Welcome
         if self.conn.channel_has_group(channel_id) {
-            self.http.join_channel(channel_id, password, None).await?;
+            let mc = self.conn.channel_member_count(channel_id);
+            if mc > 1 {
+                self.http.join_channel(channel_id, password, None).await?;
+                tracing::info!(
+                    "[room] join_channel {} verified password (shared group, {} members)",
+                    channel_id, mc
+                );
+                return Ok(());
+            }
             tracing::info!(
-                "[room] join_channel {} verified password (existing group)",
-                channel_id
+                "[room] join_channel {} local solo group ({} members) — full welcome",
+                channel_id, mc
             );
-            return Ok(());
         }
 
         // 首次加入：走完整 Welcome 交换

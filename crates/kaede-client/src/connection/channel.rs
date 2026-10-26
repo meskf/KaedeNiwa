@@ -72,6 +72,13 @@ impl ServerConnection {
             .contains_key(channel_id)
     }
 
+    /// 本地 channel group 当前成员数；无 group 时返回 0。
+    /// 用于 join_channel 判断"是多人群组还是单人占位群组"。
+    pub fn channel_member_count(&self, channel_id: &str) -> usize {
+        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(channel_id).map(|s| s.member_count()).unwrap_or(0)
+    }
+
     /// 从 channel group 按 purpose 派生密钥（P0：附件加密用 File）。
     pub fn channel_export_key_for(
         &self,

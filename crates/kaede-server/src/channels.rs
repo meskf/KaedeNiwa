@@ -586,6 +586,16 @@ async fn join_channel(
         .bind(uid.as_str())
         .fetch_all(&state.pool)
         .await?;
+        if members.is_empty() {
+            // Solo：第一个加入者 —— 告知 client 自建 group（409 语义复用）
+            tracing::info!(
+                "join_channel: solo first-member {} for {} — client must build group",
+                uid.as_str(), id
+            );
+            return Err(ApiError::Conflict(
+                "solo channel: client must build own group".into(),
+            ));
+        }
         notify_authority(&state, &id, &uid, &kp_b64, &members).await;
     }
 

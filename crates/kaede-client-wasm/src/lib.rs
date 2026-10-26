@@ -127,7 +127,9 @@ impl JsClient {
     pub async fn join_channel(&self, channel_id: String) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.join_channel_only(&channel_id).await
+        // 完整 welcome 流：提交 KP → 等待 Welcome → 加入共享 group
+        // （旧的 join_channel_only 不提交 KP，无法触发欢迎流程，导致 voice 双人各自 solo group）
+        room.join_channel(&channel_id, "").await
             .map_err(|e| JsValue::from_str(&format!("Join channel error: {}", e)))
     }
 
