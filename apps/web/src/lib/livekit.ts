@@ -221,6 +221,12 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
     .on(RoomEvent.LocalTrackPublished, () => emit())
     .on(RoomEvent.LocalTrackUnpublished, () => emit())
     .on(RoomEvent.ActiveSpeakersChanged, () => emit())
+    // 远端 track 发布/取消/静音/取消静音：必须 emit，否则远端麦克风/摄像头状态不会更新
+    .on(RoomEvent.TrackPublished, () => emit())
+    .on(RoomEvent.TrackUnpublished, () => emit())
+    .on(RoomEvent.TrackMuted, () => emit())
+    .on(RoomEvent.TrackUnmuted, () => emit())
+    .on(RoomEvent.ParticipantMetadataChanged, () => emit())
 
   await room.connect(wsUrl, token)
 
