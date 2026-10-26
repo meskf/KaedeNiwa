@@ -103,6 +103,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
         const st = useChatStore.getState()
         const ch = st.currentChannel
+        try { console.log('[EV]', Object.keys(ev).join(',')) } catch (_) {}
 
         if (ev.Joined) {
           const peers = ev.Joined.peers || []
