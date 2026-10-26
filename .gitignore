@@ -1,122 +1,19 @@
-/target/
-**/target/
-/dist/
-**/dist/
-_*.log
-_*.txt
-*.bak_*
-*.bak
-*.db
-*.db-shm
-*.db-wal
+# Dependencies
+node_modules/
+target/
+
+# Build artifacts
+dist/
+build/
+release/
+*.exe
+*.zip
+*.tar.gz
+*.dll
+*.pdb
+
+# Environment & IDE
+.env
 .vscode/
 .idea/
 .DS_Store
-Thumbs.db
-# ---- KaedeNiwa cleanup (2026-10-14) ----
-_trash/
-*.log
-*.bak_*
-*.bak
-test_audio.wav
-test_screen.mp4
-kaede.db
-kaede_ui.db
-kaede_ui.db-*
-kaede.db-*
-
-# ---- WebRTC prebuilt (headers + webrtc.lib, ~430 MB) ----
-_webrtc/
-
-# ---- review bundles ----
-review_bundle_*/
-review_bundle_*.zip
-
-# ---- 本地备份/归档 (2026-10-18) ----
-_bak_*/
-src_legacy/
-_archive/
-check.log
-
-# ---- phase 修复备份（脚本生成）----
-_backup_*/
-_backup_phase*/
-
-# ---- 临时 Node 调试脚本 ----
-test-*.mjs
-
-
-# ---- 临时修复脚本 ----
-fix_*.cjs
-
-
-# ---- 临时 Node 脚本（fix_*.cjs / scan_*.cjs 等）----
-*.cjs
-# 例外：PWA 打包的必需步骤，bundle.ps1 会调用它
-!scripts/postbuild.cjs
-
-# ---- LiveKit 二进制（55MB，用 scripts/download-livekit.ps1 下载）----
-tools/livekit/*.exe
-# ---- 内部审计记录（不公开）----
-.audit/
-# ---- 备份文件 ----
-*.bak2
-*.bak2b
-
-# ---- 审计中间产物 / 临时文件（2026-10-23 清理）----
-_audit_bak_*/
-_audit_out/
-_dump/
-_regression_core.log
-_dev-all.ps1
-
-# ---- 临时脚本 / 提交消息（_commit.tmp / _tag.tmp / _*.cjs 等）----
-_*.tmp
-_*.cjs
-
-# ---- Node / Puppeteer (2026-10-22) ----
-node_modules/
-package-lock.json
-_screens/
-
-# ---- 临时文档备份（本机保留，不入库） ----
-_docs_backup_*.zip
-
-# ---- 运行时附件存储（测试 / 本地运行生成）----
-/data/
-crates/*/data/
-
-# ---- 部署密钥与本地备份（绝不入库）----
-deploy/.env
-backups/
-*.db.sha256
-
-# ---- 修复过程 / 临时产物（永久本地保留，不入库）----
-_scratch/
-
-# ---- PWA 打包产物（本地保留）----
-kaede-web-public.zip
-
-# ---- admin token (Phase 0 P0-2) ----
-kaede-admin-token.txt
-
-# ---- Dioxus mobile 生成工程（dx build 生成，不入库）----
-crates/kaede-mobile/gen/
-crates/kaede-mobile/.dioxus/
-crates/kaede-mobile/android/
-crates/kaede-mobile/ios/
-
-# ---- 本地临时回收站（2026-10-23）----
-_local_trash/
-
-# ---- 编辑期临时备份（.prebak / .postbak / .pretmp）----
-*.prebak
-*.postbak
-*.pretmp
-
-crates/kaede-protocol/fuzz/target/
-crates/kaede-protocol/fuzz/corpus/
-crates/kaede-protocol/fuzz/artifacts/
-
-# 诊断日志/运行日志
-/logs/
