@@ -116,14 +116,19 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         }
         if (ev.ChannelMemberJoined) {
           const { channel_id, requester } = ev.ChannelMemberJoined
-          if (channel_id !== useChatStore.getState().currentChannel) return
-          if (!useChatStore.getState().isAuthority) return
+          const st = useChatStore.getState()
+          console.log(`[CMJ] ENTER ch=${channel_id} req=${requester} isAuth=${st.isAuthority} curCh=${st.currentChannel}`)
+          if (channel_id !== st.currentChannel) { console.log('[CMJ] SKIP: not current channel'); return }
+          if (!st.isAuthority) { console.log('[CMJ] SKIP: not authority'); return }
+          console.log('[CMJ] calling add_member_to_channel...')
           client.add_member_to_channel(useChatStore.getState().currentChannel, requester).then(async () => {
+            console.log('[CMJ] add_member_to_channel OK')
             useChatStore.getState().setPeerStatus(`Added ${requester}`)
             // ★ epoch 已推进，必须刷新 E2EE key（否则本端 keyProvider 还是旧 epoch 的 key）
             try {
               const m = mediaRef.current
               const c = getClient()
+              console.log(`[CMJ] rotation check: hasClient=${!!c} connected=${m.connected} mediaCh=${m.channelId} target=${channel_id}`)
               if (c && m.connected && m.channelId === channel_id) {
                 const tokenJson = await c.begin_media_session(channel_id)
                 const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
