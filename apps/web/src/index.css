@@ -2,38 +2,37 @@
 
 @layer base {
   :root {
-    /* Dark mode (Zinc) */
-    --bg-base: #09090b;
-    --bg-surface: #18181b;
+    /* 统一使用深邃的暗色背景，不再分内外层 */
+    --bg-app: #09090b;
+    --bg-footer: #000000;
+    --bg-hover: #18181b;
     --bg-active: #27272a;
-    --border-color: transparent; /* 已去除分割线 */
-
-    --text-primary: #fafafa;
-    --text-secondary: #a1a1aa;
-    --text-muted: #52525b;
+    
+    --text-main: #fafafa;
+    --text-muted: #a1a1aa;
+    --border-subtle: #27272a;
   }
 
   :root[data-theme="light"] {
-    /* Light mode (Zinc) */
-    --bg-base: #ffffff;
-    --bg-surface: #f4f4f5;
+    --bg-app: #ffffff;
+    --bg-footer: #f4f4f5;
+    --bg-hover: #f4f4f5;
     --bg-active: #e4e4e7;
-    --border-color: transparent;
-
-    --text-primary: #09090b;
-    --text-secondary: #52525b;
-    --text-muted: #a1a1aa;
+    
+    --text-main: #09090b;
+    --text-muted: #71717a;
+    --border-subtle: #e4e4e7;
   }
 
   html, body, #root {
     @apply h-full w-full m-0 p-0 overflow-hidden;
-    background: var(--bg-base);
-    color: var(--text-primary);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg-app);
+    color: var(--text-main);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
 
   ::-webkit-scrollbar { width: 4px; height: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--bg-active); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 4px; }
 }
