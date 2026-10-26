@@ -1,113 +1,70 @@
 import { useState } from 'react'
-import { useAuthStore } from '../stores/auth'
-import { initWasm } from '../wasm/client'
 
-export function LoginView() {
+export function LoginView({ onLogin }: { onLogin: () => void }) {
   const [isRegister, setIsRegister] = useState(false)
-  const [serverUrl, setServerUrl] = useState('http://127.0.0.1:18080')
-  const [loginId, setLoginId] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const setAuth = useAuthStore(s => s.setAuth)
 
-
-  const handleSubmit = async () => {
-    if (!loginId || !password) return setError('请输入账号和密码')
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
     setLoading(true)
-    setError('')
-    
-    try {
-      const endpoint = isRegister ? '/api/register' : '/api/login'
-      // 1. 发送 HTTP 请求
-      const res = await fetch(serverUrl + endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ login_id: loginId, password })
-      })
-      
-      if (!res.ok) {
-        const text = await res.text()
-        throw new Error(text || '请求失败')
-      }
-      
-      const data = await res.json()
-      const token = data.token || data.session_token
-      if (!token) throw new Error('服务器未返回 Token')
-      
-            // 2. 初始化 WASM
-      const client = await initWasm()
-      const wsUrl = serverUrl.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws'
-      
-      // 调用封装好的 RoomSession 登录
-      await client.login(serverUrl, wsUrl, loginId, token)
-      
-      setAuth({ serverUrl, wsUrl, token, loginId })
-      
-    } catch (e: any) {
-      setError(e.message || e.toString())
-    } finally {
+    // 纯本地模拟登录成功
+    setTimeout(() => {
       setLoading(false)
-    }
+      onLogin()
+    }, 300)
   }
 
   return (
-    <div className="flex h-full w-full items-center justify-center bg-discord-bg">
-      <div className="w-[480px] p-8 bg-discord-sidebar rounded-lg shadow-xl text-white">
-        <h1 className="text-2xl font-bold mb-6 text-center">
-          {isRegister ? '注册新账号' : '登录 KaedeNiwa'}
+    <div className="flex h-full w-full items-center justify-center bg-[var(--bg-base)]">
+      <div className="w-[420px] p-10 rounded-xl" style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-color)' }}>
+        <h1 className="text-2xl font-bold mb-8 text-center text-[var(--text-primary)]">
+          {isRegister ? 'Create Account' : 'Login to KaedeNiwa'}
         </h1>
-        
-        {error && <div className="mb-4 p-2 bg-red-500/20 text-red-400 text-sm rounded border border-red-500/50">{error}</div>}
-
-        <div className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-5">
           <div>
-            <label className="block text-xs font-semibold text-gray-400 mb-1 uppercase">服务器地址</label>
-            <input 
-              type="text" 
-              value={serverUrl} 
-              onChange={e => setServerUrl(e.target.value)}
-              className="w-full bg-[#1e1f22] border-none outline-none rounded p-2.5 text-sm"
+            <label className="block text-[11px] font-semibold uppercase mb-1.5 tracking-wider text-[var(--text-muted)]">Server Address</label>
+            <input
+              type="text"
+              defaultValue="http://127.0.0.1:18080"
+              className="w-full rounded-lg px-3 py-2.5 text-sm outline-none bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-color)]"
             />
           </div>
           <div>
-            <label className="block text-xs font-semibold text-gray-400 mb-1 uppercase">账号 (Login ID)</label>
-            <input 
-              type="text" 
-              value={loginId} 
-              onChange={e => setLoginId(e.target.value)}
-              placeholder="例如: admin"
+            <label className="block text-[11px] font-semibold uppercase mb-1.5 tracking-wider text-[var(--text-muted)]">Account</label>
+            <input
+              type="text"
+              placeholder="admin"
               data-testid="login-id"
-              className="w-full bg-[#1e1f22] border-none outline-none rounded p-2.5 text-sm"
+              className="w-full rounded-lg px-3 py-2.5 text-sm outline-none bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-color)]"
             />
           </div>
           <div>
-            <label className="block text-xs font-semibold text-gray-400 mb-1 uppercase">密码</label>
-            <input 
-              type="password" 
-              value={password} 
-              onChange={e => setPassword(e.target.value)}
-              className="w-full bg-[#1e1f22] border-none outline-none rounded p-2.5 text-sm"
+            <label className="block text-[11px] font-semibold uppercase mb-1.5 tracking-wider text-[var(--text-muted)]">Password</label>
+            <input
+              type="password"
+              data-testid="login-password"
+              className="w-full rounded-lg px-3 py-2.5 text-sm outline-none bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-color)]"
             />
           </div>
-          
-          <button 
-            onClick={handleSubmit}
+          <button
+            type="submit"
             disabled={loading}
-            className="w-full mt-4 bg-indigo-500 hover:bg-indigo-600 transition-colors disabled:opacity-50 text-white font-medium py-2.5 rounded"
+            data-testid="login-submit"
+            className="w-full mt-2 py-2.5 rounded-lg font-bold text-white transition-colors disabled:opacity-50 bg-[#5865f2] hover:bg-[#4752c4]"
           >
-            {loading ? '处理中...' : (isRegister ? '注册并登录' : '登录')}
+            {loading ? 'Processing...' : (isRegister ? 'Register' : 'Login')}
           </button>
-          
-          <div className="text-center mt-4">
-            <button 
+          <div className="text-center">
+            <button
+              type="button"
               onClick={() => setIsRegister(!isRegister)}
-              className="text-sm text-indigo-400 hover:underline"
+              data-testid="login-toggle-register"
+              className="text-sm hover:underline text-[var(--text-secondary)]"
             >
-              {isRegister ? '已有账号？去登录' : '没有账号？去注册'}
+              {isRegister ? 'Already have an account? Login' : 'Need an account? Register'}
             </button>
           </div>
-        </div>
+        </form>
       </div>
     </div>
   )

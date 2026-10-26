@@ -1,14 +1,46 @@
 @import "tailwindcss";
 
-@theme {
-  --color-discord-bg: #313338;
-  --color-discord-sidebar: #2b2d31;
-  --color-discord-serverRail: #1e1f22;
-  --color-discord-channel: #b5bac1;
-}
-
 @layer base {
-  html, body, #root {
-    @apply h-full w-full m-0 p-0 overflow-hidden bg-discord-bg text-gray-200 font-sans antialiased;
+  :root {
+    /* 深色模式（所有背景统一，线条若隐若现） */
+    --bg-base: #18191c;       /* 全局唯一底色 */
+    --bg-surface: #1e1f22;    /* 悬浮/输入框底色 */
+    --bg-active: #2b2d31;     /* 选中/按下状态 */
+    
+    --border-color: #2a2b2f;  /* 若隐若现的微弱线条 */
+    
+    --text-primary: #ffffff;
+    --text-secondary: #a3a6aa;
+    --text-muted: #6b6f76;
+    
+    --btn-green: #248046;
+    --btn-green-hover: #1a6334;
+    --btn-red: #da373c;
+    --btn-red-hover: #a12829;
   }
+
+  :root[data-theme="light"] {
+    /* 浅色模式 */
+    --bg-base: #ffffff;
+    --bg-surface: #f2f3f5;
+    --bg-active: #e3e5e8;
+    
+    --border-color: #ebedef;  /* 浅灰微线 */
+    
+    --text-primary: #060607;
+    --text-secondary: #4e5058;
+    --text-muted: #80848e;
+  }
+
+  html, body, #root {
+    @apply h-full w-full m-0 p-0 overflow-hidden font-bold; /* 全局粗体 */
+    background: var(--bg-base);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--bg-active); border-radius: 4px; }
 }
