@@ -7,7 +7,6 @@ function VideoAttachment({ share }: { share: any }) {
   useEffect(() => {
     if (!videoRef.current || !share.element) return
     const el = share.element
-    // 将原生 track 挂载到我们的 video 元素上
     if (!videoRef.current.srcObject) {
       videoRef.current.srcObject = el.srcObject
     }
@@ -19,7 +18,7 @@ function VideoAttachment({ share }: { share: any }) {
   }, [share.element])
 
   return (
-    <div className="relative w-full h-full rounded-lg overflow-hidden bg-black flex items-center justify-center shadow-md border border-[#2b2d31]">
+    <div className="relative w-full h-full rounded-lg overflow-hidden bg-black flex items-center justify-center border border-[#2b2d31]">
       <video
         ref={videoRef}
         autoPlay
@@ -27,8 +26,8 @@ function VideoAttachment({ share }: { share: any }) {
         muted
         className="w-full h-full object-contain"
       />
-      <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 text-white text-xs rounded pointer-events-none">
-        {share.participantIdentity} 正在共享
+      <div className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-black/70 text-white text-[10px] rounded pointer-events-none">
+        {share.participantIdentity}
       </div>
     </div>
   )
@@ -39,16 +38,17 @@ export function ScreenShareView() {
 
   if (media.screenShares.length === 0) return null
 
-  // 按 participantIdentity 去重，防止同一个人出现两遍
   const uniqueShares = Array.from(new Map(media.screenShares.map(s => [s.trackSid, s])).values())
   const count = uniqueShares.length
   const cols = count === 1 ? 1 : count <= 4 ? 2 : 3
   const rows = Math.ceil(count / cols)
 
+  // 悬浮画中画样式：固定宽高，绝对定位于右上角，带阴影
+  // 宽高会随着人数微调，但不挤压底层布局
   return (
-    <div className="w-full h-full p-2 flex-1 min-h-0 bg-[#1e1f22]">
+    <div className="absolute top-4 right-4 z-40 w-[45%] max-w-[700px] h-[35vh] min-h-[220px] bg-[#1e1f22]/95 backdrop-blur-sm rounded-xl shadow-2xl border border-[#2b2d31] flex flex-col p-1.5 animate-in fade-in zoom-in-95">
       <div
-        className="w-full h-full grid gap-2"
+        className="w-full h-full grid gap-1.5"
         style={{
           gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
           gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
