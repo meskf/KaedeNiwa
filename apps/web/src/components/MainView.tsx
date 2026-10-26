@@ -423,7 +423,13 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                   {inVoice && currentChannel === vc.id && (
                     <div className="pl-6 flex flex-col gap-1 mt-1">
                       {Object.values(media.participants || {}).map((p: any) => (
-                        <div key={p.identity} className="flex items-center gap-2">
+                        <div
+                          key={p.identity}
+                          data-participant={p.identity}
+                          data-mic={p.isMicrophoneEnabled ? 'on' : 'off'}
+                          data-speaking={p.isSpeaking ? 'on' : 'off'}
+                          className="flex items-center gap-2"
+                        >
                           <div className="w-5 h-5 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[10px] font-bold text-[var(--text-main)]">
                             {getInitial(p.identity)}
                           </div>
