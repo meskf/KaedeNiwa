@@ -1495,18 +1495,13 @@ impl RoomSession {
             Ok(Ok(Err(e))) => Err(ClientError::Protocol(format!("welcome failed: {}", e))),
             Ok(Err(_)) => Err(ClientError::Protocol("welcome channel closed".into())),
             Err(_timeout) => {
-                // 不清理等待槽：权威成员上线后补投的 Welcome 仍会加入 group，
-                // 并通过 ClientEvent::ChannelJoined 通知 UI 刷新。
+                // 超时说明当前无在线权威，直接降级为自建 group 成为新权威
                 tracing::warn!(
-                    "[room] join_channel {} timeout waiting welcome; \
-                     request may be completed when channel authority comes online",
+                    "[room] join_channel {} timeout waiting welcome; attempting local rebuild as new authority",
                     channel_id
                 );
-                Err(ClientError::Protocol(
-                    "当前无在线成员可授权，加入请求已排队；待频道成员上线后会自动完成。\
-                     如长时间无响应，请让频道成员上线后重试。"
-                        .into(),
-                ))
+                self.conn.channel_ensure_group(channel_id)?;
+                Ok(())
             }
         }
     }

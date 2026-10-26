@@ -473,11 +473,11 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 {/* 超大标题区 */}
                 <div className="shrink-0 flex items-end justify-between mb-8 mt-0 w-full">
                   <div>
-                    <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight mb-3 text-[var(--text-main)]">
+                    <h1 className="text-4xl md:text-2xl font-extrabold tracking-tight mb-3 text-[var(--text-main)]">
                       #{currentChannelName}
                     </h1>
                     <p className="text-[13px] text-[var(--text-muted)]">
-                      Welcome to the beginning of the #{currentChannelName} channel.
+                      Welcome to the beginning of the channel.
                     </p>
                   </div>
                   <div className="flex items-center gap-3 pb-2">
