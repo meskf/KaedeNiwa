@@ -424,6 +424,17 @@ impl ServerConnection {
                                     detail: e.to_string(),
                                 });
                             }
+
+                            // ★ 本地 epoch 已推进（authority 自己 add_member），必须通知 JS 层
+                            // 刷新 E2EE key。ChannelMemberJoined 不走 ChannelSync 0x05 路径，
+                            // 之前的实现只有失败路径 emit，成功路径完全静默。
+                            if let Some(epoch) = self.channel_epoch(&channel_id) {
+                                self.emit(ClientEvent::ChannelEpochChanged {
+                                    server_id: self.server_id.clone(),
+                                    channel_id: channel_id.clone(),
+                                    epoch,
+                                });
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(
