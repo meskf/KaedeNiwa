@@ -513,6 +513,11 @@ impl ServerConnection {
             // 不 drop group，继续处理（MLS 已经 merge 成功）
         }
         self.mark_channel_dirty(channel_id);
+        // P0-2 修复：epoch 前进后立即落盘。
+        // 不能依赖 run_event_loop 的 250ms 周期 flush —— 它只在收到消息时检查，
+        // reload 前的静默期会让 dirty snapshot 永远不落盘
+        // （test-10: u1 reload 前 6 秒静默 → epoch=2 快照丢失 → reload 后回退到 epoch=1）。
+        self.flush_dirty_snapshots().await;
         Ok(out)
     }
 

@@ -108,9 +108,18 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         if (ev.ChannelSync) {
           const channelId = ev.ChannelSync.channel_id
           const payload = new Uint8Array(ev.ChannelSync.payload)
+          const firstByte = payload.length > 0 ? payload[0] : -1
+          console.log(`[ChannelSync] ch=${channelId} epoch=${ev.ChannelSync.epoch} len=${payload.length} first=0x${firstByte.toString(16).padStart(2,'0')}`)
           client.process_channel_sync(channelId, payload).then(() => {
             useChatStore.getState().setPeerStatus('Synced')
-          }).catch((e: any) => useChatStore.getState().setPeerStatus(`Sync failed: ${e}`))
+            console.log(`[ChannelSync] ch=${channelId} OK`)
+          }).catch((e: any) => {
+            console.error(`[ChannelSync] ch=${channelId} FAILED:`, String(e))
+            useChatStore.getState().setPeerStatus(`Sync failed: ${e}`)
+          })
+        }
+        if (ev.MlsCommit) {
+          console.log(`[MlsCommit] ch=${ev.MlsCommit.channel_id} epoch=${ev.MlsCommit.epoch} len=${ev.MlsCommit.payload?.length}`)
         }
         if (ev.MlsEpochChanged) {
           const m = mediaRef.current
