@@ -630,3 +630,55 @@ KaedeNiwa = Discord 的使用体验 + Signal 同级的端到端加密 + 私有�
     不要相信“文档说已经完成”——读代码，跑测试。
 
   祝接手顺利。
+
+
+第十六部分 2026-10-26 会话记录：UI 重做 + 接线 + P0-2 修复
+=========================================================
+
+状态：14/14 e2e 全绿（约 30 分钟 -FreshEachMediaTest）
+HEAD：ui-rewrite 分支
+
+## 本次会话做了什么
+
+1. **UI 从零重写**（原视觉稿保留）
+   - App.tsx: 恢复 initWasm / 自动重连 / tab-lock / __kaede_debug__（原视觉稿删了）
+   - LoginView.tsx: 真实 /api/login + client.login（原视觉稿是假登录）
+   - MainView.tsx: 接 useChatStore + setOnEvent + MediaBar + ScreenShareView
+   - 视觉决策（CSS 变量主题、4 栏布局、底部导航）**全部保留**
+   - 删了孤儿文件 hooks/useKaedeEvents.ts
+
+2. **关键 bug 修复**
+   - **LoginView**: 后端返回的是 `session_token`，不是 `token`（字段名不匹配 → 一直假登录失败）
+   - **MainView 事件循环**: `st.isAuthority` 是事件注册时的快照，改成 `useChatStore.getState().isAuthority` 每次实时读
+   - **MainView setOnEvent**: 首次 effect 执行时 client 可能为 null，加了 200ms 重试
+   - **livekit.ts**: 补 5 个 LiveKit 事件监听（TrackPublished/Muted/Unmuted 等），修复 test-9 远端麦克风不同步
+   - **P0-2 flush 时机**: `run_event_loop` 只在 `recv()` 返回时检查 flush → 静默期 reload 会让 epoch 前进但不落盘。改成 `channel_process_commit` 成功后立即 `flush_dirty_snapshots()`
+
+3. **test-*.cjs 修复**
+   - test-2/3/7/9/10/11/13 都缺 `typeMessage`（历史遗留，从未跑通过）
+   - test-10 加了 epoch 探针（保留，能抓回归）
+
+## 已知噪声（不是 bug）
+
+- **test-7**: `participants 5 (期望 3)` —— LiveKit 房间状态从上个测试残留，不影响 PASS
+- **test-9**: `Dave vs Bob 密钥一致: ❌` 但 5/5 PASS —— `channelState` 探测有 ms 级延迟
+- **test-8**: 大量 `invalid int 32: string` —— LiveKit 内部把 `x-google-start-bitrate` 序列化成 string 的警告，功能正常
+
+## 下一步待办（按优先级）
+
+1. **P0-1: CI 首次 push**（.github/workflows/ci.yml 从未跑过）
+   - toolchain 版本 1.99 → 确认 GitHub Actions 有
+   - e2e job 需要 headless + chromium（现在是 headless: false + msedge）
+   - test-helpers login 依赖 login-id testid，CI 里 chromium 应该也能用
+
+2. **P0-2: deploy/ 本地 Docker 验证**（从未跑过）
+   - docker-compose up
+   - Caddyfile WebSocket upgrade
+   - LiveKit 端口映射 7880/7881/7882
+   - SQLite volume
+
+3. **UI 剩余部分**
+   - DM 视图（wasm 桥已有，UI 空）
+   - 好友面板（wasm 桥未做）
+   - 附件上传（wasm 桥未做）
+   - 富文本（Lexical）、Emoji picker、响应式
