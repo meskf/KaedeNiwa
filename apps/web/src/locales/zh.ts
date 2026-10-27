@@ -17,6 +17,15 @@ const zh = {
     voiceScreen: '屏幕共享', screenOn: '共享中', screenOff: '未共享', voiceE2EE: '端到端加密',
     shortcutsTitle: '快捷键', scSend: '发送消息', scNewline: '换行', scClose: '关闭对话框 / 取消',
     valueE2EEOn: '开启（MLS）', valueE2EEOff: '关闭', valueNa: '—' },
+  search: {
+    title: '搜索',
+    placeholder: '搜索消息、频道、用户...',
+    shortcutHint: 'Ctrl K',
+    noResults: '无结果',
+    typeToStart: '输入关键词开始搜索',
+    inChannel: '在',
+    results: '条结果',
+  },
   audio: {
     title: '音频设置',
     deafen: '拒听', undeafen: '取消拒听',

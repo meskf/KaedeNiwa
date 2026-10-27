@@ -17,6 +17,15 @@ const en = {
     voiceScreen: 'Screen share', screenOn: 'Sharing', screenOff: 'Idle', voiceE2EE: 'E2EE',
     shortcutsTitle: 'Shortcuts', scSend: 'Send message', scNewline: 'New line', scClose: 'Close dialog / dismiss',
     valueE2EEOn: 'On (MLS)', valueE2EEOff: 'Off', valueNa: '—' },
+  search: {
+    title: 'Search',
+    placeholder: 'Search messages, channels, people...',
+    shortcutHint: 'Ctrl K',
+    noResults: 'No results',
+    typeToStart: 'Start typing to search',
+    inChannel: 'in',
+    results: 'results',
+  },
   audio: {
     title: 'Audio Settings',
     deafen: 'Deafen', undeafen: 'Undeafen',

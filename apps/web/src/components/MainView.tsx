@@ -12,6 +12,7 @@ import { useI18n } from '../stores/i18n'
 import { SettingsView } from './SettingsView'
 import { MoreView } from './MoreView'
 import { UserContextMenu } from './UserContextMenu'
+import { SearchPalette } from './SearchPalette'
 import { DMView } from './DMView'
 import { FriendsView } from './FriendsView'
 import { MessageAttachments } from './MessageAttachments'
@@ -38,12 +39,24 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const [showMembers, setShowMembers] = useState(true)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; uid: string; inVoice: boolean } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [searchOpen, setSearchOpen] = useState(false)
   const addMemberQueueRef = useRef<Promise<void>>(Promise.resolve())
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const media = useMediaState()
   const mediaRef = useRef(media)
   useEffect(() => { mediaRef.current = media }, [media])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setSearchOpen(v => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   const currentMessages = messages[currentChannel] || []
   const currentPending = pendingMessages.filter(p => p.channelId === currentChannel)
@@ -490,8 +503,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               <IconSearch className="absolute left-3.5 w-4 h-4 text-[var(--text-muted)]" />
               <input
                 type="text"
-                placeholder="Search..."
-                className="w-full bg-[var(--bg-hover)] text-[var(--text-main)] text-[13px] rounded-md pl-10 pr-4 py-2 outline-none placeholder-[var(--text-muted)]"
+                readOnly
+                onClick={() => setSearchOpen(true)}
+                onFocus={() => setSearchOpen(true)}
+                placeholder="Search...  (Ctrl+K)"
+                className="w-full bg-[var(--bg-hover)] text-[var(--text-main)] text-[13px] rounded-md pl-10 pr-4 py-2 outline-none placeholder-[var(--text-muted)] cursor-pointer"
+                data-testid="search-trigger"
               />
             </div>
           </div>
@@ -779,6 +796,15 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           </div>
         </div>
       </footer>
+
+      <SearchPalette
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onSelect={(channelId) => {
+          setChannel(channelId)
+          setActiveView('chat')
+        }}
+      />
 
       {ctxMenu && (
         <UserContextMenu
