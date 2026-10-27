@@ -17,6 +17,21 @@ const zh = {
     voiceScreen: '屏幕共享', screenOn: '共享中', screenOff: '未共享', voiceE2EE: '端到端加密',
     shortcutsTitle: '快捷键', scSend: '发送消息', scNewline: '换行', scClose: '关闭对话框 / 取消',
     valueE2EEOn: '开启（MLS）', valueE2EEOff: '关闭', valueNa: '—' },
+  audio: {
+    title: '音频设置',
+    deafen: '拒听', undeafen: '取消拒听',
+    inputDevice: '输入设备', outputDevice: '输出设备', defaultDevice: '默认设备',
+    inputVolume: '输入音量', outputVolume: '输出音量',
+    pushToTalk: '按键说话', pushToTalkKey: '按键',
+    unsupportedSpeaker: '当前浏览器不支持扬声器选择',
+  },
+  menu: {
+    sendMessage: '发送消息',
+    viewProfile: '查看资料',
+    addFriend: '添加好友',
+    userVolume: '用户音量',
+    muteUser: '静音该用户',
+  },
   common: { save: '保存', cancel: '取消', close: '关闭', loading: '加载中...' },
 }
 export default zh

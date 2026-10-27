@@ -11,6 +11,7 @@ import { useTheme } from '../lib/useTheme'
 import { useI18n } from '../stores/i18n'
 import { SettingsView } from './SettingsView'
 import { MoreView } from './MoreView'
+import { UserContextMenu } from './UserContextMenu'
 import { DMView } from './DMView'
 import { FriendsView } from './FriendsView'
 import { MessageAttachments } from './MessageAttachments'
@@ -35,6 +36,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const { theme, setTheme } = useTheme()
   const { t } = useI18n()
   const [showMembers, setShowMembers] = useState(true)
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; uid: string; inVoice: boolean } | null>(null)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const addMemberQueueRef = useRef<Promise<void>>(Promise.resolve())
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -287,6 +290,52 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   }, [currentMessages.length, currentPending.length])
 
 
+  const friends = useChatStore(s => s.friends)
+  const isFriend = (uid: string) => friends.some(f => f.login_id === uid && f.direction === 'friend')
+
+  const handleMemberContextMenu = (e: React.MouseEvent, uid: string, inVoice: boolean) => {
+    if (uid === loginId) return
+    e.preventDefault()
+    setCtxMenu({ x: e.clientX, y: e.clientY, uid, inVoice })
+  }
+
+  const handleCtxSendMessage = async () => {
+    if (!ctxMenu) return
+    const c = getClient()
+    if (!c) return
+    try {
+      const raw = await c.openDm(ctxMenu.uid)
+      const conv = typeof raw === 'string' ? JSON.parse(raw) : raw
+      useChatStore.getState().addDmConversation(conv)
+      useChatStore.getState().setActiveConv(conv.conv_id)
+      setActiveView('dms')
+    } catch (e) { console.error('[ctx dm]', e) }
+  }
+
+  const handleCtxAddFriend = async () => {
+    if (!ctxMenu) return
+    const c = getClient()
+    if (!c) return
+    try {
+      await c.sendFriendRequest(ctxMenu.uid)
+      const raw = await c.listFriends()
+      const arr = typeof raw === 'string' ? JSON.parse(raw) : raw
+      useChatStore.getState().setFriends(arr || [])
+    } catch (e) { console.error('[ctx add friend]', e) }
+  }
+
+  const handleCtxRemoveFriend = async () => {
+    if (!ctxMenu) return
+    const c = getClient()
+    if (!c) return
+    try {
+      await c.removeFriend(ctxMenu.uid)
+      const raw = await c.listFriends()
+      const arr = typeof raw === 'string' ? JSON.parse(raw) : raw
+      useChatStore.getState().setFriends(arr || [])
+    } catch (e) { console.error('[ctx remove]', e) }
+  }
+
   const handleJoinMedia = async () => {
     const client = getClient()
     if (!client) return
@@ -377,6 +426,16 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         
         {/* 顶栏 */}
         <header className="relative h-[40px] shrink-0 flex items-center mb-10">
+          <button
+            onClick={() => setSidebarOpen(v => !v)}
+            className="md:hidden mr-3 w-8 h-8 flex items-center justify-center rounded-md text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition-colors"
+            aria-label="toggle sidebar"
+            data-testid="sidebar-toggle"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5">
+              <path d="M4 6h16M4 12h16M4 18h16" strokeLinecap="round" />
+            </svg>
+          </button>
           <div className="w-[200px] shrink-0 flex items-center text-[16px] font-bold tracking-wide">
             KaedeNiwa
           </div>
@@ -410,9 +469,15 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
         {/* 主体区 (左右侧边栏绝对定位，主聊天区绝对居中) */}
         <div className="flex-1 relative flex min-h-0">
+          {sidebarOpen && (
+            <div
+              className="md:hidden fixed inset-0 top-[40px] bottom-[72px] bg-black/30 z-20"
+              onClick={() => setSidebarOpen(false)}
+            />
+          )}
           
           {/* 左侧侧边栏 */}
-          <aside className="absolute left-0 top-0 bottom-0 w-[200px] flex flex-col z-10">
+          <aside className={`absolute left-0 top-0 bottom-0 w-[200px] sm:w-[180px] lg:w-[200px] flex-col z-30 bg-[var(--bg-app)] transition-transform ${sidebarOpen ? 'flex' : 'hidden'} md:flex`}>
             <div className="h-[40px] flex items-center gap-3 mb-6">
               <div className="w-8 h-8 rounded-md bg-[var(--bg-hover)] flex items-center justify-center text-[var(--text-main)] font-bold text-sm shrink-0">
                 K
@@ -458,6 +523,11 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 >
                   <div className="flex items-center gap-2.5">
                     <IconVolume className="w-4 h-4 opacity-50" /> {vc.name}
+                    {inVoice && currentChannel === vc.id && media.audioBitrate > 0 && (
+                      <span data-testid={`voice-bitrate-${vc.id}`} className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--bg-active)] text-[var(--text-muted)]">
+                        {media.audioBitrate}K
+                      </span>
+                    )}
                   </div>
                   {inVoice && currentChannel === vc.id && (
                     <div className="pl-6 flex flex-col gap-1 mt-1">
@@ -467,7 +537,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                           data-participant={p.identity}
                           data-mic={p.isMicrophoneEnabled ? 'on' : 'off'}
                           data-speaking={p.isSpeaking ? 'on' : 'off'}
-                          className="flex items-center gap-2"
+                          className="flex items-center gap-2 cursor-pointer hover:bg-[var(--bg-hover)] rounded px-1 -mx-1 py-0.5 transition-colors"
+                          onContextMenu={(e) => handleMemberContextMenu(e, p.identity, true)}
                         >
                           <div className="w-5 h-5 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[10px] font-bold text-[var(--text-main)]">
                             {getInitial(p.identity)}
@@ -484,19 +555,24 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
           {/* 右侧成员列表 */}
           {showMembers && activeView === 'chat' && (
-            <aside className="absolute right-0 top-0 bottom-0 w-[200px] flex flex-col z-10 hidden md:flex">
+            <aside className="absolute right-0 top-0 bottom-0 w-[200px] flex-col z-10 hidden lg:flex">
               <div className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-4 mt-0">
                 Members
               </div>
               <div className="flex flex-col gap-3">
                 {(serverMembers.length > 0 ? serverMembers : [loginId]).map(uid => (
-                  <div key={uid} className="flex items-center gap-3">
+                  <div
+                    key={uid}
+                    className="flex items-center gap-3 cursor-pointer rounded px-1 py-0.5 hover:bg-[var(--bg-hover)] transition-colors"
+                    onContextMenu={(e) => handleMemberContextMenu(e, uid, inVoice)}
+                    data-testid={`member-row-${uid}`}
+                  >
                     <div className="relative">
                       <div className="w-7 h-7 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[11px] font-bold text-[var(--text-main)]">
                         {getInitial(uid)}
                       </div>
                       </div>
-                    <span className="text-[13px] font-medium text-[var(--text-main)]">{uid}</span>
+                    <span className="text-[13px] font-medium text-[var(--text-main)] truncate">{uid}</span>
                   </div>
                 ))}
               </div>
@@ -504,7 +580,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           )}
 
           {/* 主区域 (绝对居中，留出左右安全距离) */}
-          <main className="flex-1 flex flex-col min-w-0 px-[220px]">
+          <main className="flex-1 flex flex-col min-w-0 px-3 sm:px-4 md:pl-[200px] md:pr-4 lg:px-[220px]">
             {activeView === 'chat' ? (
               <div className="flex-1 flex flex-col w-full max-w-[900px] mx-auto min-h-0">
 
@@ -629,7 +705,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       {/* 底部栏 */}
       <footer className="shrink-0 bg-[var(--bg-footer)]">
         <div className="px-8 md:px-12 lg:px-16 h-[72px] flex items-center relative transition-colors">
-          <div className="w-[200px] shrink-0 flex items-center gap-3">
+          <div className="w-[120px] sm:w-[160px] md:w-[200px] shrink-0 flex items-center gap-3">
             <div className="w-7 h-7 rounded-md bg-[var(--bg-active)] flex items-center justify-center text-[11px] text-[var(--text-main)] font-bold">
               {getInitial(loginId)}
             </div>
@@ -641,12 +717,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             </div>
           </div>
 
-          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-8 text-[13px] font-medium text-[var(--text-muted)]">
-            <span onClick={() => setActiveView('chat')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'chat' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.groups')}</span>
-            <span onClick={() => setActiveView('dms')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'dms' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.dms')}</span>
-            <span onClick={() => setActiveView('friends')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'friends' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.friends')}</span>
-            <span onClick={() => setActiveView('settings')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'settings' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.settings')}</span>
-            <span onClick={() => setActiveView('more')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'more' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.more')}</span>
+          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-3 sm:gap-5 md:gap-8 text-[11px] sm:text-[12px] md:text-[13px] font-medium text-[var(--text-muted)]">
+            <span onClick={() => { setActiveView('chat'); setSidebarOpen(false) }} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'chat' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.groups')}</span>
+            <span onClick={() => { setActiveView('dms'); setSidebarOpen(false) }} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'dms' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.dms')}</span>
+            <span onClick={() => { setActiveView('friends'); setSidebarOpen(false) }} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'friends' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.friends')}</span>
+            <span onClick={() => { setActiveView('settings'); setSidebarOpen(false) }} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'settings' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.settings')}</span>
+            <span onClick={() => { setActiveView('more'); setSidebarOpen(false) }} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'more' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.more')}</span>
           </div>
 
           <div className="ml-auto w-[200px] text-right text-[11px] text-[var(--text-muted)] font-mono">
@@ -654,6 +730,20 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           </div>
         </div>
       </footer>
+
+      {ctxMenu && (
+        <UserContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          uid={ctxMenu.uid}
+          isFriend={isFriend(ctxMenu.uid)}
+          inVoice={ctxMenu.inVoice}
+          onSendMessage={handleCtxSendMessage}
+          onAddFriend={handleCtxAddFriend}
+          onRemoveFriend={handleCtxRemoveFriend}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
     </div>
   )
 }

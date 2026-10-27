@@ -12,6 +12,14 @@ const INITIAL: MediaState = {
   noiseMode: 'off',
   currentPresetId: '1080p60',
   e2eeEnabled: false,
+  deafened: false,
+  inputVolume: 100,
+  outputVolume: 100,
+  micDeviceId: null,
+  speakerDeviceId: null,
+  pushToTalk: false,
+  pushToTalkKey: 'Space',
+  audioBitrate: 0,
 }
 
 export function useMediaState(): MediaState {

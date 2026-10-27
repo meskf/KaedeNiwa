@@ -19,6 +19,15 @@ export interface MediaState {
   noiseMode: NoiseMode
   currentPresetId: string
   e2eeEnabled: boolean
+  // audio enhancements
+  deafened: boolean
+  inputVolume: number
+  outputVolume: number
+  micDeviceId: string | null
+  speakerDeviceId: string | null
+  pushToTalk: boolean
+  pushToTalkKey: string
+  audioBitrate: number
 }
 
 export interface ParticipantInfo {
@@ -57,6 +66,22 @@ let micSourceStream: MediaStream | null = null
 let rnnoiseHandle: RnnoiseHandle | null = null
 let listeners: Set<(state: MediaState) => void> = new Set()
 
+// audio enhancements
+let currentDeafened = false
+let currentInputVolume = 100
+let currentOutputVolume = 100
+let currentMicDeviceId: string | null = null
+let currentSpeakerDeviceId: string | null = null
+let currentPushToTalk = false
+let currentPushToTalkKey = 'Space'
+let currentAudioBitrate = 0
+let bitrateTimer: ReturnType<typeof setInterval> | null = null
+let lastAudioBytes = 0
+let lastAudioSampleTime = 0
+let pttHandler: ((e: KeyboardEvent) => void) | null = null
+let pttKeyDown = false
+const remoteAudioElements = new Map<string, HTMLAudioElement>()
+
 function emit() {
   const state = getState()
   for (const fn of listeners) fn(state)
@@ -75,6 +100,14 @@ function getState(): MediaState {
       noiseMode: 'off' as NoiseMode,
       currentPresetId,
       e2eeEnabled: false,
+      deafened: currentDeafened,
+      inputVolume: currentInputVolume,
+      outputVolume: currentOutputVolume,
+      micDeviceId: currentMicDeviceId,
+      speakerDeviceId: currentSpeakerDeviceId,
+      pushToTalk: currentPushToTalk,
+      pushToTalkKey: currentPushToTalkKey,
+      audioBitrate: 0,
     }
   }
   const room = currentRoom
@@ -94,6 +127,14 @@ function getState(): MediaState {
     noiseMode: currentNoiseMode,
     currentPresetId,
     e2eeEnabled,
+    deafened: currentDeafened,
+    inputVolume: currentInputVolume,
+    outputVolume: currentOutputVolume,
+    micDeviceId: currentMicDeviceId,
+    speakerDeviceId: currentSpeakerDeviceId,
+    pushToTalk: currentPushToTalk,
+    pushToTalkKey: currentPushToTalkKey,
+    audioBitrate: currentAudioBitrate,
   }
 }
 
@@ -186,6 +227,8 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
       currentChannelId = null
       currentE2EEEnabled = false
       screenShareCache.clear()
+      remoteAudioElements.clear()
+      stopBitrateSampling()
       emit()
     })
     .on(RoomEvent.ParticipantConnected, () => emit())
@@ -201,6 +244,9 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
         el.style.display = 'none'
         document.body.appendChild(el)
         el.play().catch(e => console.warn('[Audio] 播放失败:', e))
+        remoteAudioElements.set(track.sid || p.identity, el)
+        // apply deafen/volume immediately if set
+        try { (track as any).setVolume?.(currentDeafened ? 0 : currentOutputVolume / 100) } catch {}
         console.log(`[Audio] 已挂载并播放 ${p.identity} 的音频轨道 (${pub.source})`)
 
         // 屏幕共享音频：标记对应 share 有音轨
@@ -244,6 +290,7 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
     })
     .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, pub: RemoteTrackPublication, p: RemoteParticipant) => {
       if (track.kind === 'audio') {
+        remoteAudioElements.delete(track.sid || p.identity)
         track.detach().forEach(el => el.remove())
         return
       }
@@ -268,6 +315,7 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
     try { await room.setE2EEEnabled(true) } catch (e) { console.error('[E2EE]', e) }
   }
 
+  startBitrateSampling()
   emit()
   return room
 }
@@ -281,6 +329,8 @@ export async function disconnectMedia() {
   currentChannelId = null
   currentE2EEEnabled = false
   screenShareCache.clear()
+  remoteAudioElements.clear()
+  stopBitrateSampling()
   emit()
 }
 
@@ -423,6 +473,7 @@ export async function enableMicrophone(noiseSuppression: boolean): Promise<void>
   // （用户明确要求"必须纯 RNNoise"）。AEC/AGC 保留——它们是不同功能，不冲突。
   micSourceStream = await navigator.mediaDevices.getUserMedia({
     audio: {
+      ...(currentMicDeviceId ? { deviceId: { exact: currentMicDeviceId } } : {}),
       echoCancellation: !disableEcho,
       noiseSuppression: false,
       autoGainControl: true,
@@ -528,6 +579,154 @@ export async function toggleScreenShare(enable: boolean, presetId = '1080p60'): 
     await stopScreenShare()
     return false
   }
+}
+
+// ===================================================================
+// Audio enhancements (deafen / volume / devices / PTT / bitrate)
+// ===================================================================
+
+function applyOutputVolume() {
+  if (!currentRoom) return
+  const vol = currentDeafened ? 0 : currentOutputVolume / 100
+  currentRoom.remoteParticipants.forEach(p => {
+    p.audioTrackPublications.forEach(pub => {
+      const tr: any = pub.track
+      if (tr && typeof tr.setVolume === 'function') {
+        try { tr.setVolume(vol) } catch {}
+      }
+    })
+  })
+  remoteAudioElements.forEach(el => {
+    try { el.volume = vol } catch {}
+  })
+}
+
+export function setDeafen(deafened: boolean) {
+  currentDeafened = deafened
+  applyOutputVolume()
+  emit()
+}
+
+export async function setInputVolume(vol: number) {
+  currentInputVolume = Math.max(0, Math.min(100, vol))
+  if (micSourceStream) {
+    micSourceStream.getAudioTracks().forEach(t => {
+      try { (t as any).applyConstraints?.({ volume: currentInputVolume / 100 }) } catch {}
+    })
+  }
+  emit()
+}
+
+export function setOutputVolume(vol: number) {
+  currentOutputVolume = Math.max(0, Math.min(100, vol))
+  applyOutputVolume()
+  emit()
+}
+
+export async function listAudioDevices(): Promise<{ inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }> {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    return {
+      inputs: devices.filter(d => d.kind === 'audioinput'),
+      outputs: devices.filter(d => d.kind === 'audiooutput'),
+    }
+  } catch {
+    return { inputs: [], outputs: [] }
+  }
+}
+
+export async function setMicDevice(deviceId: string) {
+  currentMicDeviceId = deviceId
+  if (currentMicEnabled) {
+    try {
+      await disableMicrophone()
+      await enableMicrophone(currentNoiseSuppression)
+    } catch (e) { console.error('[Mic] 切换设备失败', e) }
+  }
+  emit()
+}
+
+export function setSpeakerDevice(deviceId: string) {
+  currentSpeakerDeviceId = deviceId
+  remoteAudioElements.forEach(el => {
+    try { (el as any).setSinkId?.(deviceId) } catch {}
+  })
+  emit()
+}
+
+export async function setPushToTalk(enabled: boolean, key: string = 'Space') {
+  currentPushToTalk = enabled
+  currentPushToTalkKey = key
+  if (pttHandler) {
+    window.removeEventListener('keydown', pttHandler as any)
+    window.removeEventListener('keyup', pttHandler as any)
+    pttHandler = null
+  }
+  pttKeyDown = false
+  if (enabled) {
+    if (currentMicEnabled) {
+      try { await disableMicrophone() } catch {}
+    }
+    pttHandler = async (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || (t as any).isContentEditable)) return
+      if (e.code !== key) return
+      if (e.type === 'keydown' && !pttKeyDown) {
+        pttKeyDown = true
+        if (!currentMicEnabled && currentRoom) {
+          try { await enableMicrophone(currentNoiseSuppression) } catch (err) { console.warn('[PTT]', err) }
+        }
+      } else if (e.type === 'keyup' && pttKeyDown) {
+        pttKeyDown = false
+        if (currentMicEnabled) {
+          try { await disableMicrophone() } catch {}
+        }
+      }
+    }
+    window.addEventListener('keydown', pttHandler as any)
+    window.addEventListener('keyup', pttHandler as any)
+  }
+  emit()
+}
+
+function startBitrateSampling() {
+  stopBitrateSampling()
+  lastAudioBytes = 0
+  lastAudioSampleTime = 0
+  bitrateTimer = setInterval(async () => {
+    if (!currentRoom) return
+    try {
+      const pubs = currentRoom.localParticipant.audioTrackPublications
+      let track: any = null
+      for (const pub of pubs.values()) {
+        if (pub.source === Track.Source.Microphone && pub.track) { track = pub.track; break }
+      }
+      if (!track || !track.getRTCStatsReport) { currentAudioBitrate = 0; emit(); return }
+      const stats = await track.getRTCStatsReport()
+      if (!stats) { currentAudioBitrate = 0; emit(); return }
+      let bytes = 0
+      stats.forEach((s: any) => {
+        if (s.type === 'outbound-rtp' && (s.kind === 'audio' || s.mediaType === 'audio')) {
+          if (typeof s.bytesSent === 'number') bytes = s.bytesSent
+        }
+      })
+      const now = Date.now()
+      if (lastAudioBytes > 0 && lastAudioSampleTime > 0) {
+        const bps = ((bytes - lastAudioBytes) * 8 * 1000) / (now - lastAudioSampleTime)
+        currentAudioBitrate = Math.max(0, Math.round(bps / 1000))
+      }
+      lastAudioBytes = bytes
+      lastAudioSampleTime = now
+      emit()
+    } catch {}
+  }, 2000)
+}
+
+function stopBitrateSampling() {
+  if (bitrateTimer) { clearInterval(bitrateTimer); bitrateTimer = null }
+  currentAudioBitrate = 0
+  lastAudioBytes = 0
+  lastAudioSampleTime = 0
 }
 
 

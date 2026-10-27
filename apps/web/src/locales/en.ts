@@ -17,6 +17,21 @@ const en = {
     voiceScreen: 'Screen share', screenOn: 'Sharing', screenOff: 'Idle', voiceE2EE: 'E2EE',
     shortcutsTitle: 'Shortcuts', scSend: 'Send message', scNewline: 'New line', scClose: 'Close dialog / dismiss',
     valueE2EEOn: 'On (MLS)', valueE2EEOff: 'Off', valueNa: '—' },
+  audio: {
+    title: 'Audio Settings',
+    deafen: 'Deafen', undeafen: 'Undeafen',
+    inputDevice: 'Input device', outputDevice: 'Output device', defaultDevice: 'Default',
+    inputVolume: 'Input volume', outputVolume: 'Output volume',
+    pushToTalk: 'Push to talk', pushToTalkKey: 'Key',
+    unsupportedSpeaker: 'Speaker selection not supported on this browser',
+  },
+  menu: {
+    sendMessage: 'Send message',
+    viewProfile: 'View profile',
+    addFriend: 'Add friend',
+    userVolume: 'User volume',
+    muteUser: 'Mute user',
+  },
   common: { save: 'Save', cancel: 'Cancel', close: 'Close', loading: 'Loading...' },
 }
 export default en

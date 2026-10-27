@@ -7,10 +7,13 @@ import {
   disableMicrophone,
   setNoiseSuppression,
   disconnectMedia,
+  setDeafen,
 } from '../lib/livekit'
+import { AudioSettingsPanel } from './AudioSettingsPanel'
 import { VIDEO_PRESETS } from '../lib/videoPresets'
 import { getClient } from '../wasm/client'
 import { IconMic, IconMicOff, IconMonitor, IconShield } from './icons'
+import { IconVolume } from './icons'
 
 interface Props {
   channelId: string
@@ -23,6 +26,8 @@ export function MediaBar({ channelId }: Props) {
   const [presetId, setPresetId] = useState('1080p60')
   const [noiseOn, setNoiseOn] = useState(true)
   const [error, setError] = useState('')
+  const [showAudioSettings, setShowAudioSettings] = useState(false)
+  const [deafened, setDeafened] = useState(false)
 
   if (!media.connected || media.channelId !== channelId) return null
 
@@ -74,6 +79,12 @@ export function MediaBar({ channelId }: Props) {
     }
   }
 
+  const handleToggleDeafen = () => {
+    const next = !deafened
+    setDeafened(next)
+    setDeafen(next)
+  }
+
   const handleLeave = async () => {
     const client = getClient()
     if (client) {
@@ -102,17 +113,44 @@ export function MediaBar({ channelId }: Props) {
         )}
         <div className="flex-1" />
 
-        {/* 麦克风 */}
+        {/* 麦克风 + 音频设置面板 */}
+        <div className="relative">
+          <button
+            data-testid="media-mic-toggle"
+            data-mic={micOn ? 'on' : 'off'}
+            onClick={handleToggleMic}
+            onContextMenu={(e) => { e.preventDefault(); setShowAudioSettings(true) }}
+            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+              micOn ? 'bg-[var(--text-primary)] text-[var(--bg-base)]' : 'bg-[var(--bg-active)] hover:bg-[#3f3f46] text-[var(--text-secondary)]'
+            }`}
+            title={micOn ? '关闭麦克风（右键音频设置）' : '开启麦克风（右键音频设置）'}
+          >
+            {micOn ? <IconMic className='w-4 h-4 mx-auto'/> : <IconMicOff className='w-4 h-4 mx-auto'/>}
+          </button>
+          <button
+            data-testid="media-audio-settings-toggle"
+            onClick={() => setShowAudioSettings(v => !v)}
+            className="ml-1 px-1.5 py-1 rounded text-xs bg-[var(--bg-active)] hover:bg-[#3f3f46] text-[var(--text-secondary)] transition-colors"
+            title="音频设置"
+          >
+            ⚙
+          </button>
+          {showAudioSettings && (
+            <AudioSettingsPanel onClose={() => setShowAudioSettings(false)} />
+          )}
+        </div>
+
+        {/* 拒听（Deafen） */}
         <button
-          data-testid="media-mic-toggle"
-          data-mic={micOn ? 'on' : 'off'}
-          onClick={handleToggleMic}
+          data-testid="media-deafen-toggle"
+          data-deafened={deafened ? 'on' : 'off'}
+          onClick={handleToggleDeafen}
           className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-            micOn ? 'bg-[var(--text-primary)] text-[var(--bg-base)]' : 'bg-[var(--bg-active)] hover:bg-[#3f3f46] text-[var(--text-secondary)]'
+            deafened ? 'bg-red-500 text-white' : 'bg-[var(--bg-active)] hover:bg-[#3f3f46] text-[var(--text-secondary)]'
           }`}
-          title={micOn ? '关闭麦克风' : '开启麦克风'}
+          title={deafened ? '取消拒听' : '拒听（静音所有远端）'}
         >
-          {micOn ? <IconMic className='w-4 h-4 mx-auto'/> : <IconMicOff className='w-4 h-4 mx-auto'/>}
+          <IconVolume className='w-4 h-4 mx-auto' style={{ opacity: deafened ? 0.4 : 1 }} />
         </button>
 
         {/* 降噪 */}
