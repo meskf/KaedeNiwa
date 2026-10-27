@@ -7,6 +7,7 @@
 
 pub mod admin;
 pub mod attachments;
+pub mod categories;
 pub mod channels;
 pub mod config;
 pub mod db;
@@ -62,7 +63,8 @@ pub async fn spawn_test_server() -> std::io::Result<std::net::SocketAddr> {
             .merge(friends::router(state.clone()))
             .merge(dm::router(state.clone()))
             .merge(livekit::router(state.clone()))
-            .merge(channels::router(state.clone()))
+            .merge(categories::router(state.clone()))
+        .merge(channels::router(state.clone()))
             .merge(members::router(state.clone()))
             .merge(reads::router(state.clone()))
             .merge(sessions_api::router(state.clone()))

@@ -53,6 +53,9 @@ struct CreateChannelReq {
     /// 哈希强度档位："19"（默认）/ "64" / "256"。
     #[serde(default)]
     hash_tier: Option<String>,
+    /// 所属分类（categories.id）。None = 未分类。
+    #[serde(default)]
+    category_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +64,8 @@ struct UpdateChannelReq {
     name: Option<String>,
     #[serde(default)]
     position: Option<i64>,
+    #[serde(default)]
+    category_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -76,9 +81,9 @@ async fn list_channels(
     let uid = authenticate(&state, &headers).await?;
 
     // 私密频道只对已加入的成员可见。
-    type ChannelRow = (String, String, String, i64, i64, i64, Option<String>);
+    type ChannelRow = (String, String, String, i64, i64, i64, Option<String>, Option<String>);
     let rows: Vec<ChannelRow> = sqlx::query_as(
-        "SELECT id, name, kind, position, created_at, is_private, hash_tier \
+        "SELECT id, name, kind, position, created_at, is_private, hash_tier, category_id \
          FROM channels \
          WHERE is_private = 0 \
             OR id IN (SELECT channel_id FROM channel_members WHERE login_id = ?) \
@@ -91,7 +96,7 @@ async fn list_channels(
     let channels = rows
         .into_iter()
         .map(
-            |(id, name, kind, position, created_at, is_private, hash_tier)| Channel {
+            |(id, name, kind, position, created_at, is_private, hash_tier, category_id)| Channel {
                 id,
                 name,
                 kind,
@@ -99,6 +104,7 @@ async fn list_channels(
                 created_at,
                 is_private: is_private != 0,
                 hash_tier,
+                category_id,
             },
         )
         .collect();
@@ -168,8 +174,8 @@ async fn create_channel(
     // 事务：INSERT channel + 创建者自动加入 channel_members
     let mut tx = state.pool.begin().await?;
     sqlx::query(
-        "INSERT INTO channels (id, name, kind, position, created_at, is_private, password_hash, hash_tier) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO channels (id, name, kind, position, created_at, is_private, password_hash, hash_tier, category_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&name)
@@ -179,6 +185,7 @@ async fn create_channel(
     .bind(if req.is_private { 1i64 } else { 0i64 })
     .bind(password_hash.as_deref())
     .bind(hash_tier.as_deref())
+    .bind(req.category_id.as_deref())
     .execute(&mut *tx)
     .await?;
 
@@ -202,6 +209,7 @@ async fn create_channel(
         created_at: now,
         is_private: req.is_private,
         hash_tier: hash_tier.clone(),
+        category_id: req.category_id.clone(),
     };
 
     // 私密频道只广播给成员，避免向全服泄露频道名/存在性。
@@ -227,13 +235,13 @@ async fn update_channel(
     let uid = authenticate(&state, &headers).await?;
     check_write_perm(&state, uid.as_str()).await?;
 
-    let row: Option<(String, String, i64, i64, i64, Option<String>)> = sqlx::query_as(
-        "SELECT name, kind, position, created_at, is_private, hash_tier FROM channels WHERE id = ?",
+    let row: Option<(String, String, i64, i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT name, kind, position, created_at, is_private, hash_tier, category_id FROM channels WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.pool)
     .await?;
-    let (mut name, kind, mut position, created_at, is_private_raw, hash_tier) =
+    let (mut name, kind, mut position, created_at, is_private_raw, hash_tier, mut category_id) =
         row.ok_or_else(|| ApiError::NotFound("channel".into()))?;
     let is_private = is_private_raw != 0;
 
@@ -283,6 +291,17 @@ async fn update_channel(
             .await?;
     }
 
+    if req.category_id.is_some() {
+        // Treat empty string as null (uncategorize).
+        let new_cat = req.category_id.clone().filter(|s| !s.is_empty());
+        sqlx::query("UPDATE channels SET category_id = ? WHERE id = ?")
+            .bind(new_cat.as_deref())
+            .bind(&id)
+            .execute(&state.pool)
+            .await?;
+        category_id = new_cat;
+    }
+
     let channel = Channel {
         id,
         name,
@@ -291,6 +310,7 @@ async fn update_channel(
         created_at,
         is_private,
         hash_tier,
+        category_id,
     };
     broadcast_channel_scoped(
         &state,

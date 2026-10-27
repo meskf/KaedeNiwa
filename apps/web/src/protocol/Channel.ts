@@ -19,4 +19,8 @@ is_private: boolean,
 /**
  * 哈希强度档位（"19" / "64" / "256"）。仅 UI 展示，verify 走 PHC 串真实参数。
  */
-hash_tier: string | null, };
+hash_tier: string | null,
+/**
+ * 所属分类（categories.id）。None = 未分类。
+ */
+category_id: string | null, };

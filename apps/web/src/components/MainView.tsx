@@ -33,6 +33,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     pendingMessages, addPending, removePending, markPendingFailed, incrementRetry,
     peerStatus,
   } = useChatStore()
+  const categories = useChatStore(s => s.categories)
+  const setCategories = useChatStore(s => s.setCategories)
   const richInputRef = useRef<RichTextInputHandle | null>(null)
   const { theme, setTheme } = useTheme()
   const { t } = useI18n()
@@ -77,8 +79,14 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           kind: c.kind,
           position: Number(c.position),
           is_private: !!c.is_private,
+          category_id: c.category_id ?? null,
         }))
         setChannelList(mapped)
+        try {
+          const rawCats = await client.listCategories()
+          const catArr = typeof rawCats === 'string' ? JSON.parse(rawCats) : rawCats
+          if (Array.isArray(catArr)) setCategories(catArr)
+        } catch (e) { console.warn('[categories] list failed (fallback to kind split):', e) }
       } catch (e) {
         console.error('[channels] list:', e)
       }
@@ -481,8 +489,63 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
   const getInitial = (str: string) => str ? str.charAt(0).toUpperCase() : '?'
 
-  const textChannels = channelList.filter(c => c.kind === 'text')
-  const voiceChannels = channelList.filter(c => c.kind === 'voice')
+  const renderTextChannel = (ch: any) => (
+    <div
+      key={ch.id}
+      data-testid={`channel-item-${ch.id}`}
+      onClick={() => { setChannel(ch.id); setActiveView('chat') }}
+      className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex items-center gap-2.5 transition-colors ${
+        currentChannel === ch.id && activeView === 'chat'
+          ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
+          : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
+      }`}
+    >
+      <IconHash className="w-4 h-4 opacity-50" /> {ch.name}
+    </div>
+  )
+
+  const renderVoiceChannel = (vc: any) => (
+    <div
+      key={vc.id}
+      data-testid={`channel-item-${vc.id}`}
+      onClick={() => { setChannel(vc.id); setActiveView('chat') }}
+      className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex flex-col gap-2 transition-colors ${
+        currentChannel === vc.id && activeView === 'chat'
+          ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
+          : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
+      }`}
+    >
+      <div className="flex items-center gap-2.5">
+        <IconVolume className="w-4 h-4 opacity-50" /> {vc.name}
+        {inVoice && currentChannel === vc.id && media.audioBitrate > 0 && (
+          <span data-testid={`voice-bitrate-${vc.id}`} className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--bg-active)] text-[var(--text-muted)]">
+            {media.audioBitrate}K
+          </span>
+        )}
+      </div>
+      {inVoice && currentChannel === vc.id && (
+        <div className="pl-6 flex flex-col gap-1 mt-1">
+          {Object.values(media.participants || {}).map((p: any) => (
+            <div
+              key={p.identity}
+              data-participant={p.identity}
+              data-mic={p.isMicrophoneEnabled ? 'on' : 'off'}
+              data-speaking={p.isSpeaking ? 'on' : 'off'}
+              className="flex items-center gap-2 cursor-pointer hover:bg-[var(--bg-hover)] rounded px-1 -mx-1 py-0.5 transition-colors"
+              onContextMenu={(e) => handleMemberContextMenu(e, p.identity, true)}
+            >
+              <div className="w-5 h-5 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[10px] font-bold text-[var(--text-main)]">
+                {getInitial(p.identity)}
+              </div>
+              <span className="text-[12px] text-[var(--text-main)]">{p.identity}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+
+  const sortedCategories = [...categories].sort((a, b) => Number(a.position) - Number(b.position))
   const currentChannelInfo = channelList.find(c => c.id === currentChannel)
   const currentChannelName = currentChannelInfo?.name || currentChannel
   const isVoiceChannel = currentChannelInfo ? currentChannelInfo.kind === 'voice' : false
@@ -554,68 +617,42 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               </div>
             </div>
 
-            <div className="">
-              <div className="mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
-                Text Channels
-              </div>
-              {textChannels.map(ch => (
-  <div
-    key={ch.id}
-    data-testid={`channel-item-${ch.id}`}
-    onClick={() => { setChannel(ch.id); setActiveView('chat') }}
-    className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex items-center gap-2.5 transition-colors ${
-      currentChannel === ch.id && activeView === 'chat'
-        ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
-        : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
-    }`}
-  >
-    <IconHash className="w-4 h-4 opacity-50" /> {ch.name}
-  </div>
-))}
-
-              <div className="mt-8 mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
-                Voice Channels
-              </div>
-              {voiceChannels.map(vc => (
-                <div
-                  key={vc.id}
-                  data-testid={`channel-item-${vc.id}`}
-                  onClick={() => { setChannel(vc.id); setActiveView('chat') }}
-                  className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex flex-col gap-2 transition-colors ${
-                    currentChannel === vc.id && activeView === 'chat'
-                      ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
-                      : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <IconVolume className="w-4 h-4 opacity-50" /> {vc.name}
-                    {inVoice && currentChannel === vc.id && media.audioBitrate > 0 && (
-                      <span data-testid={`voice-bitrate-${vc.id}`} className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--bg-active)] text-[var(--text-muted)]">
-                        {media.audioBitrate}K
-                      </span>
-                    )}
+            <div className="overflow-y-auto">
+              {categories.length === 0 ? (
+                <>
+                  <div className="mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
+                    Text Channels
                   </div>
-                  {inVoice && currentChannel === vc.id && (
-                    <div className="pl-6 flex flex-col gap-1 mt-1">
-                      {Object.values(media.participants || {}).map((p: any) => (
-                        <div
-                          key={p.identity}
-                          data-participant={p.identity}
-                          data-mic={p.isMicrophoneEnabled ? 'on' : 'off'}
-                          data-speaking={p.isSpeaking ? 'on' : 'off'}
-                          className="flex items-center gap-2 cursor-pointer hover:bg-[var(--bg-hover)] rounded px-1 -mx-1 py-0.5 transition-colors"
-                          onContextMenu={(e) => handleMemberContextMenu(e, p.identity, true)}
-                        >
-                          <div className="w-5 h-5 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[10px] font-bold text-[var(--text-main)]">
-                            {getInitial(p.identity)}
-                          </div>
-                          <span className="text-[12px] text-[var(--text-main)]">{p.identity}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
+                  {channelList.filter(c => c.kind === 'text').map(renderTextChannel)}
+                  <div className="mt-8 mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
+                    Voice Channels
+                  </div>
+                  {channelList.filter(c => c.kind === 'voice').map(renderVoiceChannel)}
+                </>
+              ) : (
+                <>
+                  {sortedCategories.map((cat: any) => {
+                    const inCat = channelList.filter(c => c.category_id === cat.id)
+                    if (inCat.length === 0) return null
+                    return (
+                      <div key={cat.id} className="mb-4" data-testid={`category-${cat.id}`}>
+                        <div className="mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">{cat.name}</div>
+                        {inCat.map((ch: any) => ch.kind === 'voice' ? renderVoiceChannel(ch) : renderTextChannel(ch))}
+                      </div>
+                    )
+                  })}
+                  {(() => {
+                    const uncat = channelList.filter(c => !c.category_id)
+                    if (uncat.length === 0) return null
+                    return (
+                      <div className="mb-4">
+                        <div className="mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">Uncategorized</div>
+                        {uncat.map((ch: any) => ch.kind === 'voice' ? renderVoiceChannel(ch) : renderTextChannel(ch))}
+                      </div>
+                    )
+                  })()}
+                </>
+              )}
             </div>
           </aside>
 

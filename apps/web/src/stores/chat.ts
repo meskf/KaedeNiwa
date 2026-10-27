@@ -1,4 +1,5 @@
 import type { Attachment } from '../protocol/Attachment';
+import type { Category } from '../protocol/Category';
 import { create } from 'zustand';
 
 export interface PendingMsg {
@@ -36,6 +37,7 @@ export interface ChannelInfo {
   kind: string;
   position: number;
   is_private: boolean;
+  category_id?: string | null;
 }
 
 export interface DmConversation {
@@ -70,6 +72,7 @@ interface ChatState {
   peerStatus: string;
 
   channelList: ChannelInfo[];
+  categories: Category[];
   dmConversations: DmConversation[];
   activeConvId: string | null;
   dmMessages: Record<string, DmMessage[]>;
@@ -89,6 +92,9 @@ interface ChatState {
   setPeerStatus: (status: string) => void;
 
   setChannelList: (list: ChannelInfo[]) => void;
+  setCategories: (cats: Category[]) => void;
+  addCategory: (c: Category) => void;
+  removeCategory: (id: string) => void;
   setDmConversations: (c: DmConversation[]) => void;
   addDmConversation: (c: DmConversation) => void;
   setActiveConv: (id: string | null) => void;
@@ -116,6 +122,7 @@ export const useChatStore = create<ChatState>((set) => ({
   peerStatus: '',
 
   channelList: [],
+  categories: [],
   dmConversations: [],
   activeConvId: null,
   dmMessages: {},
@@ -156,6 +163,9 @@ export const useChatStore = create<ChatState>((set) => ({
   setPeerStatus: (peerStatus) => set({ peerStatus }),
 
   setChannelList: (channelList) => set({ channelList }),
+  setCategories: (categories) => set({ categories }),
+  addCategory: (c) => set((state) => state.categories.some(x => x.id === c.id) ? state : { categories: [...state.categories, c] }),
+  removeCategory: (id) => set((state) => ({ categories: state.categories.filter(c => c.id !== id) })),
   setDmConversations: (dmConversations) => set({ dmConversations }),
   addDmConversation: (c) => set((state) => {
     if (state.dmConversations.some(x => x.conv_id === c.conv_id)) return state;

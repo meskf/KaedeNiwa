@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use kaede_server::{
-    admin, attachments, channels, config::Config, db, dm, friends, http, livekit, members, reads,
-    sessions_api, state::AppState, ws,
+    admin, attachments, categories, channels, config::Config, db, dm, friends, http, livekit,
+    members, reads, sessions_api, state::AppState, ws,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -216,6 +216,7 @@ async fn main() -> Result<()> {
             .merge(friends::router(state.clone()))
             .merge(dm::router(state.clone()))
             .merge(livekit::router(state.clone()))
+            .merge(categories::router(state.clone()))
             .merge(channels::router(state.clone()))
             .merge(members::router(state.clone()))
             .merge(reads::router(state.clone()))
