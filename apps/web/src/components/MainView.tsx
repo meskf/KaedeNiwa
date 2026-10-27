@@ -422,19 +422,21 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     } catch (e) { console.error('[ctx remove]', e) }
   }
 
-  const handleJoinMedia = async () => {
+  const handleJoinMedia = async (targetCh: string) => {
     const client = getClient()
     if (!client) return
+    if (media.connected && media.channelId === targetCh) return // 避免重复加入
+
     try {
       useChatStore.getState().setPeerStatus('Joining voice...')
-      await client.join_channel(currentChannel)
+      await client.join_channel(targetCh)
       await new Promise(r => setTimeout(r, 500))
-      const tokenJson = await client.begin_media_session(currentChannel)
+      const tokenJson = await client.begin_media_session(targetCh)
       const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
       await connectMedia({
         wsUrl: tokenData.ws_url,
         token: tokenData.token,
-        channelId: currentChannel,
+        channelId: targetCh,
         e2eeKeyB64: tokenData.e2ee_seed,
         disableAdaptive: (window as any).__KAEDE_TEST_DISABLE_ADAPTIVE__ === true,
       })
@@ -446,8 +448,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
   const handleLeaveMedia = async () => {
     const client = getClient()
-    if (client) {
-      try { await client.leave_media_room(currentChannel) } catch (e) { /* ignore */ }
+    if (client && media.channelId) {
+      try { await client.leave_media_room(media.channelId) } catch (e) { /* ignore */ }
     }
     await disconnectMedia()
     useChatStore.getState().setPeerStatus('')
@@ -525,21 +527,24 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       key={vc.id}
       data-testid={`channel-item-${vc.id}`}
       onClick={() => { setChannel(vc.id); setActiveView('chat') }}
+      onDoubleClick={(e) => { e.stopPropagation(); handleJoinMedia(vc.id) }}
       className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex flex-col gap-2 transition-colors ${
         currentChannel === vc.id && activeView === 'chat'
           ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
           : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
       }`}
+      title="双击加入语音频道"
     >
       <div className="flex items-center gap-2.5">
         <IconVolume className="w-4 h-4 opacity-50" /> {vc.name}
-        {inVoice && currentChannel === vc.id && media.audioBitrate > 0 && (
+        {media.connected && media.channelId === vc.id && media.audioBitrate > 0 && (
           <span data-testid={`voice-bitrate-${vc.id}`} className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--bg-active)] text-[var(--text-muted)]">
             {media.audioBitrate}K
           </span>
         )}
       </div>
-      {inVoice && currentChannel === vc.id && (
+      {/* 只要在这个频道里，不管当前看的是哪个频道，都显示成员列表 */}
+      {media.connected && media.channelId === vc.id && (
         <div className="pl-6 flex flex-col gap-1 mt-1">
           {Object.values(media.participants || {}).map((p: any) => (
             <div
@@ -636,7 +641,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               </div>
             </div>
 
-            <div className="overflow-y-auto">
+            <div className="flex-1 overflow-y-auto pb-2">
               {categories.length === 0 ? (
                 <>
                   <div className="mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
@@ -709,6 +714,11 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 </>
               )}
             </div>
+            {media.connected && media.channelId && (
+              <div className="shrink-0 w-full pb-4 mt-auto">
+                <MediaBar channelId={media.channelId} compact={true} />
+              </div>
+            )}
           </aside>
 
           {/* 右侧成员列表 */}
@@ -755,32 +765,33 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                   <div className="flex items-center gap-3 shrink-0">
         
         
-                    {isVoiceChannel && (inVoice ? (
-                      <button
-                        data-testid="media-leave"
-                        onClick={handleLeaveMedia}
-                        className="text-[13px] px-5 py-2 rounded-md bg-[var(--bg-hover)] hover:bg-[var(--bg-active)] transition-colors font-medium text-red-500 whitespace-nowrap"
-                      >
-                        Leave Voice
-                      </button>
-                    ) : (
-                      <button
-                        data-testid="media-join"
-                        onClick={handleJoinMedia}
-                        className="text-[13px] px-5 py-2 rounded-md bg-[var(--text-main)] text-[var(--bg-app)] hover:opacity-90 transition-opacity font-semibold whitespace-nowrap"
-                      >
-                        Join Voice
-                      </button>
-                    ))}
+                    {isVoiceChannel && (
+                      media.connected && media.channelId === currentChannel ? (
+                        <button
+                          data-testid="media-leave"
+                          onClick={handleLeaveMedia}
+                          className="text-[13px] px-5 py-2 rounded-md bg-[var(--bg-hover)] hover:bg-[var(--bg-active)] transition-colors font-medium text-red-500 whitespace-nowrap"
+                        >
+                          Leave Voice
+                        </button>
+                      ) : (
+                        <button
+                          data-testid="media-join"
+                          onClick={() => handleJoinMedia(currentChannel)}
+                          className="text-[13px] px-5 py-2 rounded-md bg-[var(--text-main)] text-[var(--bg-app)] hover:opacity-90 transition-opacity font-semibold whitespace-nowrap"
+                        >
+                          Join Voice
+                        </button>
+                      )
+                    )}
                   </div>
                 </div>
 
-                {inVoice && <MediaBar channelId={currentChannel} />}
-
-                {/* 屏幕共享独立区域 */}
-                <div className="w-full flex justify-center px-4 mt-2 shrink-0 max-h-[30vh]">
-                  <ScreenShareView />
-                </div>
+                {media.connected && media.channelId && (
+                  <div className="w-full flex justify-center px-4 mt-2 shrink-0 max-h-[30vh]">
+                    <ScreenShareView />
+                  </div>
+                )}
 
                 {/* 消息列表 */}
                 <div className="flex-1 overflow-y-auto overflow-x-hidden mb-2 pr-2 w-full min-h-[100px]">

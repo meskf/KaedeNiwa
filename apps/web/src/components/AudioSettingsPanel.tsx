@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useI18n } from '../stores/i18n'
 import { useMediaState } from '../hooks/useLiveKitRoom'
 import {
@@ -47,7 +48,7 @@ export function AudioSettingsPanel({ onClose }: Props) {
   const inputVol = media.inputVolume
   const outputVol = media.outputVolume
 
-  return (
+  const modalContent = (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={onClose}>
       <div
         className="w-[360px] max-w-full max-h-[calc(100vh-4rem)] overflow-y-auto rounded-lg bg-[var(--bg-app)] border border-[var(--bg-active)] shadow-xl py-2 text-[var(--text-main)]"
@@ -142,4 +143,5 @@ export function AudioSettingsPanel({ onClose }: Props) {
       </div>
     </div>
   )
+  return createPortal(modalContent, document.body)
 }

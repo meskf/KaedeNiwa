@@ -35,6 +35,7 @@ import {
 import { $serializeToMarkdown } from '../lib/lexicalMarkdown'
 import { IconSend } from './icons'
 import { AttachmentPicker } from './AttachmentPicker'
+import { useChatStore } from '../stores/chat'
 
 const MD_TRANSFORMERS: Transformer[] = [
   UNORDERED_LIST,
@@ -61,6 +62,9 @@ interface InnerProps {
 function EditorInner({ onSubmit, placeholder, handleRef }: InnerProps) {
   const [editor] = useLexicalComposerContext()
   const markdownRef = useRef('')
+
+  const pending = useChatStore(s => s.pendingAttachments)
+  const removePending = useChatStore(s => s.removePendingAttachment)
 
   const submitNow = useCallback(() => {
     const md = markdownRef.current.trim()
@@ -102,9 +106,32 @@ function EditorInner({ onSubmit, placeholder, handleRef }: InnerProps) {
   }, [editor])
 
   return (
-    <div className="flex-1 flex items-center min-w-0">
-      {/* 输入区：垂直居中，可多行撑高 */}
-      <div className="relative flex-1 min-w-0 max-h-[200px] overflow-y-auto flex items-center py-0.5">
+    <div className="flex-1 flex flex-col w-full min-w-0 justify-end">
+      {/* 附件预览列表 */}
+      {pending.length > 0 && (
+        <div className="w-full mb-2 flex flex-wrap gap-1.5 px-1">
+          {pending.map(p => (
+            <div key={p.id} className="relative flex items-center gap-1.5 px-2 py-1 rounded-md bg-[var(--bg-active)] text-[11px] text-[var(--text-main)] shadow-sm">
+              <span className="truncate max-w-[140px]">{p.name}</span>
+              <span className="text-[var(--text-muted)] shrink-0">{(p.size / 1024).toFixed(0)}KB</span>
+              {p.status === 'uploading' && p.total > 0 && (
+                <span className="text-[10px] text-[var(--text-muted)]">{Math.round((p.sent / p.total) * 100)}%</span>
+              )}
+              <button
+                type="button"
+                onClick={() => removePending(p.id)}
+                className="text-[var(--text-muted)] hover:text-red-400 shrink-0 ml-1"
+                title="Remove"
+              >x</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 输入框和操作区 (横向布局) */}
+      <div className="flex items-center w-full min-w-0">
+        {/* 输入区：垂直居中，可多行撑高 */}
+        <div className="relative flex-1 min-w-0 max-h-[200px] overflow-y-auto flex items-center py-0.5">
         <RichTextPlugin
           contentEditable={
             <ContentEditable
@@ -147,6 +174,7 @@ function EditorInner({ onSubmit, placeholder, handleRef }: InnerProps) {
         >
           <IconSend className="w-4 h-4 block" />
         </button>
+      </div>
       </div>
     </div>
   )

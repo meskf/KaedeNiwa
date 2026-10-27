@@ -4,9 +4,7 @@ import { useChatStore } from '../stores/chat'
 const MAX_BYTES = 32 * 1024 * 1024
 
 export function AttachmentPicker() {
-  const pending = useChatStore(s => s.pendingAttachments)
   const addPending = useChatStore(s => s.addPendingAttachment)
-  const removePending = useChatStore(s => s.removePendingAttachment)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleFiles = useCallback(async (files: FileList | File[]) => {
@@ -48,25 +46,7 @@ export function AttachmentPicker() {
   return (
     <div onDrop={onDrop} onDragOver={onDragOver} className="contents">
       <input ref={fileInputRef} type="file" multiple className="hidden" onChange={onChange} />
-      {pending.length > 0 && (
-        <div className="w-full mb-1 flex flex-wrap gap-1.5">
-          {pending.map(p => (
-            <div key={p.id} className="relative flex items-center gap-1.5 px-2 py-1 rounded-md bg-[var(--bg-active)] text-[11px] text-[var(--text-main)]">
-              <span className="truncate max-w-[140px]">{p.name}</span>
-              <span className="text-[var(--text-muted)] shrink-0">{(p.size / 1024).toFixed(0)}KB</span>
-              {p.status === 'uploading' && p.total > 0 && (
-                <span className="text-[10px] text-[var(--text-muted)]">{Math.round((p.sent / p.total) * 100)}%</span>
-              )}
-              <button
-                type="button"
-                onClick={() => removePending(p.id)}
-                className="text-[var(--text-muted)] hover:text-red-400 shrink-0"
-                title="Remove"
-              >x</button>
-            </div>
-          ))}
-        </div>
-      )}
+      
       <button
         type="button"
         data-testid="attachment-picker"
