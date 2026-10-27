@@ -1,10 +1,10 @@
 KaedeNiwa HANDOFF
 =================
 
-最后更新：2026-10-27
+最后更新：2026-10-27（第二十三部分：UI 打磨 + 搜索 + 附件 E2EE 验证 + 频道分类 + 频道 CRUD UI）
 面向：接手的 AI 工程师 / 人类工程师
-状态：CI 12/12 全绿（含 e2e headless 6 个非 media），媒体层 E2EE 闭环，UI 重做完成
-HEAD：e2eb653（ui-rewrite / main 已 ff 同步）
+状态：桌面端 UI 打磨完成，附件 E2EE 端到端验证通过，频道分类 + CRUD 闭环。CI 未重跑（本轮改动未 push）。
+HEAD：见 git log（ui-rewrite）
 
 
 第一部分 项目定位
@@ -1107,3 +1107,192 @@ HEAD：待提交
 1. **不要迷信 Web API 的“理所当然”**：AudioWorklet 无法加载 emscripten wasm 是经典的兼容性坑。`MediaStreamTrackProcessor` 是主线程降噪的完美平替。
 2. **测试中的“假阳性”会掩盖问题**：`test-2` 之前一直 PASS，是因为它误发了一条消息导致对端“看不到”，被断言判定为隔离成功。重构时确保测试逻辑的真实性。
 3. **谨慎大面积重写 UI**：在 PowerShell 里用字符串 Replace 大批量修改 Tailwind 布局极易遗漏或误删关键属性（如 `relative`），以后涉及 UI 组件，最好整文件覆写。
+
+
+第二十三部分 2026-10-27 会话：UI 打磨 + 搜索 + 附件 E2EE 验证 + 频道分类 + 频道 CRUD
+=====================================================================================
+
+## 1. 本会话做了什么
+
+### 1.1 UI 打磨
+
+- **主题统一**：新增 `src/lib/theme.ts`，统一 light/dark 入口，localStorage 持久化（`kaede-theme`）。
+  - 默认浅色（和 Discord 一致）
+  - 登录页跟随主题（此前 :root 默认深色，登录页深、主界面浅）
+  - `main.tsx` 模块加载时先 applyTheme，避免刷新闪烁
+  - `MainView` 改用 `useTheme()` hook（原 inline useState+useEffect）
+- **删除 EmojiPicker**：用户决定不要。同时解决"1-2px 对齐"问题——根因是 emoji 字体 descender，删除后自然消失，无需 translate-y。
+- **Settings 页**（新）：账户信息 / 外观（theme 切换）/ 语言（en/zh 切换）。
+- **More 页**（新）：About（版本 / 服务端 / 加密协议）/ Voice & Video（真实状态：connected / channel / participants / mic / noise / screen / E2EE）/ Shortcuts。
+- **i18n**：`src/lib/i18n.ts` + `src/locales/{en,zh}.ts` + `src/stores/i18n.ts`（zustand）。自动检测 navigator.language + localStorage 持久化（`kaede-lang`）。全部组件接入 `t()`。
+- **音频增强**：
+  - `deafen`（拒听，一键静音全部远端）
+  - 设备选择（mic / speaker，enumerateDevices）
+  - 输入/输出音量滑块
+  - Push-to-Talk（Space 按住说话）
+  - 频道音质 badge（真实 RTCStatsReport 差分，Kbps 显示）
+  - 全部在 `AudioSettingsPanel.tsx`（居中 modal）
+- **用户右键菜单**（`UserContextMenu.tsx`）：发送消息 / 添加好友 / 移除好友。居中 modal。
+- **响应式**：**已回滚**（用户要求专注桌面端）。只保留右上角侧栏折叠开关 + `sidebarOpen` 状态。所有 sm:/md:/lg: 断点已删除。
+
+### 1.2 真 bug 修复
+
+1. **DM 双写**（P0）：`server dm.rs` B3 注释声称不推回 sender，但 probe6 实测**会推回**。client 加 `ev.DmReceived.from === loginId` 过滤。**server bug 待查**（`state.send_to` 边界）。
+2. **历史消息永久空白**（P0）：`initChannel` effect 只跑一次，登录时 MLS group 未就绪 → `load_history` 返回空 → 无 retry、无 re-trigger → 刷新后聊天记录永远空。
+   - 修复：retry 10×1.5s + `ChannelJoined` 事件触发 reload。
+   - **注意**：MLS 前向安全意味着"后加入频道看不到加入前消息"是**正确行为**，不是 bug（见 2.1）。
+3. **`AppMessageReceived` 丢附件**：`const { text }` → `const { text, attachments }`。
+4. **附件 size 显示密文大小**（53B vs 24B）：服务端只知道密文长度。客户端上传后覆盖成原文大小（`att.size = p.size`），这个值随 E2EE payload 走，接收方看到的也是原文大小。
+5. **附件块宽度撑满**：`inline-flex + max-w-[400px]`。同时去掉常驻背景色，只保留行 hover。
+6. **"Add failed: member already in group" 红字**：`add_member_to_channel` 重复加入时静默（`String(e).includes('already')`）。
+7. **footer 窄屏重叠**：改 3 段 flex（用户 / nav / 版本），去掉 absolute 居中。
+8. **Settings 页残留硬编码 `{activeView}` 标题**：line 617 的 div 删除。
+
+### 1.3 E1：附件 E2EE 端到端验证（probe14b PASS）
+
+Alice 上传文件 → 客户端加密 → MLS 频道消息 → Bob 通过 WS 收到（< 2s）→ Bob 下载 → SHA-256 一致。
+
+**这个链路此前从未验证过**。HANDOFF 第二十二部分虽然写了附件全链路，但没有端到端测试。
+
+### 1.4 E2：搜索（Ctrl+K 命令面板）
+
+`SearchPalette.tsx`：
+- Ctrl+K / Cmd+K 全局打开；点击 header 搜索框也能打开
+- 搜索 `useChatStore.getState().messages`（所有已加载频道）
+- 高亮匹配（`<mark>`），长消息截断显示匹配前后 60 字符
+- ↑↓ 导航，Enter 跳转，Esc 关闭
+- 结果按 ts 倒序，最多 30 条
+
+**限制**：只搜已加载消息。服务端无法搜（E2EE）。跨会话持久化需要 IndexedDB 索引（未做）。
+
+### 1.5 E3-a：频道分类（backend + frontend）
+
+**Migration** `20261028000001_categories.sql`：
+- `categories` 表（id, name, position, created_at）
+- `channels.category_id`（可空，无 cascade）
+- 默认 seed：`cat_text` "Text Channels" pos 0，`cat_voice` "Voice Channels" pos 1
+- 回填现有频道：kind=text → cat_text，kind=voice → cat_voice
+
+**Backend**：
+- `categories.rs` 新模块（GET/POST/PATCH/DELETE /api/categories，op3+）
+- `channels.rs`：list/create/update 路径加 category_id
+- **坑**：`main.rs` 和 `lib.rs` 有**两套独立 router**，两处都要 merge categories::router
+
+**Client**：
+- `http.rs` list/create/update/delete_category
+- `room.rs` 直通包装
+- `wasm lib.rs` listCategories/createCategory/updateCategory/deleteCategory
+
+**Frontend**：
+- `protocol/Category.ts` 新
+- `stores/chat.ts` categories state + setCategories/addCategory/removeCategory
+- MainView 侧栏按 category 分组渲染，未分类兜底
+- 提取 `renderTextChannel` / `renderVoiceChannel` helper
+
+### 1.6 E3-b：频道 CRUD UI
+
+- `CreateChannelDialog.tsx`：类型（text/voice）/ 名称 / 分类下拉 / 私密+密码
+- `ChannelSettingsDialog.tsx`：改名 / 改分类 / 删除
+- 侧栏 category header hover 显示 `+`，频道项 hover 显示 `⚙`
+- i18n `channel.*`
+
+### 1.7 权限相关
+
+- **dev-mode 下新用户默认 op3**（release 仍是 op2）。`cfg!(feature = "dev-mode")` 编译期判断。
+- **`bin/promote.rs`**：`cargo run -p kaede-server --bin promote -- <login_id> <op>` 手动提权。
+- **`Cargo.toml default-run`**：加了 promote bin 后 `cargo run` 有歧义，必须设 default-run。
+- **`start-all.ps1`** 显式 `--bin kaede-server`。
+
+## 2. 已知限制（诚实标注）
+
+### 2.1 MLS 前向安全 vs 历史可读性（产品决策待定）
+
+后加入频道的成员无法解密加入前的消息（旧 epoch key 已丢弃）。这意味着：
+- 刷新页面后，如果 group 通过 Welcome 重建，历史消息会丢
+- 重新登录同一设备：snapshot 恢复可读
+- 新设备：不可读
+
+**当前策略**：接受。这是正确的 MLS 行为，不是 bug。
+
+**若需改**：
+1. 客户端 IndexedDB 持久化解密后的历史（已有 `load_local_messages` 机制，但只对非 MLS group 生效，需要扩展到 MLS group）
+2. 或放宽到"服务端可读历史"（违背 E2EE 原则，不推荐）
+
+### 2.2 搜索只覆盖已加载消息
+
+跨频道、跨刷新的搜索需要客户端本地索引。IndexedDB 已有基础（kaede-storage crate），但没接。
+
+### 2.3 dev-mode op3 是临时策略
+
+生产构建新用户仍是 op2。需要 op 管理 UI 后才能正常提权（现在只能 `promote` 命令行）。
+
+### 2.4 server dm.rs B3 bug 未修复
+
+probe6 确认服务端会把 DM 推回 sender，与注释不符。客户端已过滤（防御性），但服务端根因未查（`state.send_to` 边界条件）。
+
+### 2.5 其他
+
+- CI 未重跑（本地改动未 push）
+- deploy/ 仍未验证
+- 移动端响应式已放弃（用户要求专注桌面）
+
+## 3. 测试方法
+
+### 3.1 probe 列表（`apps/web/_probe*.cjs`）
+
+```
+probe6         DM 自回显诊断
+probe11b       侧栏折叠 + 移动端自动关
+probe13/14b    附件端到端（14b PASS，13 因 MLS 前向安全"失败"是正确行为）
+probe16        size 修正 + 宽度 400 + Add failed 静默
+probe17        附件块无背景
+probe18        搜索（3 条消息 → Ctrl+K → apple 返回 2 条 → 空态 → 点击/Esc 关闭）
+probe19        category 分组（2 个分类 + general/voice 正确归类）
+probe20        频道 CRUD UI（+ 按钮 → 创建 → gear → 改名 → 保存）
+```
+
+### 3.2 手动验证
+
+```
+cd apps/web
+node _probe14b.cjs    # 附件 E2EE
+node _probe18.cjs     # 搜索
+node _probe19.cjs     # category
+node _probe20.cjs     # 频道 CRUD
+```
+
+### 3.3 promote 提权
+
+```
+cd D:\dev2\kaedeniwa
+cargo run -p kaede-server --bin promote -- <login_id> op3
+```
+
+## 4. 下一步（待用户定）
+
+按成本/价值排序的 E3 剩余块：
+
+| 块 | 做什么 | 成本 | 备注 |
+|---|---|---|---|
+| D. 服务器个性化 | 服务器名/图标/描述可改（现在硬编码） | 2-3h | 私有化部署第一步 |
+| B. op 管理 UI | Settings 加"成员"tab，op 下拉改级 | 3-4h | 替代 promote 命令行 |
+| A. 分区管理 UI | 分区新建/改名/删除/排序 | 2-4h | 补全 E3-a |
+| C. 完整角色系统 | roles 表 + member_roles + 权限位 + 每频道覆盖 | 1-2 天 | Discord 级别 |
+
+**推荐顺序**：D → B → A → C。C 适合"服务器已有人气、多管理员"时再做。
+
+## 5. 本会话的教训
+
+1. **`String.includes` 不接 regex**：`_patch-i18n.cjs` 第一次跑崩。`rep()` 辅助函数必须兼容两种类型（`typeof search === 'string' ? s.includes(search) : search.test(s)`）。
+2. **`main.rs` 和 `lib.rs` 有两套独立 router**：E3-a 后端挂载 categories 时只改了 lib.rs，main.rs 漏了。**任何 router 改动必须两处都改**。
+3. **`cargo run` 多 bin 歧义**：加了 promote bin 后 `cargo run -p kaede-server` 直接报错。需要 `default-run` 或 `--bin`。
+4. **`page.evaluate` 里不能有 TS 语法**（HANDOFF 坑 7 重现）。`as any` 会报 SyntaxError。
+5. **`cargo check` 通过 ≠ binary 更新**：mtime 更新不代表 binary 真的重编了。要验证字符串在 binary 里：
+   ```powershell
+   $bytes = [System.IO.File]::ReadAllBytes("target\debug\kaede-server.exe")
+   $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+   $text.Contains('/api/categories')
+   ```
+6. **缩进必须精确匹配**：patch 脚本里多行字符串替换，缩进错一个空格就 MISS。**行号定位比字符串定位更可靠**。
+7. **PowerShell here-string 里的中文经过管道会乱码**：`git commit -F` 用 UTF-8 文件；commit message 用英文；HANDOFF 用 Node 脚本 UTF-8 写入。
+8. **`git status` 噪声**：`_*.cjs` / `_probe*.cjs` 是 ad-hoc 脚本，应加 `.gitignore`（已加，但 `_check-*.cjs` / `_e3b-*.cjs` 漏了，下轮清理）。
