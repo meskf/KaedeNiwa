@@ -513,7 +513,7 @@ async fn fetch_keypackage(
     // （约 1 次 / 10s，突发 2）。即使攻击者换账号，单账号也无法快速清空队列。
     if !cfg!(feature = "dev-mode") {
         let pair_scope = format!("kp_pair:{}:{}", uid.as_str(), login_id);
-        if !state.check_rate_scoped(&uid, &pair_scope, 0.1, 2.0) {
+        if !state.check_rate_key(&pair_scope, 0.1, 2.0) {
             state.metrics.rate_limited();
             return Err(ApiError::TooManyRequests(
                 "keypackage pair rate limited".into(),
@@ -536,7 +536,7 @@ async fn fetch_keypackage(
         // 防抽干第二层：per-target 全局限流（防多账号轮换）。
         if !cfg!(feature = "dev-mode") {
             let target_scope = format!("kp_target:{}", login_id);
-            if !state.check_rate_scoped(&uid, &target_scope, 0.1, 2.0) {
+            if !state.check_rate_key(&target_scope, 0.1, 2.0) {
                 state.metrics.rate_limited();
                 tracing::warn!(
                     "keypackage fetch throttled: target={} requester={}",

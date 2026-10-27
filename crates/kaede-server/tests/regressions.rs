@@ -920,7 +920,6 @@ async fn unread_counts_track_reads() {
 }
 
 /// 登录设备：列表、撤销其他会话、撤销当前会话。
-#[ignore] // TODO: session 行为已变更（新登录踢旧），测试期望过时，下轮移除
 #[tokio::test]
 async fn sessions_list_and_revoke() {
     let (url, _pool) = start_server().await;
@@ -961,7 +960,7 @@ async fn sessions_list_and_revoke() {
         .await
         .unwrap();
     let list = sessions["sessions"].as_array().unwrap();
-    assert_eq!(list.len(), 2);
+    assert_eq!(list.len(), 1); // 新登录踢旧 session，只剩最新 1 个
     assert_eq!(list.iter().filter(|s| s["current"] == true).count(), 1);
     assert!(
         list.iter()
