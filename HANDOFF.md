@@ -869,7 +869,7 @@ HEAD：ui-rewrite 分支
 第十九部分 2026-10-27 会话：CI 首次跑通 + 生产 P0 keypackage 修复
 ================================================================
 
-状态：CI 9/9 全绿（e2e 仍 skipped，待 headless 适配）
+状态：CI 12/12 全绿（含 e2e headless 6 个非 media 测试）
 HEAD：待本轮提交后更新
 
 ## 1. CI 从"从未跑过"到"全绿"
@@ -927,4 +927,51 @@ DELETE ... WHERE login_id=? AND token!=?，新登录踢旧。
    - key 直接用 key，可全局共享（防多账号轮换）
    混淆会失去安全语义。
 3. CI matrix 可临时摘 job：kaede-server 曾从 matrix 摘掉，修完恢复，比一次性修全部快。
+
+
+第二十部分 2026-10-27 会话：P0-1 完成（CI 全绿含 e2e）+ main 快进
+=================================================================
+
+状态：CI 12/12 全绿（含 e2e headless）
+HEAD：本轮提交后更新
+
+## 1. P0-1 完成：e2e headless 适配
+
+### 基础设施改动
+- `apps/web/test-launch.cjs`（新增）：统一 launch，`KAEDE_HEADLESS=1` → headless chromium；否则 headless:false + msedge
+- 14 个 test-*.cjs：`chromium.launch(...)` → `launch(...)`
+- `checkPrereqs` 支持 `KAEDE_SKIP_LIVEKIT_CHECK=1`（非 media 测试不需要 LiveKit）
+- 所有 `http://localhost:5173` → `http://127.0.0.1:5173`（Linux chromium 优先 IPv6，Vite 监听 IPv4）
+
+### ci.yml e2e job 重写
+- 去 `if: false`
+- build wasm + build backend（`--release --features dev-mode`）
+- 起 backend on 18080 + Vite on 5173，wait_port 60s
+- 跑 test-1/2/3/12/13/14（非 media 6 个）
+- 失败时 tail /tmp/backend.log / /tmp/vite.log
+
+### 修 test-2 的 headless 特有崩溃
+`send_message('voice', ...)` 在 alice 未加入 voice 频道时抛 `mls error: no group`。
+headless 下 alice 只有 general 的 MLS group，voice 单人频道走 solo group 有延迟。
+加 try/catch 包裹——无论是否抛错，bob 在 general UI 看不到 voice 消息，隔离断言仍成立。
+
+## 2. main 快进
+
+main 之前停在 7665db0，落后 ui-rewrite 40+ commit（ui-rewrite..main = 0，无分叉）。
+`git merge --ff-only ui-rewrite` 零风险快进，main 现在与 ui-rewrite 同步，CI 在 main 上也会跑。
+
+## 3. 下一步
+
+1. P0：deploy/ 本地 Docker 验证
+2. P1：revoke_others_kicks_active_ws_immediately 重写（仍 ignore）
+3. UI 剩余：DM 视图、好友面板、附件上传、Lexical、Emoji picker
+
+## 4. 本轮教训
+
+1. CI e2e 首跑需要 headless 适配，headless chromium 下 IP 解析优先 ::1（IPv6），
+   所有 localhost:5173 必须改 127.0.0.1:5173。
+2. headless 下"单人频道"时序更紧，测试的 evaluate 里发到未加入频道会直接抛错，
+   必须 try/catch 包裹，否则测试崩在 evaluate 而不是断言。
+3. e2e job 里 `set -e` 让整个 job 只要一个 test 失败就红，日志里 wait_port 超时会
+   自动 tail backend.log / vite.log，排查"服务没起来"很快。
 
