@@ -279,7 +279,14 @@ async fn missed_commits_are_replayed_on_epoch_report() {
     // bob 上线，上报自己还在 epoch 2 → 服务器补投 epoch 5 的 commit。
     let mut b = connect_auth(&url, &bob).await;
     join(&mut b).await;
-    send(&mut b, ClientMessage::ReportEpoch { epoch: 2, channel_id: None }).await;
+    send(
+        &mut b,
+        ClientMessage::ReportEpoch {
+            epoch: 2,
+            channel_id: None,
+        },
+    )
+    .await;
 
     let got = recv_until(&mut b, |m| matches!(m, ServerMessage::MlsCommit { .. })).await;
     match got {

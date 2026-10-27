@@ -965,10 +965,8 @@ async fn post_message(
         .await?;
 
         // 2. channel_members ∪ online peers（排除发送者）
-        let mut recipients: std::collections::HashSet<String> = db_members
-            .into_iter()
-            .map(|(m,)| m)
-            .collect();
+        let mut recipients: std::collections::HashSet<String> =
+            db_members.into_iter().map(|(m,)| m).collect();
         for peer_uid in state.peer_uids() {
             if peer_uid.as_str() == uid.as_str() {
                 continue;

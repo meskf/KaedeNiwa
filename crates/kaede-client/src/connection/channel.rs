@@ -75,7 +75,10 @@ impl ServerConnection {
     /// 本地 channel group 当前成员数；无 group 时返回 0。
     /// 用于 join_channel 判断"是多人群组还是单人占位群组"。
     pub fn channel_member_count(&self, channel_id: &str) -> usize {
-        let map = self.channel_groups.lock().unwrap_or_else(|e| e.into_inner());
+        let map = self
+            .channel_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         map.get(channel_id).map(|s| s.member_count()).unwrap_or(0)
     }
 
@@ -159,11 +162,14 @@ impl ServerConnection {
         drop(map);
         self.mark_channel_dirty(channel_id);
         #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&format!(
-            "[channel_process_commit] ok ch={} epoch={}",
-            channel_id,
-            self.channel_epoch(channel_id).unwrap_or(0)
-        ).into());
+        web_sys::console::log_1(
+            &format!(
+                "[channel_process_commit] ok ch={} epoch={}",
+                channel_id,
+                self.channel_epoch(channel_id).unwrap_or(0)
+            )
+            .into(),
+        );
         Ok(out)
     }
 
@@ -219,15 +225,22 @@ impl ServerConnection {
                 Ok(members) => {
                     if members.contains(me.as_str()) {
                         #[cfg(target_arch = "wasm32")]
-                        web_sys::console::log_1(&format!(
-                            "[wait_for_channel_members] ch={} me={} ok on attempt {}",
-                            channel_id, me, attempt + 1
-                        ).into());
+                        web_sys::console::log_1(
+                            &format!(
+                                "[wait_for_channel_members] ch={} me={} ok on attempt {}",
+                                channel_id,
+                                me,
+                                attempt + 1
+                            )
+                            .into(),
+                        );
                         return Ok(members);
                     }
                     last_err = Some(ClientError::Mls(format!(
                         "me {} not yet in channel {} (attempt {})",
-                        me, channel_id, attempt + 1
+                        me,
+                        channel_id,
+                        attempt + 1
                     )));
                 }
                 Err(e) => {
@@ -242,9 +255,8 @@ impl ServerConnection {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            ClientError::Mls("timeout waiting for channel members".into())
-        }))
+        Err(last_err
+            .unwrap_or_else(|| ClientError::Mls("timeout waiting for channel members".into())))
     }
     /// B2：处理 Welcome 加入 channel group。
     pub async fn channel_join_via_welcome(
@@ -253,27 +265,35 @@ impl ServerConnection {
         welcome: &[u8],
     ) -> Result<(), ClientError> {
         #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&format!(
-            "[channel_join_via_welcome] ch={} welcome_len={}",
-            channel_id, welcome.len()
-        ).into());
+        web_sys::console::log_1(
+            &format!(
+                "[channel_join_via_welcome] ch={} welcome_len={}",
+                channel_id,
+                welcome.len()
+            )
+            .into(),
+        );
         // 先对照服务端权威成员列表。查询失败直接拒绝，不能退化为“跳过校验”。
-    let mut allowed = match self.wait_for_channel_members(channel_id).await {
-        Ok(m) => {
-            #[cfg(target_arch = "wasm32")]
-            web_sys::console::log_1(&format!(
-                "[channel_join_via_welcome] allowed members: {:?}", m
-            ).into());
-            m
-        }
-        Err(e) => {
-            #[cfg(target_arch = "wasm32")]
-            web_sys::console::warn_1(&format!(
-                "[channel_join_via_welcome] wait_for_members FAILED, rejecting: {}", e
-            ).into());
-            return Err(e);
-        }
-    };
+        let mut allowed = match self.wait_for_channel_members(channel_id).await {
+            Ok(m) => {
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(
+                    &format!("[channel_join_via_welcome] allowed members: {:?}", m).into(),
+                );
+                m
+            }
+            Err(e) => {
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::warn_1(
+                    &format!(
+                        "[channel_join_via_welcome] wait_for_members FAILED, rejecting: {}",
+                        e
+                    )
+                    .into(),
+                );
+                return Err(e);
+            }
+        };
         // 先在 fork 出的临时 session 上解析 Welcome，得到新 group_id。
         // 已有旧 group 且 group_id 不同 → 用新群替换（权威重建频道群）；
         // 相同 → 重复投递，直接忽略。
@@ -284,17 +304,22 @@ impl ServerConnection {
                 .ok_or_else(|| ClientError::Mls("no main mls session".into()))?;
             let mut ch_session = main_session.fork_for_new_group();
             #[cfg(target_arch = "wasm32")]
-            web_sys::console::log_1(&"[channel_join_via_welcome] calling join_with_welcome...".into());
+            web_sys::console::log_1(
+                &"[channel_join_via_welcome] calling join_with_welcome...".into(),
+            );
             match ch_session.join_with_welcome(welcome) {
                 Ok(()) => {
                     #[cfg(target_arch = "wasm32")]
-                    web_sys::console::log_1(&"[channel_join_via_welcome] join_with_welcome OK".into());
+                    web_sys::console::log_1(
+                        &"[channel_join_via_welcome] join_with_welcome OK".into(),
+                    );
                 }
                 Err(e) => {
                     #[cfg(target_arch = "wasm32")]
-                    web_sys::console::warn_1(&format!(
-                        "[channel_join_via_welcome] join_with_welcome FAILED: {}", e
-                    ).into());
+                    web_sys::console::warn_1(
+                        &format!("[channel_join_via_welcome] join_with_welcome FAILED: {}", e)
+                            .into(),
+                    );
                     return Err(e);
                 }
             }
@@ -344,34 +369,51 @@ impl ServerConnection {
             if !members.contains(&me) {
                 tracing::warn!(
                     "[channel_join_via_welcome] me {} not in group; REJECTING: {}",
-                    me, e
+                    me,
+                    e
                 );
                 #[cfg(target_arch = "wasm32")]
-                web_sys::console::warn_1(&format!(
-                    "[channel_join_via_welcome] me not in group; REJECTING: {}", e
-                ).into());
+                web_sys::console::warn_1(
+                    &format!(
+                        "[channel_join_via_welcome] me not in group; REJECTING: {}",
+                        e
+                    )
+                    .into(),
+                );
                 return Err(e);
             }
             let extra: Vec<&String> = members.difference(&allowed).collect();
             if extra.len() > 3 {
                 tracing::warn!(
                     "[channel_join_via_welcome] {} extra members (max 3); REJECTING: {}",
-                    extra.len(), e
+                    extra.len(),
+                    e
                 );
                 #[cfg(target_arch = "wasm32")]
-                web_sys::console::warn_1(&format!(
-                    "[channel_join_via_welcome] {} extra members; REJECTING: {}", extra.len(), e
-                ).into());
+                web_sys::console::warn_1(
+                    &format!(
+                        "[channel_join_via_welcome] {} extra members; REJECTING: {}",
+                        extra.len(),
+                        e
+                    )
+                    .into(),
+                );
                 return Err(e);
             }
             tracing::warn!(
                 "[channel_join_via_welcome] accepting with {} extra member(s) (likely pending HTTP join): {}",
-                extra.len(), e
+                extra.len(),
+                e
             );
             #[cfg(target_arch = "wasm32")]
-            web_sys::console::log_1(&format!(
-                "[channel_join_via_welcome] accepting with {} extra member(s): {}", extra.len(), e
-            ).into());
+            web_sys::console::log_1(
+                &format!(
+                    "[channel_join_via_welcome] accepting with {} extra member(s): {}",
+                    extra.len(),
+                    e
+                )
+                .into(),
+            );
         }
 
         let new_group_id = probe.group_id().map(|g| g.to_vec());
@@ -396,13 +438,18 @@ impl ServerConnection {
             if new_epoch < local_epoch {
                 tracing::warn!(
                     "[channel_join_via_welcome] REJECT downgrade: ch={} local_epoch={} new_epoch={}",
-                    channel_id, local_epoch, new_epoch
+                    channel_id,
+                    local_epoch,
+                    new_epoch
                 );
                 #[cfg(target_arch = "wasm32")]
-                web_sys::console::warn_1(&format!(
-                    "[channel_join_via_welcome] REJECT downgrade: local={} new={}",
-                    local_epoch, new_epoch
-                ).into());
+                web_sys::console::warn_1(
+                    &format!(
+                        "[channel_join_via_welcome] REJECT downgrade: local={} new={}",
+                        local_epoch, new_epoch
+                    )
+                    .into(),
+                );
                 return Err(ClientError::Mls(format!(
                     "channel {} welcome is older (epoch {}) than local (epoch {}); refusing downgrade",
                     channel_id, new_epoch, local_epoch
@@ -418,11 +465,14 @@ impl ServerConnection {
         // P0-2：新 group 已建立，任何旧 epoch 的 buffered Commit 都无意义。
         self.clear_pending_channel_commits(channel_id);
         #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&format!(
-            "[channel_join_via_welcome] GROUP INSERTED ch={} epoch={}",
-            channel_id,
-            self.channel_epoch(channel_id).unwrap_or(0)
-        ).into());
+        web_sys::console::log_1(
+            &format!(
+                "[channel_join_via_welcome] GROUP INSERTED ch={} epoch={}",
+                channel_id,
+                self.channel_epoch(channel_id).unwrap_or(0)
+            )
+            .into(),
+        );
         Ok(())
     }
 
@@ -435,10 +485,16 @@ impl ServerConnection {
         payload: Vec<u8>,
     ) -> Result<(), ClientError> {
         #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&format!(
-            "[send_channel_sync] to={} ch={} payload_len={} first=0x{:02x}",
-            to, channel_id, payload.len(), payload.first().copied().unwrap_or(0)
-        ).into());
+        web_sys::console::log_1(
+            &format!(
+                "[send_channel_sync] to={} ch={} payload_len={} first=0x{:02x}",
+                to,
+                channel_id,
+                payload.len(),
+                payload.first().copied().unwrap_or(0)
+            )
+            .into(),
+        );
         self.transport
             .send(ClientMessage::ChannelSync {
                 to,
@@ -456,10 +512,15 @@ impl ServerConnection {
         commit: Vec<u8>,
     ) -> Result<(), ClientError> {
         #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&format!(
-            "[send_channel_commit] ch={} exclude={:?} commit_len={}",
-            channel_id, exclude, commit.len()
-        ).into());
+        web_sys::console::log_1(
+            &format!(
+                "[send_channel_commit] ch={} exclude={:?} commit_len={}",
+                channel_id,
+                exclude,
+                commit.len()
+            )
+            .into(),
+        );
         // 0x05 前缀由**服务端**统一加，客户端只传裸 MLS Commit。
         // P0-2：带上本地 epoch，服务端落库以便断线成员补发。
         let epoch = self.channel_epoch(channel_id).unwrap_or(0);
@@ -480,10 +541,14 @@ impl ServerConnection {
     ) -> Result<bool, ClientError> {
         // 直接打到浏览器 console，绕过 tracing 过滤
         #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&format!(
-            "[channel_process_commit] ch={} commit_len={}",
-            channel_id, commit.len()
-        ).into());
+        web_sys::console::log_1(
+            &format!(
+                "[channel_process_commit] ch={} commit_len={}",
+                channel_id,
+                commit.len()
+            )
+            .into(),
+        );
         // 先拿服务端成员列表；查询失败就不推进 epoch（避免离线时误判）。
         let allowed = self.channel_member_set(channel_id).await?;
         let (out, members) = {
@@ -509,13 +574,17 @@ impl ServerConnection {
             // 此时 MLS Commit 本身的签名已经保证了成员集合的完整性。
             // 我们只 warn 不 drop，避免误杀合法 group。
             #[cfg(target_arch = "wasm32")]
-            web_sys::console::warn_1(&format!(
-                "[channel_process_commit] member mismatch for {} (KEEPING group): {}",
-                channel_id, e
-            ).into());
+            web_sys::console::warn_1(
+                &format!(
+                    "[channel_process_commit] member mismatch for {} (KEEPING group): {}",
+                    channel_id, e
+                )
+                .into(),
+            );
             tracing::warn!(
                 "[channel_process_commit] member mismatch for {} (KEEPING group): {}",
-                channel_id, e
+                channel_id,
+                e
             );
             // 不 drop group，继续处理（MLS 已经 merge 成功）
         }

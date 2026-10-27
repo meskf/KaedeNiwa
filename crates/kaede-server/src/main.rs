@@ -224,7 +224,7 @@ async fn main() -> Result<()> {
             // 静态文件托管：所有非 API 请求 fallback 到 dist/web/public
             .fallback_service(
                 tower_http::services::ServeDir::new("web")
-                    .fallback(tower_http::services::ServeFile::new("web/index.html"))
+                    .fallback(tower_http::services::ServeFile::new("web/index.html")),
             ),
     );
 

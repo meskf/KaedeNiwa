@@ -3,8 +3,7 @@
 use kaede_protocol::UserId;
 
 /// 客户端事件流。
-#[derive(Debug, Clone)]
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum ClientEvent {
     /// 收到群组应用消息（明文载荷，由 UI 决定如何展示）
     AppMessageReceived {

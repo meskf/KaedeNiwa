@@ -947,7 +947,10 @@ mod tests {
     #[test]
     fn cbor_is_compact() {
         // 空 MlsAppMessage 应该 < 40 字节（对比 JSON 约 60+）
-        let msg = ClientMessage::MlsAppMessage { channel_id: "general".into(), payload: vec![] };
+        let msg = ClientMessage::MlsAppMessage {
+            channel_id: "general".into(),
+            payload: vec![],
+        };
         let bytes = msg.encode().unwrap();
         assert!(
             bytes.len() < 40,

@@ -281,7 +281,9 @@ async fn authenticated_join_and_app_message_broadcast() {
     })
     .await
     {
-        ServerMessage::MlsAppMessage { from, payload: got, .. } => {
+        ServerMessage::MlsAppMessage {
+            from, payload: got, ..
+        } => {
             assert_eq!(from, UserId::new("alice"));
             assert_eq!(got, payload);
         }

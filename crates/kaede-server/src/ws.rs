@@ -775,11 +775,7 @@ async fn handle_message(
                 )
                 .await
                 {
-                    tracing::warn!(
-                        "[ChannelSync] enqueue for {} failed: {}",
-                        to,
-                        e
-                    );
+                    tracing::warn!("[ChannelSync] enqueue for {} failed: {}", to, e);
                 }
                 // 直推：如果 target 已经建立 WS 连接，先推一波（不校验 member）
                 let msg = ServerMessage::ChannelSync {
@@ -962,7 +958,9 @@ async fn handle_message(
                 if let Err(e) = stored {
                     tracing::warn!(
                         "store channel commit for {} epoch {} failed: {}",
-                        channel_id, epoch, e
+                        channel_id,
+                        epoch,
+                        e
                     );
                 }
             }
@@ -1207,11 +1205,16 @@ async fn handle_message(
                 .await;
         }
 
-        ClientMessage::ReportEpoch { epoch, channel_id: report_channel } => {
+        ClientMessage::ReportEpoch {
+            epoch,
+            channel_id: report_channel,
+        } => {
             let uid = ensure_joined(state, my_uid, my_session_id)?;
             tracing::info!(
                 "[ReportEpoch] uid={} epoch={} channel={:?}",
-                uid, epoch, report_channel
+                uid,
+                epoch,
+                report_channel
             );
             if epoch > u32::MAX as u64 {
                 return Ok(());
@@ -1245,7 +1248,9 @@ async fn handle_message(
 
             tracing::info!(
                 "[ReportEpoch] channel={:?} epoch>{} returned {} rows",
-                report_channel, epoch, rows.len()
+                report_channel,
+                epoch,
+                rows.len()
             );
             let mut budget = MAX_REPORT_EPOCH_BYTES;
             for (commit_epoch, from_uid, payload) in rows {
@@ -1297,7 +1302,10 @@ async fn handle_message(
                 .await;
         }
 
-        ClientMessage::MlsAppMessage { channel_id, payload } => {
+        ClientMessage::MlsAppMessage {
+            channel_id,
+            payload,
+        } => {
             let from = ensure_joined(state, my_uid, my_session_id)?;
             if payload.len() > MAX_MLS_APP_BYTES {
                 let _ = tx.try_send(ServerMessage::Error {

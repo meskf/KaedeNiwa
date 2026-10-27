@@ -81,7 +81,6 @@ pub async fn spawn_test_server() -> std::io::Result<std::net::SocketAddr> {
     Ok(addr)
 }
 
-
 /// 给最终 Router 加上全局中间件：CORS + 请求体上限。
 ///
 /// - Body limit 必须 > `attachments::MAX_ATTACHMENT_BYTES`（32 MiB）。
@@ -205,22 +204,26 @@ async fn require_auth_header(
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     let path = req.uri().path();
-    if req.method() == axum::http::Method::OPTIONS { return Ok(next.run(req).await); }
-    
+    if req.method() == axum::http::Method::OPTIONS {
+        return Ok(next.run(req).await);
+    }
+
     // 放行：静态文件、WebSocket (业务层会通过 ClientHello 验证 token)、公开认证接口
-    if !path.starts_with("/api") 
-        || path.starts_with("/ws") 
-        || path == "/api/login" 
-        || path == "/api/register" 
+    if !path.starts_with("/api")
+        || path.starts_with("/ws")
+        || path == "/api/login"
+        || path == "/api/register"
     {
         return Ok(next.run(req).await);
     }
-    
+
     // 其他 /api 路径必须携带 Authorization 头
-    if req.headers().contains_key(axum::http::header::AUTHORIZATION) {
+    if req
+        .headers()
+        .contains_key(axum::http::header::AUTHORIZATION)
+    {
         Ok(next.run(req).await)
     } else {
         Err(axum::http::StatusCode::UNAUTHORIZED)
     }
 }
-

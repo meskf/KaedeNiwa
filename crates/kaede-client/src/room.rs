@@ -620,16 +620,19 @@ impl RoomSession {
             self.conn.mls_epoch()
         );
         #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&format!(
-            "[join_room] mls_is_ready={} mls_epoch={} channel_groups={}",
-            self.conn.mls_is_ready(),
-            self.conn.mls_epoch(),
-            self.conn.channel_groups_len()
-        ).into());
+        web_sys::console::log_1(
+            &format!(
+                "[join_room] mls_is_ready={} mls_epoch={} channel_groups={}",
+                self.conn.mls_is_ready(),
+                self.conn.mls_epoch(),
+                self.conn.channel_groups_len()
+            )
+            .into(),
+        );
         if self.conn.mls_is_ready() {
             self.conn.report_epoch(self.conn.mls_epoch()).await?;
-        // P0-2：对所有本地已有 group 的频道也主动请求 backfill（重连后追平频道 epoch）。
-        self.conn.backfill_all_channel_epochs().await;
+            // P0-2：对所有本地已有 group 的频道也主动请求 backfill（重连后追平频道 epoch）。
+            self.conn.backfill_all_channel_epochs().await;
             // 每个 KeyPackage 只能被消费一次，队列会随使用自然耗尽。
             // 每次登录/重连检查一次，低于水位时补货，避免“再也没人能邀请我”。
             if let Err(e) = self.replenish_key_packages_if_low().await {
@@ -661,7 +664,11 @@ impl RoomSession {
     /// **P1-5**：碰撞错误信息改为可操作的用户指引（不再建议用户"改 login_id"）。
     /// **P1-15**：本地 epoch 已前进但广播失败 → 返回 Err。
     /// 将 peer 加入指定频道的独立 MLS 群组（Discord 频道隔离核心）。
-    pub async fn channel_add_peer(&self, channel_id: &str, peer: &UserId) -> Result<(), ClientError> {
+    pub async fn channel_add_peer(
+        &self,
+        channel_id: &str,
+        peer: &UserId,
+    ) -> Result<(), ClientError> {
         let _op_guard = self.mls_op_lock.lock().await;
         // 检查成员是否已经在当前频道群组里
         let current_members = self.conn.mls_member_uids();
@@ -674,15 +681,21 @@ impl RoomSession {
         let kp = self.fetch_kp_with_retry(peer).await?;
 
         // 3. 本地加成员
-        let (commit, welcome) = self.conn.channel_add_member(channel_id, &kp, peer.as_str())?;
+        let (commit, welcome) = self
+            .conn
+            .channel_add_member(channel_id, &kp, peer.as_str())?;
         // 4. 发 Welcome 给新成员（0x04）
         let mut welcome_payload = Vec::with_capacity(1 + welcome.len());
         welcome_payload.push(0x04u8);
         welcome_payload.extend_from_slice(&welcome);
-        self.conn.send_channel_sync(peer.clone(), channel_id, welcome_payload).await?;
+        self.conn
+            .send_channel_sync(peer.clone(), channel_id, welcome_payload)
+            .await?;
 
         // 5. 广播 Commit 给其他老成员（排除新成员，避免其 WrongEpoch）
-        self.conn.send_channel_commit(channel_id, Some(peer.clone()), commit).await?;
+        self.conn
+            .send_channel_commit(channel_id, Some(peer.clone()), commit)
+            .await?;
 
         Ok(())
     }
@@ -947,7 +960,9 @@ impl RoomSession {
     ) -> Result<Vec<u8>, ClientError> {
         let ciphertext = self.conn.mls_encrypt_app(plaintext)?;
         self.save_snapshot().await?;
-        self.conn.mls_send_ciphertext(channel_id.to_string(), ciphertext.clone()).await?;
+        self.conn
+            .mls_send_ciphertext(channel_id.to_string(), ciphertext.clone())
+            .await?;
         Ok(ciphertext)
     }
 
@@ -1447,13 +1462,15 @@ impl RoomSession {
                 self.http.join_channel(channel_id, password, None).await?;
                 tracing::info!(
                     "[room] join_channel {} verified password (shared group, {} members)",
-                    channel_id, mc
+                    channel_id,
+                    mc
                 );
                 return Ok(());
             }
             tracing::info!(
                 "[room] join_channel {} local solo group ({} members) — full welcome",
-                channel_id, mc
+                channel_id,
+                mc
             );
         }
 
@@ -1897,7 +1914,8 @@ impl RoomSession {
             out.extend_from_slice(&sealed);
             out
         } else {
-            self.encrypt_persist_and_broadcast(channel_id, &bytes).await?
+            self.encrypt_persist_and_broadcast(channel_id, &bytes)
+                .await?
         };
 
         match self
@@ -1974,10 +1992,7 @@ impl RoomSession {
 
         // [DEBUG] 打印走哪条路径
         let has_group = self.conn.channel_has_group(channel_id);
-        tracing::info!(
-            "[send_text] channel={} has_group={}",
-            channel_id, has_group
-        );
+        tracing::info!("[send_text] channel={} has_group={}", channel_id, has_group);
 
         // 私密频道：走 channel group 的 AES-GCM key（首字节 0x03 标记）
         let ciphertext = if has_group {
@@ -1990,7 +2005,8 @@ impl RoomSession {
             out.extend_from_slice(&sealed);
             out
         } else {
-            self.encrypt_persist_and_broadcast(channel_id, &bytes).await?
+            self.encrypt_persist_and_broadcast(channel_id, &bytes)
+                .await?
         };
         match self
             .http
@@ -2050,7 +2066,9 @@ impl RoomSession {
         }
 
         // 主群 reaction 同样推进 ratchet：先落盘再广播。
-        let _ = self.encrypt_persist_and_broadcast(channel_id, &bytes).await?;
+        let _ = self
+            .encrypt_persist_and_broadcast(channel_id, &bytes)
+            .await?;
         // reaction 不入历史（只广播）
         Ok(())
     }
@@ -2176,7 +2194,9 @@ impl RoomSession {
 
         // 公开频道：与消息同路径——MLS encrypt（推进 ratchet）→ 落盘 → 广播，
         // 再 POST /api/messages 入历史；本地副本用服务器权威 ts 落盘。
-        let ciphertext = self.encrypt_persist_and_broadcast(channel_id, bytes).await?;
+        let ciphertext = self
+            .encrypt_persist_and_broadcast(channel_id, bytes)
+            .await?;
         match self
             .http
             .post_message(channel_id, now_ms(), self.uid.as_str(), &ciphertext)
@@ -2535,7 +2555,10 @@ impl RoomSession {
         // → 等 P0-2 backfill 追平 → 重试一次。
         let mut token = self.http.get_livekit_token(channel_id).await?;
 
-        let key = match self.conn.channel_export_key_for(channel_id, kaede_mls::SframePurpose::LivekitE2ee) {
+        let key = match self
+            .conn
+            .channel_export_key_for(channel_id, kaede_mls::SframePurpose::LivekitE2ee)
+        {
             Ok(k) => {
                 tracing::info!(
                     "[media] ch={} e2ee key from MLS exporter (true E2EE)",
@@ -2543,16 +2566,20 @@ impl RoomSession {
                 );
                 // P0-Z console log（wasm 里 tracing 可能不输出到 console）
                 #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&format!(
-                    "[media] ch={} e2ee key from MLS exporter (TRUE E2EE)",
-                    channel_id
-                ).into());
+                web_sys::console::log_1(
+                    &format!(
+                        "[media] ch={} e2ee key from MLS exporter (TRUE E2EE)",
+                        channel_id
+                    )
+                    .into(),
+                );
                 k
             }
             Err(e) => {
                 tracing::warn!(
                     "[media] ch={} export key failed: {}; report epoch + retry",
-                    channel_id, e
+                    channel_id,
+                    e
                 );
                 // P0-2 路径：上报本地 epoch，触发服务端补发
                 let local = self.conn.channel_epoch(channel_id).unwrap_or(0);
@@ -2562,21 +2589,22 @@ impl RoomSession {
                     .await;
                 // 等 backfill 完成（P0-2 服务端延迟 < 200ms，1s 是保守上限）
                 sleep_ms(1000).await;
-                self.conn.channel_export_key_for(channel_id, kaede_mls::SframePurpose::LivekitE2ee).map_err(|e2| {
-                    ClientError::Mls(format!(
-                        "cannot derive media key for {}: {} (after epoch sync retry: {})",
-                        channel_id, e, e2
-                    ))
-                })?
+                self.conn
+                    .channel_export_key_for(channel_id, kaede_mls::SframePurpose::LivekitE2ee)
+                    .map_err(|e2| {
+                        ClientError::Mls(format!(
+                            "cannot derive media key for {}: {} (after epoch sync retry: {})",
+                            channel_id, e, e2
+                        ))
+                    })?
             }
         };
 
         // 覆盖 token.e2ee_seed —— JS 层（livekit.ts）读它注入 ExternalE2EEKeyProvider
         // 实际 key 现在是 MLS exporter 派生的，server 不知道
         use base64::Engine as _;
-        token.e2ee_seed = Some(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.as_slice()),
-        );
+        token.e2ee_seed =
+            Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.as_slice()));
 
         Ok((token, Some(zeroize::Zeroizing::new(key))))
     }
@@ -2642,7 +2670,9 @@ impl RoomSession {
         let bytes = payload
             .to_bytes()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
-        let _ = self.encrypt_persist_and_broadcast(channel_id, &bytes).await?;
+        let _ = self
+            .encrypt_persist_and_broadcast(channel_id, &bytes)
+            .await?;
         Ok(())
     }
 
@@ -2660,7 +2690,9 @@ impl RoomSession {
         let bytes = payload
             .to_bytes()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
-        let _ = self.encrypt_persist_and_broadcast(channel_id, &bytes).await?;
+        let _ = self
+            .encrypt_persist_and_broadcast(channel_id, &bytes)
+            .await?;
         Ok(())
     }
 }

@@ -1,8 +1,8 @@
-use wasm_bindgen::prelude::*;
 use js_sys::Function;
-use std::sync::{Arc, Mutex};
-use kaede_client::{ClientObserver, ClientEvent};
 use kaede_client::room::RoomSession;
+use kaede_client::{ClientEvent, ClientObserver};
+use std::sync::{Arc, Mutex};
+use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
 pub fn start() {
@@ -63,9 +63,15 @@ impl JsClient {
         }
     }
 
-    pub async fn login(&self, http_url: String, ws_url: String, login_id: String, token: String) -> Result<(), JsValue> {
+    pub async fn login(
+        &self,
+        http_url: String,
+        ws_url: String,
+        login_id: String,
+        token: String,
+    ) -> Result<(), JsValue> {
         let obs: Arc<dyn ClientObserver> = self.observer.clone();
-        
+
         // 打开本地 IndexedDB 存储（WASM 下 open_default_store 会忽略路径，用固定 IDB）
         let storage = match kaede_client::room::open_default_store("kaede").await {
             Ok(s) => {
@@ -77,23 +83,32 @@ impl JsClient {
                 None
             }
         };
-        
+
         let room = RoomSession::connect_with_token_and_storage(
-            &http_url, &ws_url, &login_id, &token, storage, Some(obs)
-        ).await.map_err(|e| JsValue::from_str(&format!("Connect error: {}", e)))?;
+            &http_url,
+            &ws_url,
+            &login_id,
+            &token,
+            storage,
+            Some(obs),
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&format!("Connect error: {}", e)))?;
 
         let room = Arc::new(room);
         room.spawn_event_loop();
         // P0-2：启动心跳（每 20s Ping，30s 无 Pong 断开）
         // P0-2: room.connection() 返回 &Arc，spawn_heartbeat 要 owned，先 clone
         room.connection().clone().spawn_heartbeat();
-        room.join_room().await.map_err(|e| JsValue::from_str(&format!("Join error: {}", e)))?;
-        
+        room.join_room()
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Join error: {}", e)))?;
+
         // 【核心】让新用户自动上传 KeyPackage，供别人拉进频道群组使用
         if let Err(e) = room.become_guest().await {
             tracing::warn!("become_guest failed: {}", e);
         }
-        
+
         *self.room.lock().unwrap() = Some(room);
         Ok(())
     }
@@ -129,30 +144,44 @@ impl JsClient {
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
         // 完整 welcome 流：提交 KP → 等待 Welcome → 加入共享 group
         // （旧的 join_channel_only 不提交 KP，无法触发欢迎流程，导致 voice 双人各自 solo group）
-        room.join_channel(&channel_id, "").await
+        room.join_channel(&channel_id, "")
+            .await
             .map_err(|e| JsValue::from_str(&format!("Join channel error: {}", e)))
     }
 
     pub async fn send_message(&self, channel_id: String, text: String) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.send_text_to(&channel_id, &text).await
+        room.send_text_to(&channel_id, &text)
+            .await
             .map_err(|e| JsValue::from_str(&format!("Send error: {}", e)))
     }
 
     // 把新成员拉进当前频道
-    pub async fn add_member_to_channel(&self, channel_id: String, uid: String) -> Result<(), JsValue> {
+    pub async fn add_member_to_channel(
+        &self,
+        channel_id: String,
+        uid: String,
+    ) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.channel_add_peer(&channel_id, &kaede_protocol::UserId::new(uid)).await
+        room.channel_add_peer(&channel_id, &kaede_protocol::UserId::new(uid))
+            .await
             .map_err(|e| JsValue::from_str(&format!("Add member error: {}", e)))
     }
 
     // 处理频道的 Welcome / Commit
-    pub async fn process_channel_sync(&self, channel_id: String, payload: Vec<u8>) -> Result<(), JsValue> {
+    pub async fn process_channel_sync(
+        &self,
+        channel_id: String,
+        payload: Vec<u8>,
+    ) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let _ = room.connection().channel_process_commit(&channel_id, &payload).await
+        let _ = room
+            .connection()
+            .channel_process_commit(&channel_id, &payload)
+            .await
             .map_err(|e| JsValue::from_str(&format!("Process sync error: {}", e)))?;
         Ok(())
     }
@@ -164,21 +193,26 @@ impl JsClient {
     pub async fn begin_media_session(&self, channel_id: String) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        
-        let (token, seed_opt) = room.begin_media_session(&channel_id).await
+
+        let (token, seed_opt) = room
+            .begin_media_session(&channel_id)
+            .await
             .map_err(|e| JsValue::from_str(&format!("Begin media session: {}", e)))?;
-        
+
         let e2ee_seed = seed_opt.map(|s| {
             // Zeroizing<[u8;32]> → base64url
-            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, s.as_ref())
+            base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                s.as_ref(),
+            )
         });
-        
+
         let result = serde_json::json!({
             "token": token.token,
             "ws_url": token.ws_url,
             "e2ee_seed": e2ee_seed,
         });
-        
+
         Ok(JsValue::from_str(&serde_json::to_string(&result).unwrap()))
     }
 
@@ -186,7 +220,8 @@ impl JsClient {
     pub async fn leave_media_room(&self, channel_id: String) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.leave_media_room(&channel_id).await
+        room.leave_media_room(&channel_id)
+            .await
             .map_err(|e| JsValue::from_str(&format!("Leave media: {}", e)))
     }
 
@@ -199,8 +234,9 @@ impl JsClient {
         let has_group = conn.channel_has_group(&channel_id);
         let epoch = conn.channel_epoch(&channel_id);
         let key_b64 = if has_group {
-            conn.channel_export_key(&channel_id).ok()
-                .map(|k| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, k))
+            conn.channel_export_key(&channel_id).ok().map(|k| {
+                base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, k)
+            })
         } else {
             None
         };
@@ -223,16 +259,23 @@ impl JsClient {
     pub async fn load_history(&self, channel_id: String, limit: usize) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let msgs = room.load_history(&channel_id, limit).await
+        let msgs = room
+            .load_history(&channel_id, limit)
+            .await
             .map_err(|e| JsValue::from_str(&format!("History error: {}", e)))?;
-        let json_msgs: Vec<serde_json::Value> = msgs.into_iter().map(|m| {
-            serde_json::json!({
-                "sender": m.sender,
-                "ts": m.ts,
-                "plaintext": m.plaintext,
+        let json_msgs: Vec<serde_json::Value> = msgs
+            .into_iter()
+            .map(|m| {
+                serde_json::json!({
+                    "sender": m.sender,
+                    "ts": m.ts,
+                    "plaintext": m.plaintext,
+                })
             })
-        }).collect();
-        Ok(JsValue::from_str(&serde_json::to_string(&json_msgs).unwrap()))
+            .collect();
+        Ok(JsValue::from_str(
+            &serde_json::to_string(&json_msgs).unwrap(),
+        ))
     }
 
     // ============ DM wasm 桥 ============
@@ -242,7 +285,9 @@ impl JsClient {
     pub async fn list_dm_conversations(&self) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let convs = room.list_dm_conversations().await
+        let convs = room
+            .list_dm_conversations()
+            .await
             .map_err(|e| JsValue::from_str(&format!("list dm conversations: {}", e)))?;
         let json = serde_json::to_string(&convs)
             .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
@@ -253,7 +298,9 @@ impl JsClient {
     pub async fn open_dm(&self, peer: String) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let conv = room.open_dm(&peer).await
+        let conv = room
+            .open_dm(&peer)
+            .await
             .map_err(|e| JsValue::from_str(&format!("open dm: {}", e)))?;
         let json = serde_json::to_string(&conv)
             .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
@@ -264,7 +311,9 @@ impl JsClient {
     pub async fn dm_load_history(&self, conv_id: String, limit: usize) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let history = room.dm_load_history(&conv_id, None, limit).await
+        let history = room
+            .dm_load_history(&conv_id, None, limit)
+            .await
             .map_err(|e| JsValue::from_str(&format!("dm history: {}", e)))?;
         let json = serde_json::to_string(&history)
             .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
@@ -275,7 +324,8 @@ impl JsClient {
     pub async fn send_dm(&self, conv_id: String, text: String) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.send_dm(&conv_id, &text).await
+        room.send_dm(&conv_id, &text)
+            .await
             .map_err(|e| JsValue::from_str(&format!("send dm: {}", e)))
     }
 
@@ -283,7 +333,8 @@ impl JsClient {
     pub async fn mark_dm_read(&self, conv_id: String, ts: i64) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.mark_dm_read(&conv_id, ts).await
+        room.mark_dm_read(&conv_id, ts)
+            .await
             .map_err(|e| JsValue::from_str(&format!("mark dm read: {}", e)))
     }
 
@@ -293,7 +344,9 @@ impl JsClient {
     pub async fn list_channels(&self) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let channels = room.list_channels().await
+        let channels = room
+            .list_channels()
+            .await
             .map_err(|e| JsValue::from_str(&format!("list channels: {}", e)))?;
         let json = serde_json::to_string(&channels)
             .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
@@ -307,7 +360,9 @@ impl JsClient {
     pub async fn list_friends(&self) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let friends = room.list_friends().await
+        let friends = room
+            .list_friends()
+            .await
             .map_err(|e| JsValue::from_str(&format!("list friends: {}", e)))?;
         let json = serde_json::to_string(&friends)
             .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
@@ -318,7 +373,8 @@ impl JsClient {
     pub async fn send_friend_request(&self, login_id: String) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.send_friend_request(&login_id).await
+        room.send_friend_request(&login_id)
+            .await
             .map_err(|e| JsValue::from_str(&format!("send friend request: {}", e)))
     }
 
@@ -326,7 +382,8 @@ impl JsClient {
     pub async fn accept_friend(&self, from_login_id: String) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.accept_friend(&from_login_id).await
+        room.accept_friend(&from_login_id)
+            .await
             .map_err(|e| JsValue::from_str(&format!("accept friend: {}", e)))
     }
 
@@ -334,7 +391,8 @@ impl JsClient {
     pub async fn remove_friend(&self, login_id: String) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.remove_friend(&login_id).await
+        room.remove_friend(&login_id)
+            .await
             .map_err(|e| JsValue::from_str(&format!("remove friend: {}", e)))
     }
 }

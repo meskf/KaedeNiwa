@@ -265,7 +265,6 @@ struct ErrorResp {
 // 实现
 // ---------------------------------------------------------------------------
 
-
 /// P1-4：429 指数退避重试。仅重试 429，其他错误立即返回。
 /// 用于 join_channel / livekit token 等高并发端点，避免 VPS 网络抖动时直接掉队。
 pub(crate) async fn retry_429<F, Fut, T>(mut f: F) -> Result<T, ClientError>
@@ -280,11 +279,7 @@ where
             Ok(v) => return Ok(v),
             Err(ClientError::Http { status: 429, .. }) => {
                 if i + 1 < DELAYS_MS.len() {
-                    tracing::warn!(
-                        "[http] 429 on attempt {}, retry in {}ms",
-                        i + 1,
-                        delay_ms
-                    );
+                    tracing::warn!("[http] 429 on attempt {}, retry in {}ms", i + 1, delay_ms);
                     #[cfg(target_arch = "wasm32")]
                     gloo_timers::future::TimeoutFuture::new(*delay_ms as u32).await;
                     #[cfg(not(target_arch = "wasm32"))]

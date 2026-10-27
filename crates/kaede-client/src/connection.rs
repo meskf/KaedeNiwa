@@ -32,7 +32,7 @@
 //! - [`pending`]：主群 Welcome 的用户确认队列
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kaede_protocol::{ClientMessage, ServerMessage, UserId};
@@ -133,7 +133,8 @@ pub struct ServerConnection {
     pending_commits: Mutex<std::collections::BTreeMap<u64, Vec<u8>>>,
     /// P0-2：频道 Commit 的 epoch gap 缓冲。channel_id → (epoch → framed payload)。
     /// 每频道上限 32 条，与主群 pending_commits 一致。
-    channel_pending_commits: Mutex<std::collections::HashMap<String, std::collections::BTreeMap<u64, Vec<u8>>>>,
+    channel_pending_commits:
+        Mutex<std::collections::HashMap<String, std::collections::BTreeMap<u64, Vec<u8>>>>,
     /// 上次 `ReportEpoch` 的 (local_epoch, 时间)。
     ///
     /// 防止服务端返回一份无法应用的陈旧 Commit 时，客户端反复重拉同一份
@@ -444,19 +445,19 @@ impl ServerConnection {
             channels
         );
         #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&format!(
-            "[backfill_all] chs={:?}", channels
-        ).into());
+        web_sys::console::log_1(&format!("[backfill_all] chs={:?}", channels).into());
         for ch in channels {
             let epoch = self.channel_epoch(&ch).unwrap_or(0);
             tracing::info!(
                 "[client:{}] report_channel_epoch ch={} epoch={}",
-                self.server_id, ch, epoch
+                self.server_id,
+                ch,
+                epoch
             );
             #[cfg(target_arch = "wasm32")]
-            web_sys::console::log_1(&format!(
-                "[backfill_all] report ch={} epoch={}", ch, epoch
-            ).into());
+            web_sys::console::log_1(
+                &format!("[backfill_all] report ch={} epoch={}", ch, epoch).into(),
+            );
             let _ = self.report_channel_epoch(ch, epoch).await;
         }
     }
@@ -697,8 +698,15 @@ impl ServerConnection {
     }
 
     /// 发送「正在输入」指示（协议 v7）。纯元数据，服务端不落盘、不补投。
-    pub async fn send_app_message(&self, channel_id: String, payload: Vec<u8>) -> Result<(), ClientError> {
-        let msg = ClientMessage::MlsAppMessage { channel_id, payload };
+    pub async fn send_app_message(
+        &self,
+        channel_id: String,
+        payload: Vec<u8>,
+    ) -> Result<(), ClientError> {
+        let msg = ClientMessage::MlsAppMessage {
+            channel_id,
+            payload,
+        };
         self.transport.send(msg).await
     }
 
@@ -774,7 +782,7 @@ impl ServerConnection {
     ///
     /// 调用方负责 spawn：native 用 `tokio::spawn`，wasm 用
     /// `wasm_bindgen_futures::spawn_local`。返回即连接关闭。
-pub fn spawn_heartbeat(self: Arc<Self>) {
+    pub fn spawn_heartbeat(self: Arc<Self>) {
         #[cfg(target_arch = "wasm32")]
         {
             wasm_bindgen_futures::spawn_local(async move {
@@ -816,7 +824,12 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
             }
 
             let nonce = now;
-            if self.transport.send(ClientMessage::Ping { nonce }).await.is_err() {
+            if self
+                .transport
+                .send(ClientMessage::Ping { nonce })
+                .await
+                .is_err()
+            {
                 tracing::warn!("[client:{}] heartbeat send failed, closing", self.server_id);
                 self.emit(ClientEvent::Disconnected {
                     server_id: self.server_id.clone(),
@@ -830,7 +843,8 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
 
     fn record_pong(&self) {
         use std::sync::atomic::Ordering;
-        self.last_pong_ms.store(crate::room::now_ms() as u64, Ordering::Relaxed);
+        self.last_pong_ms
+            .store(crate::room::now_ms() as u64, Ordering::Relaxed);
     }
 
     /// P0-1 测试钩子：模拟"网络错误"断连，触发 JS 层自动重连。
@@ -838,7 +852,8 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
     /// 和普通 transport.close() 的区别：设置 test_force_disconnect 标记，
     /// run_event_loop 收到 Closed 时会 emit Disconnected（普通关闭不 emit）。
     pub async fn force_close_for_reconnect(&self) -> Result<(), ClientError> {
-        self.test_force_disconnect.store(true, std::sync::atomic::Ordering::Release);
+        self.test_force_disconnect
+            .store(true, std::sync::atomic::Ordering::Release);
         self.transport.close().await
     }
 
@@ -852,7 +867,11 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
                 Ok(msg) => {
                     if let Err(e) = self.handle_server_message(msg).await {
                         // 【不死鸟护盾】业务层错误只打日志，绝不 Break，防止掉线
-                        tracing::warn!("[client:{}] 收到消息但处理失败 (不断线): {}", self.server_id, e);
+                        tracing::warn!(
+                            "[client:{}] 收到消息但处理失败 (不断线): {}",
+                            self.server_id,
+                            e
+                        );
                     }
                     // 周期落盘：把 dirty 快照（channel / dm）写入 IndexedDB
                     if last_flush.elapsed() >= flush_interval {
@@ -865,10 +884,9 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
                 // 只 log 不 emit Disconnected，避免 JS 层重连触发无限循环。
                 // 真正的断网错误（Timeout/Transport/Connection）才 emit。
                 Err(ClientError::Closed) => {
-                    let force = self.test_force_disconnect.swap(
-                        false,
-                        std::sync::atomic::Ordering::AcqRel,
-                    );
+                    let force = self
+                        .test_force_disconnect
+                        .swap(false, std::sync::atomic::Ordering::AcqRel);
                     if force {
                         let reason = "test force disconnect".to_string();
                         tracing::info!(
@@ -886,7 +904,8 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
                         );
                     }
                     self.flush_dirty_snapshots().await;
-                    self.shutdown.store(true, std::sync::atomic::Ordering::Release);
+                    self.shutdown
+                        .store(true, std::sync::atomic::Ordering::Release);
                     return;
                 }
                 Err(e) => format!("网络传输错误: {}", e),
@@ -898,7 +917,8 @@ pub fn spawn_heartbeat(self: Arc<Self>) {
             });
             // 退出前补一次落盘
             self.flush_dirty_snapshots().await;
-            self.shutdown.store(true, std::sync::atomic::Ordering::Release);
+            self.shutdown
+                .store(true, std::sync::atomic::Ordering::Release);
             break;
         }
     }

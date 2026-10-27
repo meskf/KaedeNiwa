@@ -146,7 +146,9 @@ impl ServerConnection {
                         Ok(_) => {
                             tracing::info!(
                                 "[client:{}] channel commit backfill for {} epoch {} ok",
-                                self.server_id, ch, epoch
+                                self.server_id,
+                                ch,
+                                epoch
                             );
                             if let Some(ep) = self.channel_epoch(&ch) {
                                 self.emit(ClientEvent::ChannelEpochChanged {
@@ -162,13 +164,12 @@ impl ServerConnection {
                                 else {
                                     break;
                                 };
-                                if let Err(e) = self
-                                    .channel_process_commit(&ch, &pending)
-                                    .await
-                                {
+                                if let Err(e) = self.channel_process_commit(&ch, &pending).await {
                                     tracing::warn!(
                                         "[client:{}] drain buffered channel commit epoch {} failed: {}",
-                                        self.server_id, next, e
+                                        self.server_id,
+                                        next,
+                                        e
                                     );
                                     break;
                                 }
@@ -182,15 +183,16 @@ impl ServerConnection {
                             }
                             if self.has_pending_channel_commits(&ch) {
                                 let current = self.channel_epoch(&ch).unwrap_or(0);
-                                let _ = self
-                                    .report_channel_epoch(ch.clone(), current)
-                                    .await;
+                                let _ = self.report_channel_epoch(ch.clone(), current).await;
                             }
                         }
                         Err(e) => {
                             tracing::warn!(
                                 "[client:{}] channel commit backfill for {} epoch {} failed: {}",
-                                self.server_id, ch, epoch, e
+                                self.server_id,
+                                ch,
+                                epoch,
+                                e
                             );
                         }
                     }
@@ -257,20 +259,24 @@ impl ServerConnection {
                     }
                 }
             }
-            ServerMessage::MlsAppMessage { from, channel_id, payload } => {
-            // 【核心修复】真正的 MLS 密文解密
-            match self.mls_decrypt(&payload) {
-                Ok(plaintext) => {
-                    self.emit_local_event(ClientEvent::AppMessageReceived {
-                        from: from.0.clone(),
-                        channel_id,
-                        payload: plaintext,
-                    });
+            ServerMessage::MlsAppMessage {
+                from,
+                channel_id,
+                payload,
+            } => {
+                // 【核心修复】真正的 MLS 密文解密
+                match self.mls_decrypt(&payload) {
+                    Ok(plaintext) => {
+                        self.emit_local_event(ClientEvent::AppMessageReceived {
+                            from: from.0.clone(),
+                            channel_id,
+                            payload: plaintext,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!("[mls] 解密 MlsAppMessage 失败: {}", e);
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("[mls] 解密 MlsAppMessage 失败: {}", e);
-                }
-            }
                 let plaintext = {
                     let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
                     match guard.as_mut() {
@@ -460,10 +466,14 @@ impl ServerConnection {
                 match payload[0] {
                     0x04 => {
                         #[cfg(target_arch = "wasm32")]
-                        web_sys::console::log_1(&format!(
-                            "[ChannelSync 0x04] ch={} welcome_len={}",
-                            channel_id, payload.len() - 1
-                        ).into());
+                        web_sys::console::log_1(
+                            &format!(
+                                "[ChannelSync 0x04] ch={} welcome_len={}",
+                                channel_id,
+                                payload.len() - 1
+                            )
+                            .into(),
+                        );
                         let welcome = &payload[1..];
                         match self.channel_join_via_welcome(&channel_id, welcome).await {
                             Ok(()) => {
@@ -528,15 +538,19 @@ impl ServerConnection {
                                 ) {
                                     tracing::info!(
                                         "[client:{}] channel commit gap: local {}, got {}; buffered + request backfill",
-                                        self.server_id, local, server_epoch
+                                        self.server_id,
+                                        local,
+                                        server_epoch
                                     );
-                                    let _ = self
-                                        .report_channel_epoch(channel_id.clone(), local)
-                                        .await;
+                                    let _ =
+                                        self.report_channel_epoch(channel_id.clone(), local).await;
                                 } else {
                                     tracing::warn!(
                                         "[client:{}] channel commit gap buffer full for {} (local {}, got {})",
-                                        self.server_id, channel_id, local, server_epoch
+                                        self.server_id,
+                                        channel_id,
+                                        local,
+                                        server_epoch
                                     );
                                 }
                                 return Ok(());
@@ -545,7 +559,9 @@ impl ServerConnection {
                                 // 重复投递或本地已推进到此 epoch，跳过。
                                 tracing::debug!(
                                     "[client:{}] channel commit epoch {} <= local {}; skip",
-                                    self.server_id, server_epoch, local
+                                    self.server_id,
+                                    server_epoch,
+                                    local
                                 );
                                 return Ok(());
                             }
@@ -568,19 +584,19 @@ impl ServerConnection {
                                 // P0-2：drain 已缓冲的连续 Commit。
                                 loop {
                                     let next = self.channel_epoch(&channel_id).unwrap_or(0) + 1;
-                                    let Some(pending) = self.take_pending_channel_commit(
-                                        &channel_id,
-                                        next,
-                                    ) else {
+                                    let Some(pending) =
+                                        self.take_pending_channel_commit(&channel_id, next)
+                                    else {
                                         break;
                                     };
-                                    if let Err(e) = self
-                                        .channel_process_commit(&channel_id, &pending)
-                                        .await
+                                    if let Err(e) =
+                                        self.channel_process_commit(&channel_id, &pending).await
                                     {
                                         tracing::warn!(
                                             "[client:{}] buffered channel commit epoch {} apply failed: {}",
-                                            self.server_id, next, e
+                                            self.server_id,
+                                            next,
+                                            e
                                         );
                                         // 应用失败的 Commit 不能再放回（避免死循环）；请求补发。
                                         let current = self.channel_epoch(&channel_id).unwrap_or(0);
@@ -610,11 +626,13 @@ impl ServerConnection {
                                 let current = self.channel_epoch(&channel_id).unwrap_or(0);
                                 tracing::warn!(
                                     "[client:{}] channel commit failed for {} at local epoch {}: {}; requesting backfill",
-                                    self.server_id, channel_id, current, e
+                                    self.server_id,
+                                    channel_id,
+                                    current,
+                                    e
                                 );
-                                let _ = self
-                                    .report_channel_epoch(channel_id.clone(), current)
-                                    .await;
+                                let _ =
+                                    self.report_channel_epoch(channel_id.clone(), current).await;
                                 self.emit(ClientEvent::MlsSyncError {
                                     server_id: self.server_id.clone(),
                                     user_message: format!(
@@ -730,10 +748,17 @@ impl ServerConnection {
                 ciphertext,
             } => {
                 #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&format!(
-                    "[ChannelMessage] ch={} from={} has_03={} has_group={} ct_len={}",
-                    channel_id, from, ciphertext.first() == Some(&0x03), self.channel_has_group(&channel_id), ciphertext.len()
-                ).into());
+                web_sys::console::log_1(
+                    &format!(
+                        "[ChannelMessage] ch={} from={} has_03={} has_group={} ct_len={}",
+                        channel_id,
+                        from,
+                        ciphertext.first() == Some(&0x03),
+                        self.channel_has_group(&channel_id),
+                        ciphertext.len()
+                    )
+                    .into(),
+                );
 
                 if ciphertext.first() == Some(&0x03) {
                     // 只接受本地确实持有频道 group 的频道。
@@ -756,10 +781,13 @@ impl ServerConnection {
                             }
                             Err(e) => {
                                 #[cfg(target_arch = "wasm32")]
-                                web_sys::console::warn_1(&format!(
-                                    "[ChannelMessage] decrypt FAILED ch={} from={}: {}",
-                                    channel_id, from, e
-                                ).into());
+                                web_sys::console::warn_1(
+                                    &format!(
+                                        "[ChannelMessage] decrypt FAILED ch={} from={}: {}",
+                                        channel_id, from, e
+                                    )
+                                    .into(),
+                                );
                                 tracing::warn!(
                                     "[client:{}] channel message decrypt failed for {}: {}",
                                     self.server_id,
