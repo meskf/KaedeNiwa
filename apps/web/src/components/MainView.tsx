@@ -75,20 +75,40 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   }, [setChannelList])
 
   useEffect(() => {
+    let cancelled = false
+    let attempt = 0
+    const CH = currentChannel
     const initChannel = async () => {
+      if (cancelled) return
       const client = getClient()
-      if (!client) { setTimeout(() => initChannel(), 200); return }
+      if (!client) { setTimeout(initChannel, 200); return }
       try {
-        await client.join_channel(currentChannel)
-        const hist = await client.load_history(currentChannel, 50)
+        await client.join_channel(CH)
+        if (cancelled) return
+        const hist = await client.load_history(CH, 50)
+        if (cancelled) return
         const parsedHist = typeof hist === 'string' ? JSON.parse(hist) : hist
-        setMessages(currentChannel, Array.isArray(parsedHist) ? parsedHist : [])
+        const arr = Array.isArray(parsedHist) ? parsedHist : []
+        const existing = useChatStore.getState().messages[CH] || []
+        if (existing.length === 0 && arr.length > 0) {
+          setMessages(CH, arr)
+        } else if (arr.length === 0 && existing.length === 0 && attempt < 10) {
+          attempt++
+          setTimeout(initChannel, 1500)
+        }
       } catch (e) {
-        console.error('initChannel failed:', e)
-        setMessages(currentChannel, [])
+        console.error('[initChannel] attempt ' + attempt + ' failed:', e)
+        if (!cancelled && attempt < 10) {
+          attempt++
+          setTimeout(initChannel, 1500)
+        } else if (!cancelled) {
+          const existing = useChatStore.getState().messages[CH] || []
+          if (existing.length === 0) setMessages(CH, [])
+        }
       }
     }
     initChannel()
+    return () => { cancelled = true }
   }, [currentChannel, setMessages])
 
   useEffect(() => {
@@ -177,6 +197,28 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         if (ev.MlsCommit) {
           console.log(`[MlsCommit] ch=${ev.MlsCommit.channel_id} epoch=${ev.MlsCommit.epoch} len=${ev.MlsCommit.payload?.length}`)
         }
+        if (ev.ChannelJoined) {
+          const jchId = (ev.ChannelJoined as any).channel_id || (ev.ChannelJoined as any).id || useChatStore.getState().currentChannel
+          if (jchId === useChatStore.getState().currentChannel) {
+            (async () => {
+              try {
+                const c = getClient()
+                if (!c) return
+                // 稍等，确保 group 状态稳定
+                await new Promise(r => setTimeout(r, 800))
+                const hist = await c.load_history(jchId, 50)
+                const arr = typeof hist === 'string' ? JSON.parse(hist) : hist
+                const list = Array.isArray(arr) ? arr : []
+                if (list.length > 0) {
+                  useChatStore.getState().setMessages(jchId, list)
+                  console.log('[ChannelJoined] reloaded history: ' + list.length + ' msgs')
+                } else {
+                  console.log('[ChannelJoined] history still empty (group might not be ready)')
+                }
+              } catch (e) { console.error('[ChannelJoined] history reload failed:', e) }
+            })()
+          }
+        }
         if (ev.ChannelEpochChanged) {
           const chId = ev.ChannelEpochChanged.channel_id
           const newEpoch = ev.ChannelEpochChanged.epoch
@@ -250,11 +292,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         if (ev.AppMessageReceived) {
           if (ev.AppMessageReceived.channel_id !== useChatStore.getState().currentChannel) return
           try {
-            const { text } = extractMessage(ev.AppMessageReceived.payload)
+            const { text, attachments } = extractMessage(ev.AppMessageReceived.payload)
             useChatStore.getState().addMessage(useChatStore.getState().currentChannel, {
               sender: ev.AppMessageReceived.from || 'Unknown',
               plaintext: text,
-              ts: Date.now(),
+              ts: (ev.AppMessageReceived as any).ts || Date.now(),
+              attachments: (ev.AppMessageReceived as any).attachments || attachments,
             })
           } catch (err) { console.error('Parse message failed:', err) }
         }

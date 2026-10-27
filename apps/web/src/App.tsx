@@ -70,6 +70,18 @@ export default function App() {
 
   useEffect(() => {
     ;(window as any).__kaede_debug__ = {
+      loadHistory: async (ch: string, limit = 50) => {
+        const c = getClient()
+        if (!c) throw new Error('client not ready')
+        const raw = await c.load_history(ch, limit)
+        const arr = typeof raw === 'string' ? JSON.parse(raw) : raw
+        return Array.isArray(arr) ? arr : { raw }
+      },
+      joinChannel: async (ch: string) => {
+        const c = getClient()
+        if (!c) throw new Error('client not ready')
+        return await c.join_channel(ch)
+      },
       channelState: async (ch: string) => {
         const c = getClient()
         if (!c) return { error: 'client not ready' }
