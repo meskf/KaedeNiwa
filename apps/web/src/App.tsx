@@ -3,10 +3,26 @@ import { useAuthStore } from './stores/auth'
 import { initWasm, getClient, recordLoginArgs, stopReconnect, allowReconnect } from './wasm/client'
 import { LoginView } from './components/LoginView'
 import { MainView } from './components/MainView'
+import { DynamicBackground } from './components/DynamicBackground'
 
 export default function App() {
+
+  
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
-  const [booting, setBooting] = useState(true)
+  const [dynamicBg, setDynamicBg] = useState(() => localStorage.getItem('kaede-dynamic-bg') === 'true')
+
+  useEffect(() => {
+    if (dynamicBg) document.documentElement.setAttribute('data-prism', 'true')
+    else document.documentElement.removeAttribute('data-prism')
+  }, [dynamicBg])
+
+  useEffect(() => {
+    const handleToggle = () => setDynamicBg(localStorage.getItem('kaede-dynamic-bg') === 'true')
+    window.addEventListener('kaede-dynamic-bg-changed', handleToggle)
+    return () => window.removeEventListener('kaede-dynamic-bg-changed', handleToggle)
+  }, [])
+
+    const [booting, setBooting] = useState(true)
 
   useEffect(() => {
     const boot = async () => {
@@ -114,7 +130,14 @@ export default function App() {
     )
   }
 
-  return isLoggedIn
-    ? <MainView onLogout={() => useAuthStore.getState().logout()} />
-    : <LoginView onLogin={() => {}} />
+  return (
+    <>
+      {dynamicBg && <DynamicBackground />}
+      <div className={`h-full w-full relative z-10 ${dynamicBg ? 'bg-transparent' : 'bg-[var(--bg-app)]'}`}>
+        {isLoggedIn
+          ? <MainView onLogout={() => useAuthStore.getState().logout()} />
+          : <LoginView onLogin={() => {}} />}
+      </div>
+    </>
+  )
 }

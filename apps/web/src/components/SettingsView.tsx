@@ -12,6 +12,26 @@ export function SettingsView() {
   const { t, lang, setLang } = useI18n()
   const { theme, setTheme } = useTheme()
   const [langOpen, setLangOpen] = useState(false)
+  const [dynamicBg, setDynamicBg] = useState(() => localStorage.getItem('kaede-dynamic-bg') === 'true')
+
+  const toggleDynamicBg = () => {
+    const next = !dynamicBg
+    setDynamicBg(next)
+    localStorage.setItem('kaede-dynamic-bg', String(next))
+    window.dispatchEvent(new Event('kaede-dynamic-bg-changed'))
+  }
+
+
+  const [stageManagerMode, setStageManagerMode] = useState(() => {
+    return localStorage.getItem('kaede-stage-manager-mode') || 'auto'
+  })
+
+  const changeStageManagerMode = (m: string) => {
+    setStageManagerMode(m)
+    localStorage.setItem('kaede-stage-manager-mode', m)
+    window.dispatchEvent(new Event('kaede-stage-manager-changed'))
+  }
+
 
   return (
     <div className="flex flex-col h-full w-full max-w-[700px] mx-auto overflow-y-auto">
@@ -60,6 +80,45 @@ export function SettingsView() {
                 data-testid="settings-theme-dark"
               >
                 <IconMoon className="w-3.5 h-3.5" />{t('settings.themeDark')}
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center justify-between px-4 py-3 border-t border-[var(--bg-active)]">
+            <span className="text-[13px] text-[var(--text-muted)]">Dynamic Background (Prism)</span>
+            <button 
+              onClick={toggleDynamicBg}
+              className={`w-10 h-5 rounded-full transition-colors relative ${dynamicBg ? 'bg-green-500' : 'bg-[var(--bg-active)]'}`}
+            >
+              <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${dynamicBg ? 'left-[22px]' : 'left-0.5'}`} />
+            </button>
+          </div>
+        </div>
+      </section>
+
+      
+      <section className="mb-8">
+        <h2 className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-3">Experimental</h2>
+        <div className="rounded-lg bg-[var(--bg-hover)] divide-y divide-[var(--bg-active)]">
+          <div className="flex items-center justify-between px-4 py-3">
+            <span className="text-[13px] text-[var(--text-muted)]">Stage Manager (Servers)</span>
+            <div className="flex items-center gap-1 bg-[var(--bg-active)] rounded-md p-0.5">
+              <button
+                onClick={() => changeStageManagerMode('off')}
+                className={`px-3 py-1 text-[12px] rounded transition-colors ${stageManagerMode === 'off' ? 'bg-[var(--bg-app)] text-[var(--text-main)] font-semibold' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}
+              >
+                Off
+              </button>
+              <button
+                onClick={() => changeStageManagerMode('auto')}
+                className={`px-3 py-1 text-[12px] rounded transition-colors ${stageManagerMode === 'auto' ? 'bg-[var(--bg-app)] text-[var(--text-main)] font-semibold' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}
+              >
+                Auto
+              </button>
+              <button
+                onClick={() => changeStageManagerMode('fixed')}
+                className={`px-3 py-1 text-[12px] rounded transition-colors ${stageManagerMode === 'fixed' ? 'bg-[var(--bg-app)] text-[var(--text-main)] font-semibold' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}
+              >
+                Fixed
               </button>
             </div>
           </div>

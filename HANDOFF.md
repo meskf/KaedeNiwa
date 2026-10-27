@@ -1296,3 +1296,42 @@ cargo run -p kaede-server --bin promote -- <login_id> op3
 6. **缩进必须精确匹配**：patch 脚本里多行字符串替换，缩进错一个空格就 MISS。**行号定位比字符串定位更可靠**。
 7. **PowerShell here-string 里的中文经过管道会乱码**：`git commit -F` 用 UTF-8 文件；commit message 用英文；HANDOFF 用 Node 脚本 UTF-8 写入。
 8. **`git status` 噪声**：`_*.cjs` / `_probe*.cjs` 是 ad-hoc 脚本，应加 `.gitignore`（已加，但 `_check-*.cjs` / `_e3b-*.cjs` 漏了，下轮清理）。
+
+
+第二十四部分 2026-10-28 会话：UI 深度打磨 + 动态背景 + 台前调度
+===================================================================
+
+## 1. 本次会话做了什么
+
+### 1.1 新增：Dynamic Background (Prism)
+- 移植了基于 Canvas 的“三角板块·缝隙透光”动态背景。
+- 支持自动适配浅色（纯白质感）和深色（暗光交错）模式。
+- 支持鼠标位置追踪，光晕会随鼠标移动。
+- 在设置页（外观）增加了开关（`kaede-dynamic-bg`）。
+- 开启后，全局 UI 元素自动降级为半透明（利用 CSS 变量混合），并自动应用 `backdrop-filter: blur` 毛玻璃效果，彻底解决文字被高亮背景干扰的问题。
+
+### 1.2 新增：Stage Manager (Servers) 3D 侧边栏
+- 实现了一个类似 macOS 台前调度的服务器列表（默认在左侧留白区）。
+- 采用纯正交 3D 透视（`rotateY(45deg)`），保证卡片不变形。
+- 提供三种模式（在设置页 - Experimental 切换）：
+  - `Off`: 彻底关闭。
+  - `Auto`: 默认隐藏，鼠标移到左侧滑出。
+  - `Fixed`: 常驻显示。
+- 目前为纯灰半透明占位符，底部带有 `+` 和 `...` 操作位。
+
+### 1.3 UI 布局与 Bug 修复
+- **MediaBar 重构**：修复了浅色模式下 CSS 变量缺失导致的不可读问题；统一了所有按钮高度为 `h-8`，图标按钮改为 `w-8` 正方形，彻底解决高度不齐问题；将文本齿轮 `⚙` 替换为 SVG 图标。
+- **屏幕共享溢出修复**：限制了视频最大高度为 `30vh`，给外层容器加 `overflow-hidden`，彻底解决共享高分辨率/竖屏时输入框和底部导航栏被挤出屏幕的问题。
+- **右侧留白动态化**：修复了主内容区右侧硬编码 220px 留白的问题。现在仅在显示成员列表且处于聊天界面时留白，关闭成员列表时主区域自动居中。
+- **齿轮图标对齐**：修复了频道列表齿轮在展开语音成员时位置偏移的 Bug，固定至 `top-[7px]` 并垂直居中。
+
+## 2. 技术债与下一步建议
+
+1. **Stage Manager 数据接入**：目前是 Mock 数据（显示 Name）。等后端多服务器（Domain/Workspace）接口就绪后，替换为真实数据，并补充点击切换逻辑。
+2. **Dynamic Background 性能**：虽然目前使用了 `requestAnimationFrame` 和纯 Canvas 绘制，但如果用户反馈低端设备卡顿，可以引入 `OffscreenCanvas` 或降低 DPR 上限。
+3. **毛玻璃兼容性**：在极少数不支持 `backdrop-filter` 的浏览器上，半透明面板可能稍微影响阅读。后续可以考虑加 `@supports` 兜底。
+
+## 3. 给接手方的建议
+- 动态背景和毛玻璃逻辑高度依赖 `index.css` 里的 `[data-prism="true"]` 选择器和 `color-mix` / `rgba` 覆写。修改主题颜色时，注意同步检查这一块。
+- Stage Manager 组件（`StageManagerServers.tsx`）的 3D 变换非常敏感，调整 `rotateY` 时务必确认是否破坏了正交布局。
+

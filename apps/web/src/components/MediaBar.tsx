@@ -12,7 +12,7 @@ import {
 import { AudioSettingsPanel } from './AudioSettingsPanel'
 import { VIDEO_PRESETS } from '../lib/videoPresets'
 import { getClient } from '../wasm/client'
-import { IconMic, IconMicOff, IconMonitor, IconShield } from './icons'
+import { IconMic, IconMicOff, IconMonitor, IconShield, IconSettings } from './icons'
 import { IconVolume } from './icons'
 
 interface Props {
@@ -97,43 +97,46 @@ export function MediaBar({ channelId }: Props) {
 
   return (
     <div className="bg-[var(--bg-surface)] px-4 py-2 shrink-0">
-      <div className="flex items-center gap-3 flex-wrap">
-        <div data-testid="media-connected" data-channel={channelId} className="flex items-center gap-1">
+      <div className="flex items-center gap-2.5 flex-wrap">
+        {/* 连接状态 */}
+        <div data-testid="media-connected" data-channel={channelId} className="flex items-center gap-1.5 h-8 px-1 shrink-0">
           <span className="w-2 h-2 rounded-full bg-[var(--text-primary)] animate-pulse" />
-          <span className="text-xs text-[var(--text-primary)] font-medium">已连接 #{channelId}</span>
+          <span className="text-[13px] text-[var(--text-primary)] font-medium whitespace-nowrap">已连接 #{channelId}</span>
         </div>
+
+        {/* E2EE 状态 */}
         {media.e2eeEnabled ? (
-          <span data-testid="media-e2ee" data-e2ee="true" className="text-xs px-2 py-0.5 rounded bg-[var(--bg-active)] text-[var(--text-primary)] font-medium" title="AES-256-GCM 端到端加密">
-            <IconShield className="w-3 h-3 inline mr-1" /> E2EE
+          <span data-testid="media-e2ee" data-e2ee="true" className="flex items-center h-8 text-[12px] px-2.5 rounded-md bg-[var(--bg-active)] text-[var(--text-primary)] font-medium shrink-0" title="AES-256-GCM 端到端加密">
+            <IconShield className="w-3.5 h-3.5 mr-1" /> E2EE
           </span>
         ) : (
-          <span data-testid="media-e2ee" data-e2ee="false" className="text-xs px-2 py-0.5 rounded bg-[var(--bg-active)] text-[var(--text-secondary)]" title="未启用端到端加密">
-            <IconShield className="w-3 h-3 inline mr-1 opacity-50" /> PLAIN
+          <span data-testid="media-e2ee" data-e2ee="false" className="flex items-center h-8 text-[12px] px-2.5 rounded-md bg-[var(--bg-active)] text-[var(--text-secondary)] shrink-0" title="未启用端到端加密">
+            <IconShield className="w-3.5 h-3.5 mr-1 opacity-50" /> PLAIN
           </span>
         )}
         <div className="flex-1" />
 
         {/* 麦克风 + 音频设置面板 */}
-        <div className="relative">
+        <div className="relative flex items-center gap-1.5 h-8 shrink-0">
           <button
             data-testid="media-mic-toggle"
             data-mic={micOn ? 'on' : 'off'}
             onClick={handleToggleMic}
             onContextMenu={(e) => { e.preventDefault(); setShowAudioSettings(true) }}
-            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+            className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors ${
               micOn ? 'bg-[var(--text-primary)] text-[var(--bg-base)]' : 'bg-[var(--bg-active)] hover:bg-[#3f3f46] text-[var(--text-secondary)]'
             }`}
             title={micOn ? '关闭麦克风（右键音频设置）' : '开启麦克风（右键音频设置）'}
           >
-            {micOn ? <IconMic className='w-4 h-4 mx-auto'/> : <IconMicOff className='w-4 h-4 mx-auto'/>}
+            {micOn ? <IconMic className='w-4 h-4'/> : <IconMicOff className='w-4 h-4'/>}
           </button>
           <button
             data-testid="media-audio-settings-toggle"
             onClick={() => setShowAudioSettings(v => !v)}
-            className="ml-1 px-1.5 py-1 rounded text-xs bg-[var(--bg-active)] hover:bg-[#3f3f46] text-[var(--text-secondary)] transition-colors"
+            className="w-8 h-8 rounded-md bg-[var(--bg-active)] hover:bg-[#3f3f46] text-[var(--text-secondary)] transition-colors flex items-center justify-center"
             title="音频设置"
           >
-            ⚙
+            <IconSettings className="w-4 h-4" />
           </button>
           {showAudioSettings && (
             <AudioSettingsPanel onClose={() => setShowAudioSettings(false)} />
@@ -145,12 +148,12 @@ export function MediaBar({ channelId }: Props) {
           data-testid="media-deafen-toggle"
           data-deafened={deafened ? 'on' : 'off'}
           onClick={handleToggleDeafen}
-          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+          className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors shrink-0 ${
             deafened ? 'bg-red-500 text-white' : 'bg-[var(--bg-active)] hover:bg-[#3f3f46] text-[var(--text-secondary)]'
           }`}
           title={deafened ? '取消拒听' : '拒听（静音所有远端）'}
         >
-          <IconVolume className='w-4 h-4 mx-auto' style={{ opacity: deafened ? 0.4 : 1 }} />
+          <IconVolume className='w-4 h-4' style={{ opacity: deafened ? 0.4 : 1 }} />
         </button>
 
         {/* 降噪 */}
@@ -160,7 +163,7 @@ export function MediaBar({ channelId }: Props) {
             data-noise={noiseOn ? 'on' : 'off'}
             data-mode={media.noiseMode}
             onClick={handleToggleNoise}
-            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+            className={`h-8 px-3 rounded-md flex items-center justify-center text-[12px] font-medium transition-colors shrink-0 ${
               noiseOn ? 'bg-[var(--text-primary)] text-[var(--bg-base)]' : 'bg-[var(--bg-active)] text-[var(--text-secondary)]'
             }`}
             title={
@@ -180,7 +183,7 @@ export function MediaBar({ channelId }: Props) {
           data-testid="media-quality"
           value={presetId}
           onChange={(e) => setPresetId(e.target.value)}
-          className="text-xs px-2 py-1 rounded bg-[var(--bg-active)] text-[var(--text-secondary)] border border-[#2b2d31]"
+          className="h-8 text-[12px] px-2 rounded-md bg-[var(--bg-active)] text-[var(--text-secondary)] border border-[#2b2d31] outline-none shrink-0 cursor-pointer"
           disabled={sharing}
           title="屏幕共享画质（修改后需重新点击共享）"
         >
@@ -195,15 +198,15 @@ export function MediaBar({ channelId }: Props) {
           data-testid="media-share-toggle"
           data-sharing={sharing ? 'on' : 'off'}
           onClick={handleToggleShare}
-          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+          className={`h-8 px-4 rounded-md flex items-center justify-center text-[12px] font-medium transition-colors shrink-0 ${
             sharing ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-[var(--text-primary)] text-[var(--bg-base)]'
           }`}
         >
-          {sharing ? 'Stop Share' : <><IconMonitor className='w-3 h-3 inline mr-1'/> Share</>}
+          {sharing ? 'Stop Share' : <><IconMonitor className='w-3.5 h-3.5 mr-1.5'/> Share</>}
         </button>
         <button
           onClick={handleLeave}
-          className="px-3 py-1 rounded text-xs font-medium bg-[var(--bg-active)] hover:bg-red-500 hover:text-white text-[var(--text-secondary)] transition-colors"
+          className="h-8 px-4 rounded-md flex items-center justify-center text-[12px] font-medium bg-[var(--bg-active)] hover:bg-red-500 hover:text-white text-[var(--text-secondary)] transition-colors shrink-0"
         >
           Leave
         </button>

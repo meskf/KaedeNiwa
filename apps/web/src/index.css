@@ -26,7 +26,6 @@
 
   html, body, #root {
     @apply h-full w-full m-0 p-0 overflow-hidden;
-    background: var(--bg-app);
     color: var(--text-main);
     font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
@@ -36,3 +35,35 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 4px; }
 }
+
+  
+  /* ---------- Prism 动态背景专属透光模式 ---------- */
+  html[data-prism="true"] {
+    --bg-footer: rgba(0, 0, 0, 0.03) !important;
+    --bg-hover: rgba(128, 128, 128, 0.08) !important;
+    --bg-active: rgba(128, 128, 128, 0.12) !important;
+    --border-subtle: rgba(128, 128, 128, 0.15) !important;
+  }
+
+  html[data-prism="true"][data-theme="dark"] {
+    --bg-footer: rgba(0, 0, 0, 0.3) !important;
+    --bg-hover: rgba(255, 255, 255, 0.08) !important;
+    --bg-active: rgba(255, 255, 255, 0.12) !important;
+    --border-subtle: rgba(255, 255, 255, 0.1) !important;
+  }
+
+  /* 让所有使用这些背景色的元素自动带上毛玻璃模糊效果 */
+  html[data-prism="true"] .bg-\[var\(--bg-hover\)\],
+  html[data-prism="true"] .bg-\[var\(--bg-active\)\],
+  html[data-prism="true"] .bg-\[var\(--bg-footer\)\] {
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+
+  /* 修复所有分割线和边框颜色，使其非常柔和，告别纯黑 */
+  html[data-prism="true"] .divide-y > :not([hidden]) ~ :not([hidden]) {
+    border-color: var(--border-subtle) !important;
+  }
+  html[data-prism="true"] .border-\[var\(--bg-active\)\] {
+    border-color: var(--border-subtle) !important;
+  }

@@ -6,7 +6,8 @@ import { connectMedia, disconnectMedia, updateE2EEKey } from '../lib/livekit'
 import { useMediaState } from '../hooks/useLiveKitRoom'
 import { MediaBar } from './MediaBar'
 import { ScreenShareView } from './ScreenShareView'
-import { IconHash, IconVolume, IconSun, IconMoon, IconSearch, IconUsers } from './icons'
+import { StageManagerServers } from './StageManagerServers'
+import { IconHash, IconVolume, IconSun, IconMoon, IconSearch, IconUsers, IconSettings } from './icons'
 import { useTheme } from '../lib/useTheme'
 import { useI18n } from '../stores/i18n'
 import { SettingsView } from './SettingsView'
@@ -22,7 +23,17 @@ import { RichTextInput, type RichTextInputHandle } from './RichTextInput'
 import { MessageText } from './MessageText'
 import { extractMessage } from '../lib/messageUtils'
 
+
+
 export function MainView({ onLogout }: { onLogout: () => void }) {
+  const [dynamicBg, setDynamicBg] = useState(() => localStorage.getItem('kaede-dynamic-bg') === 'true')
+  useEffect(() => {
+    const handleToggle = () => setDynamicBg(localStorage.getItem('kaede-dynamic-bg') === 'true')
+    window.addEventListener('kaede-dynamic-bg-changed', handleToggle)
+    return () => window.removeEventListener('kaede-dynamic-bg-changed', handleToggle)
+  }, [])
+
+  
   const loginId = useAuthStore(s => s.loginId)
   const channelList = useChatStore(s => s.channelList)
   const serverMembers = useChatStore(s => s.serverMembers)
@@ -43,6 +54,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const [showMembers, setShowMembers] = useState(true)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; uid: string; inVoice: boolean } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
+
   const [searchOpen, setSearchOpen] = useState(false)
   const [createDialogCategory, setCreateDialogCategory] = useState<string | null | undefined>(undefined)
   const [settingsChannelId, setSettingsChannelId] = useState<string | null>(null)
@@ -555,7 +567,10 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const isVoiceChannel = currentChannelInfo ? currentChannelInfo.kind === 'voice' : false
 
   return (
-    <div className="h-screen w-screen bg-[var(--bg-app)] flex flex-col text-[var(--text-main)] overflow-hidden font-sans">
+    <div className={`h-screen w-screen flex flex-col text-[var(--text-main)] overflow-hidden font-sans ${dynamicBg ? 'bg-transparent' : 'bg-[var(--bg-app)]'}`}>
+
+      <StageManagerServers />
+
       
       {/* 上半部分：适度留白包裹 */}
       <div className="flex-1 flex flex-col min-h-0 px-16 pt-12 pb-4">
@@ -654,10 +669,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                             {ch.kind === 'voice' ? renderVoiceChannel(ch) : renderTextChannel(ch)}
                             <button
                               onClick={(e) => { e.stopPropagation(); setSettingsChannelId(ch.id) }}
-                              className="absolute right-2 top-2 opacity-0 group-hover/ch:opacity-100 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-opacity"
+                              className="absolute right-2 top-[7px] opacity-0 group-hover/ch:opacity-100 text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all p-1 flex items-center justify-center rounded hover:bg-[var(--bg-active)]"
                               title={t('channel.openSettings')}
                               data-testid={`channel-settings-${ch.id}`}
-                            >⚙</button>
+                            >
+                              <IconSettings className="w-3.5 h-3.5" />
+                            </button>
                           </div>
                         ))}
                       </div>
@@ -721,7 +738,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           )}
 
           {/* 主区域 (绝对居中，留出左右安全距离) */}
-          <main className={`flex-1 flex flex-col min-w-0 transition-all ${sidebarOpen ? 'px-[220px]' : 'pl-6 pr-[220px]'}`}>
+          <main className={`flex-1 flex flex-col min-w-0 overflow-hidden transition-all ${sidebarOpen ? 'pl-[220px]' : 'pl-6'} ${(showMembers && activeView === 'chat') ? 'pr-[220px]' : 'pr-6'}`}>
             {activeView === 'chat' ? (
               <div className="flex-1 flex flex-col w-full max-w-[900px] mx-auto min-h-0">
 
@@ -761,12 +778,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 {inVoice && <MediaBar channelId={currentChannel} />}
 
                 {/* 屏幕共享独立区域 */}
-                <div className="w-full flex justify-center px-4 mt-2">
+                <div className="w-full flex justify-center px-4 mt-2 shrink-0 max-h-[30vh]">
                   <ScreenShareView />
                 </div>
 
                 {/* 消息列表 */}
-                <div className="flex-1 overflow-y-auto overflow-x-hidden mb-2 pr-2 w-full">
+                <div className="flex-1 overflow-y-auto overflow-x-hidden mb-2 pr-2 w-full min-h-[100px]">
         
             
             
@@ -814,12 +831,14 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
                 <div data-testid="peer-status" className="text-[11px] text-[var(--text-muted)] h-5 w-full mt-2">{peerStatus}</div>
 
-                <div className="w-full flex items-end gap-2 bg-[var(--bg-hover)] rounded-md px-3 py-2 shrink-0 mb-2">
-                  <RichTextInput
-                    handleRef={richInputRef}
-                    onSubmit={handleSend}
-                    placeholder={`Message #${currentChannelName}`}
-                  />
+                <div className="w-full pb-4 pt-2 shrink-0">
+                  <div className="w-full flex items-end gap-2 bg-[var(--bg-hover)] rounded-md px-3 py-2">
+                    <RichTextInput
+                      handleRef={richInputRef}
+                      onSubmit={handleSend}
+                      placeholder={`Message #${currentChannelName}`}
+                    />
+                  </div>
                 </div>
               </div>
             ) : activeView === 'dms' ? (
@@ -844,7 +863,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       </div>
 
       {/* 底部栏 */}
-      <footer className="shrink-0 bg-[var(--bg-footer)]">
+      <footer className="shrink-0 bg-[var(--bg-footer)] transition-colors">
         <div className="px-16 h-[72px] flex items-center relative transition-colors">
           <div className="w-[200px] shrink-0 flex items-center gap-3">
             <div className="w-7 h-7 rounded-md bg-[var(--bg-active)] flex items-center justify-center text-[11px] text-[var(--text-main)] font-bold">

@@ -48,10 +48,14 @@ function VideoPane({ share, multi }: { share: any; multi: boolean }) {
     }
   }
 
-  // 容器样式：如果是多路，用网格平铺；如果是单路，限制最大宽高，居中显示
-  const containerStyle: React.CSSProperties = multi
-    ? { width: '100%', aspectRatio: videoDims ? `${videoDims.w} / ${videoDims.h}` : '16 / 9' }
-    : { width: '100%', maxWidth: '1000px', maxHeight: '60vh', margin: '0 auto' }
+  // 容器样式：严格限制最大高度，保证不撑爆外层 Flex 布局
+  const containerStyle: React.CSSProperties = {
+    width: '100%',
+    maxWidth: multi ? '100%' : '1000px',
+    maxHeight: multi ? '25vh' : '30vh',
+    aspectRatio: videoDims ? `${videoDims.w} / ${videoDims.h}` : '16 / 9',
+    margin: '0 auto',
+  }
 
   return (
     <div

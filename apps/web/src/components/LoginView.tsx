@@ -1,9 +1,15 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useAuthStore } from '../stores/auth'
 import { initWasm, getClient, recordLoginArgs, allowReconnect } from '../wasm/client'
 import { useI18n } from '../stores/i18n'
 
 export function LoginView({ onLogin }: { onLogin: () => void }) {
+  const [dynamicBg, setDynamicBg] = useState(() => localStorage.getItem('kaede-dynamic-bg') === 'true')
+  useEffect(() => {
+    const handleToggle = () => setDynamicBg(localStorage.getItem('kaede-dynamic-bg') === 'true')
+    window.addEventListener('kaede-dynamic-bg-changed', handleToggle)
+    return () => window.removeEventListener('kaede-dynamic-bg-changed', handleToggle)
+  }, [])
   const [isRegister, setIsRegister] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -58,8 +64,8 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
   }
 
   return (
-    <div className="h-screen w-screen bg-[var(--bg-app)] flex flex-col items-center justify-center text-[var(--text-main)] font-sans">
-      <div className="w-full max-w-[380px] px-6">
+    <div className={`h-screen w-screen flex flex-col items-center justify-center text-[var(--text-main)] font-sans ${dynamicBg ? 'bg-transparent' : 'bg-[var(--bg-app)]'}`}>
+      <div className={`w-full max-w-[380px] px-8 py-10 rounded-2xl transition-all ${dynamicBg ? 'bg-[var(--bg-app)]/70 backdrop-blur-xl border border-[var(--border-subtle)]/30 shadow-2xl' : ''}`}>
         
         <div className="text-center mb-10">
           <h1 className="text-3xl font-extrabold tracking-tight mb-2">
@@ -77,7 +83,7 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
               type="text"
               value={serverUrl}
               onChange={e => setServerUrl(e.target.value)}
-              className="w-full bg-[var(--bg-hover)] rounded-lg px-3 py-2.5 text-[14px] outline-none text-[var(--text-main)] placeholder-[var(--text-muted)] focus:ring-1 focus:ring-[var(--bg-active)] transition-all"
+              className="w-full bg-[var(--bg-hover)] rounded-lg px-3 py-2.5 text-[14px] outline-none text-[var(--text-main)] placeholder-[var(--text-muted)] focus:ring-1 focus:ring-[var(--bg-active)] transition-all border border-transparent focus:border-[var(--border-subtle)]"
             />
           </div>
           <div>
