@@ -15,6 +15,7 @@ interface Props {
 
 export function UserContextMenu({ x, y, uid, isFriend, inVoice, onSendMessage, onAddFriend, onRemoveFriend, onClose }: Props) {
   const { t } = useI18n()
+  void x; void y
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -31,12 +32,13 @@ export function UserContextMenu({ x, y, uid, isFriend, inVoice, onSendMessage, o
   }, [onClose])
 
   return (
-    <div
-      ref={ref}
-      data-testid="user-context-menu"
-      className="fixed z-50 w-[200px] rounded-lg bg-[var(--bg-app)] border border-[var(--bg-active)] shadow-xl py-1 text-[var(--text-main)]"
-      style={{ left: x, top: y }}
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={onClose}>
+      <div
+        ref={ref}
+        data-testid="user-context-menu"
+        className="w-[260px] max-w-full rounded-lg bg-[var(--bg-app)] border border-[var(--bg-active)] shadow-xl py-1 text-[var(--text-main)]"
+        onClick={(e) => e.stopPropagation()}
+      >
       <div className="px-3 py-1.5 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase border-b border-[var(--bg-active)] mb-1">
         {uid}
       </div>
@@ -72,6 +74,7 @@ export function UserContextMenu({ x, y, uid, isFriend, inVoice, onSendMessage, o
           {t('menu.userVolume')} — TODO
         </div>
       )}
+      </div>
     </div>
   )
 }

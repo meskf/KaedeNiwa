@@ -425,10 +425,10 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       <div className="flex-1 flex flex-col min-h-0 px-8 md:px-12 lg:px-16 pt-8 md:pt-12 pb-4">
         
         {/* 顶栏 */}
-        <header className="relative h-[40px] shrink-0 flex items-center mb-10">
+        <header className="relative h-[40px] shrink-0 flex items-center gap-2 md:gap-4 mb-4 md:mb-10">
           <button
             onClick={() => setSidebarOpen(v => !v)}
-            className="md:hidden mr-3 w-8 h-8 flex items-center justify-center rounded-md text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition-colors"
+            className="md:hidden shrink-0 w-8 h-8 flex items-center justify-center rounded-md text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition-colors"
             aria-label="toggle sidebar"
             data-testid="sidebar-toggle"
           >
@@ -436,11 +436,11 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               <path d="M4 6h16M4 12h16M4 18h16" strokeLinecap="round" />
             </svg>
           </button>
-          <div className="w-[200px] shrink-0 flex items-center text-[16px] font-bold tracking-wide">
+          <div className="hidden sm:flex shrink-0 items-center text-[15px] md:text-[16px] font-bold tracking-wide">
             KaedeNiwa
           </div>
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-[420px] px-4">
-            <div className="relative flex items-center">
+          <div className="flex-1 min-w-0 flex justify-center px-1 sm:px-2">
+            <div className="relative flex items-center w-full max-w-[420px]">
               <IconSearch className="absolute left-3.5 w-4 h-4 text-[var(--text-muted)]" />
               <input
                 type="text"
@@ -449,8 +449,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               />
             </div>
           </div>
-          <div className="flex-1" />
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
             <button
               onClick={() => setShowMembers(!showMembers)}
               className={`w-8 h-8 flex items-center justify-center rounded-md transition-colors ${showMembers ? 'text-[var(--text-main)] bg-[var(--bg-hover)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'}`}
@@ -585,23 +584,23 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               <div className="flex-1 flex flex-col w-full max-w-[900px] mx-auto min-h-0">
 
                 {/* 超大标题区 */}
-                <div className="shrink-0 flex items-end justify-between mb-8 mt-0 w-full">
+                <div className="shrink-0 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-4 md:mb-8 mt-0 w-full">
                   <div>
-                    <h1 className="text-4xl md:text-2xl font-extrabold tracking-tight mb-3 text-[var(--text-main)]">
+                    <h1 className="text-2xl md:text-4xl font-extrabold tracking-tight mb-1 md:mb-3 text-[var(--text-main)] truncate">
                       #{currentChannelName}
                     </h1>
                     <p className="text-[13px] text-[var(--text-muted)]">
                       Welcome to the beginning of the channel.
                     </p>
                   </div>
-                  <div className="relative flex items-center gap-3 pb-2">
+                  <div className="flex items-center gap-3 shrink-0">
         
         
                     {isVoiceChannel && (inVoice ? (
                       <button
                         data-testid="media-leave"
                         onClick={handleLeaveMedia}
-                        className="text-[13px] px-5 py-2 rounded-md bg-[var(--bg-hover)] hover:bg-[var(--bg-active)] transition-colors font-medium text-red-500"
+                        className="text-[13px] px-5 py-2 rounded-md bg-[var(--bg-hover)] hover:bg-[var(--bg-active)] transition-colors font-medium text-red-500 whitespace-nowrap"
                       >
                         Leave Voice
                       </button>
@@ -609,7 +608,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                       <button
                         data-testid="media-join"
                         onClick={handleJoinMedia}
-                        className="text-[13px] px-5 py-2 rounded-md bg-[var(--text-main)] text-[var(--bg-app)] hover:opacity-90 transition-opacity font-semibold"
+                        className="text-[13px] px-5 py-2 rounded-md bg-[var(--text-main)] text-[var(--bg-app)] hover:opacity-90 transition-opacity font-semibold whitespace-nowrap"
                       >
                         Join Voice
                       </button>
@@ -704,20 +703,20 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
       {/* 底部栏 */}
       <footer className="shrink-0 bg-[var(--bg-footer)]">
-        <div className="px-8 md:px-12 lg:px-16 h-[72px] flex items-center relative transition-colors">
-          <div className="w-[120px] sm:w-[160px] md:w-[200px] shrink-0 flex items-center gap-3">
+        <div className="px-2 sm:px-4 md:px-8 lg:px-16 h-[72px] flex items-center gap-2 sm:gap-4 transition-colors">
+          <div className="shrink-0 flex items-center gap-2 sm:gap-3 min-w-0">
             <div className="w-7 h-7 rounded-md bg-[var(--bg-active)] flex items-center justify-center text-[11px] text-[var(--text-main)] font-bold">
               {getInitial(loginId)}
             </div>
-            <div className="flex flex-col">
-              <span className="text-[13px] font-semibold leading-tight text-[var(--text-main)]">{loginId}</span>
+            <div className="hidden sm:flex flex-col min-w-0">
+              <span className="text-[13px] font-semibold leading-tight text-[var(--text-main)] truncate max-w-[120px]">{loginId}</span>
               <button onClick={onLogout} className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text-main)] text-left transition-colors mt-0.5">
                 {t('settings.accountLogout')}
               </button>
             </div>
           </div>
 
-          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-3 sm:gap-5 md:gap-8 text-[11px] sm:text-[12px] md:text-[13px] font-medium text-[var(--text-muted)]">
+          <div className="flex-1 flex items-center justify-center gap-2 sm:gap-4 md:gap-8 text-[11px] sm:text-[12px] md:text-[13px] font-medium text-[var(--text-muted)] overflow-x-auto whitespace-nowrap px-1">
             <span onClick={() => { setActiveView('chat'); setSidebarOpen(false) }} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'chat' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.groups')}</span>
             <span onClick={() => { setActiveView('dms'); setSidebarOpen(false) }} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'dms' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.dms')}</span>
             <span onClick={() => { setActiveView('friends'); setSidebarOpen(false) }} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'friends' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.friends')}</span>
@@ -725,7 +724,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             <span onClick={() => { setActiveView('more'); setSidebarOpen(false) }} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'more' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.more')}</span>
           </div>
 
-          <div className="ml-auto w-[200px] text-right text-[11px] text-[var(--text-muted)] font-mono">
+          <div className="hidden md:block shrink-0 text-[11px] text-[var(--text-muted)] font-mono">
             v0.0.5
           </div>
         </div>

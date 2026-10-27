@@ -48,11 +48,12 @@ export function AudioSettingsPanel({ onClose }: Props) {
   const outputVol = media.outputVolume
 
   return (
-    <div
-      className="absolute right-0 bottom-full mb-2 w-[320px] rounded-lg bg-[var(--bg-app)] border border-[var(--bg-active)] shadow-xl z-30 py-2 text-[var(--text-main)]"
-      data-testid="audio-settings-panel"
-      onClick={(e) => e.stopPropagation()}
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={onClose}>
+      <div
+        className="w-[360px] max-w-full max-h-[calc(100vh-4rem)] overflow-y-auto rounded-lg bg-[var(--bg-app)] border border-[var(--bg-active)] shadow-xl py-2 text-[var(--text-main)]"
+        data-testid="audio-settings-panel"
+        onClick={(e) => e.stopPropagation()}
+      >
       <div className="px-4 pb-2 flex items-center justify-between">
         <span className="text-[12px] font-bold tracking-widest text-[var(--text-muted)] uppercase">{t('audio.title')}</span>
         <button onClick={onClose} className="text-[var(--text-muted)] hover:text-[var(--text-main)] text-[16px] leading-none" aria-label="close">×</button>
@@ -137,6 +138,7 @@ export function AudioSettingsPanel({ onClose }: Props) {
         >
           <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-[var(--bg-app)] transition-all ${media.pushToTalk ? 'left-[18px]' : 'left-0.5'}`} />
         </button>
+      </div>
       </div>
     </div>
   )
