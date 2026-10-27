@@ -153,7 +153,11 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           if (!useChatStore.getState().isAuthority) return
           client.add_member_to_channel(useChatStore.getState().currentChannel, requester).then(() => {
             useChatStore.getState().setPeerStatus(`Added ${requester}`)
-          }).catch((e: any) => useChatStore.getState().setPeerStatus(`Add failed: ${e}`))
+          }).catch((e: any) => {
+            const msg = String(e)
+            if (msg.includes('already in group') || msg.includes('already_member')) return
+            useChatStore.getState().setPeerStatus(`Add failed: ${msg}`)
+          })
         }
         if (ev.PeerJoined) {
           const uid = ev.PeerJoined.uid
@@ -166,7 +170,9 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               useChatStore.getState().setPeerStatus(`Added ${uid}`)
               await new Promise<void>(r => setTimeout(r, 150))
             } catch (e) {
-              useChatStore.getState().setPeerStatus(`Add failed: ${e}`)
+              const msg = String(e)
+              if (msg.includes('already in group') || msg.includes('already_member')) return
+              useChatStore.getState().setPeerStatus(`Add failed: ${msg}`)
             }
           })
         }
@@ -436,6 +442,13 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       try {
         const raw = await client.uploadAttachment(currentChannel, p.name, p.mime, p.bytes)
         const att = typeof raw === 'string' ? JSON.parse(raw) : raw
+        // 服务端只看到密文，size 是密文大小（原文 + 29B 加密开销）。
+        // 覆盖成原文大小；这个 att 会被 JSON.stringify 进 E2EE payload，
+        // 所以 Alice 本地显示和 Bob 收到的都是真实原文大小。
+        att.size = p.size
+        if (!att.mime || att.mime === 'application/octet-stream') {
+          att.mime = p.mime
+        }
         uploaded.push(att)
         useChatStore.getState().updatePendingAttachment(p.id, { status: 'uploaded', attachment: att })
       } catch (err: any) {

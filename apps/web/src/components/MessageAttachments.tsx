@@ -111,13 +111,13 @@ function SingleAttachment({ targetId, att }: { targetId: string; att: Attachment
   return (
     <button
       onClick={handleDownload}
-      className="mt-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--bg-active)] hover:bg-[var(--bg-hover)] text-left transition-colors"
+      className="mt-1 inline-flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-[var(--bg-hover)] text-left transition-colors max-w-[400px]"
     >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
       </svg>
       <div>
-        <div className="text-xs font-medium text-[var(--text-main)] truncate max-w-[200px]">{att.name}</div>
+        <div className="text-xs font-medium text-[var(--text-main)] truncate max-w-[280px]">{att.name}</div>
         <div className="text-[10px] text-[var(--text-muted)]">{formatSize(att.size)}</div>
       </div>
     </button>
