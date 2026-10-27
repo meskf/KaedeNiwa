@@ -13,6 +13,8 @@ import { SettingsView } from './SettingsView'
 import { MoreView } from './MoreView'
 import { UserContextMenu } from './UserContextMenu'
 import { SearchPalette } from './SearchPalette'
+import { CreateChannelDialog } from './CreateChannelDialog'
+import { ChannelSettingsDialog } from './ChannelSettingsDialog'
 import { DMView } from './DMView'
 import { FriendsView } from './FriendsView'
 import { MessageAttachments } from './MessageAttachments'
@@ -42,6 +44,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; uid: string; inVoice: boolean } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [createDialogCategory, setCreateDialogCategory] = useState<string | null | undefined>(undefined)
+  const [settingsChannelId, setSettingsChannelId] = useState<string | null>(null)
   const addMemberQueueRef = useRef<Promise<void>>(Promise.resolve())
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -635,9 +639,27 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                     const inCat = channelList.filter(c => c.category_id === cat.id)
                     if (inCat.length === 0) return null
                     return (
-                      <div key={cat.id} className="mb-4" data-testid={`category-${cat.id}`}>
-                        <div className="mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">{cat.name}</div>
-                        {inCat.map((ch: any) => ch.kind === 'voice' ? renderVoiceChannel(ch) : renderTextChannel(ch))}
+                      <div key={cat.id} className="mb-4 group/cat" data-testid={`category-${cat.id}`}>
+                        <div className="mb-2 flex items-center justify-between text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
+                          <span>{cat.name}</span>
+                          <button
+                            onClick={() => setCreateDialogCategory(cat.id)}
+                            className="opacity-0 group-hover/cat:opacity-100 text-[14px] leading-none hover:text-[var(--text-main)] transition-opacity"
+                            title={t('channel.addChannel')}
+                            data-testid={`category-add-${cat.id}`}
+                          >+</button>
+                        </div>
+                        {inCat.map((ch: any) => (
+                          <div key={ch.id} className="group/ch relative">
+                            {ch.kind === 'voice' ? renderVoiceChannel(ch) : renderTextChannel(ch)}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setSettingsChannelId(ch.id) }}
+                              className="absolute right-2 top-2 opacity-0 group-hover/ch:opacity-100 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-opacity"
+                              title={t('channel.openSettings')}
+                              data-testid={`channel-settings-${ch.id}`}
+                            >⚙</button>
+                          </div>
+                        ))}
                       </div>
                     )
                   })}
@@ -645,9 +667,25 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                     const uncat = channelList.filter(c => !c.category_id)
                     if (uncat.length === 0) return null
                     return (
-                      <div className="mb-4">
-                        <div className="mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">Uncategorized</div>
-                        {uncat.map((ch: any) => ch.kind === 'voice' ? renderVoiceChannel(ch) : renderTextChannel(ch))}
+                      <div className="mb-4 group/cat">
+                        <div className="mb-2 flex items-center justify-between text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
+                          <span>{t('channel.uncategorized')}</span>
+                          <button
+                            onClick={() => setCreateDialogCategory(null)}
+                            className="opacity-0 group-hover/cat:opacity-100 text-[14px] leading-none hover:text-[var(--text-main)] transition-opacity"
+                            title={t('channel.addChannel')}
+                          >+</button>
+                        </div>
+                        {uncat.map((ch: any) => (
+                          <div key={ch.id} className="group/ch relative">
+                            {ch.kind === 'voice' ? renderVoiceChannel(ch) : renderTextChannel(ch)}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setSettingsChannelId(ch.id) }}
+                              className="absolute right-2 top-2 opacity-0 group-hover/ch:opacity-100 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-opacity"
+                              title={t('channel.openSettings')}
+                            >⚙</button>
+                          </div>
+                        ))}
                       </div>
                     )
                   })()}
@@ -833,6 +871,20 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           </div>
         </div>
       </footer>
+
+      {createDialogCategory !== undefined && (
+        <CreateChannelDialog
+          defaultCategoryId={createDialogCategory}
+          onClose={() => setCreateDialogCategory(undefined)}
+        />
+      )}
+
+      {settingsChannelId && (
+        <ChannelSettingsDialog
+          channelId={settingsChannelId}
+          onClose={() => setSettingsChannelId(null)}
+        />
+      )}
 
       <SearchPalette
         open={searchOpen}

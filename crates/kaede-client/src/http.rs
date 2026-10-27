@@ -139,6 +139,8 @@ pub struct CreateChannelReq {
     pub password: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,6 +156,8 @@ pub struct UpdateChannelReq {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -729,7 +733,7 @@ impl HttpApi {
         name: &str,
         kind: &str,
     ) -> Result<kaede_protocol::Channel, ClientError> {
-        self.create_channel_with(name, kind, false, None, None)
+        self.create_channel_with(name, kind, false, None, None, None)
             .await
     }
 
@@ -741,6 +745,7 @@ impl HttpApi {
         is_private: bool,
         password: Option<&str>,
         hash_tier: Option<&str>,
+        category_id: Option<&str>,
     ) -> Result<kaede_protocol::Channel, ClientError> {
         let resp = self
             .http
@@ -752,6 +757,7 @@ impl HttpApi {
                 is_private,
                 password: password.map(|s| s.to_string()),
                 hash_tier: hash_tier.map(|s| s.to_string()),
+                category_id: category_id.map(|s| s.to_string()),
             })
             .send()
             .await

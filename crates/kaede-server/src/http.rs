@@ -208,10 +208,19 @@ async fn register(
     }
 
     // 同步写 members 表。P1-9：用 SQL 子查询原子判 op5，消除并发注册竞态。
-    sqlx::query(
+    //
+    // dev-mode：非首个用户默认 op3（普管），方便本地测试创建/删除频道。
+    // 生产构建（无 dev-mode feature）：非首个用户默认 op2（成员）。
+    let op_subquery = if cfg!(feature = "dev-mode") {
+        "(SELECT CASE WHEN COUNT(*) = 0 THEN 'op5' ELSE 'op3' END FROM members)"
+    } else {
+        "(SELECT CASE WHEN COUNT(*) = 0 THEN 'op5' ELSE 'op2' END FROM members)"
+    };
+    sqlx::query(&format!(
         "INSERT INTO members (login_id, nickname, op, bio, title, avatar_url, joined_at, updated_at) \
-         VALUES (?, ?, (SELECT CASE WHEN COUNT(*) = 0 THEN 'op5' ELSE 'op2' END FROM members), '', '', '', ?, ?)",
-    )
+         VALUES (?, ?, {}, '', '', '', ?, ?)",
+        op_subquery
+    ))
     .bind(&req.login_id)
     .bind(&nickname)
     .bind(now)

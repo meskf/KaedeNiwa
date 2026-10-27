@@ -1,12 +1,17 @@
 [package]
 license.workspace = true
 name = "kaede-server"
+default-run = "kaede-server"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
 name = "kaede-server"
 path = "src/main.rs"
+
+[[bin]]
+name = "promote"
+path = "src/bin/promote.rs"
 
 [lib]
 name = "kaede_server"

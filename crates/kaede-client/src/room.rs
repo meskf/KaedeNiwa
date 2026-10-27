@@ -1447,10 +1447,11 @@ impl RoomSession {
         is_private: bool,
         password: Option<&str>,
         hash_tier: Option<&str>,
+        category_id: Option<&str>,
     ) -> Result<kaede_protocol::Channel, ClientError> {
         let ch = self
             .http
-            .create_channel_with(name, kind, is_private, password, hash_tier)
+            .create_channel_with(name, kind, is_private, password, hash_tier, category_id)
             .await?;
         self.note_channel_privacy(&ch.id, is_private);
         if is_private && let Err(e) = self.conn.channel_ensure_group(&ch.id) {

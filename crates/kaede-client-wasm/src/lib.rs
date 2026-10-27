@@ -422,6 +422,64 @@ impl JsClient {
         Ok(JsValue::from_str(&json))
     }
 
+    // ============ Channel CRUD wasm 桥 ============
+
+    #[wasm_bindgen(js_name = createChannel)]
+    pub async fn create_channel_js(
+        &self,
+        name: String,
+        kind: String,
+        category_id: Option<String>,
+        is_private: Option<bool>,
+        password: Option<String>,
+    ) -> Result<JsValue, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let ch = room
+            .create_channel_with(
+                &name,
+                &kind,
+                is_private.unwrap_or(false),
+                password.as_deref(),
+                None,
+                category_id.as_deref(),
+            )
+            .await
+            .map_err(|e| JsValue::from_str(&format!("create channel: {}", e)))?;
+        let json = serde_json::to_string(&ch)
+            .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
+        Ok(JsValue::from_str(&json))
+    }
+
+    #[wasm_bindgen(js_name = updateChannel)]
+    pub async fn update_channel_js(
+        &self,
+        id: String,
+        name: Option<String>,
+        category_id: Option<String>,
+    ) -> Result<JsValue, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let patch = kaede_client::http::UpdateChannelReq {
+            name,
+            position: None,
+            category_id,
+        };
+        let ch = room.update_channel(&id, patch).await
+            .map_err(|e| JsValue::from_str(&format!("update channel: {}", e)))?;
+        let json = serde_json::to_string(&ch)
+            .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
+        Ok(JsValue::from_str(&json))
+    }
+
+    #[wasm_bindgen(js_name = deleteChannel)]
+    pub async fn delete_channel_js(&self, id: String) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.delete_channel(&id).await
+            .map_err(|e| JsValue::from_str(&format!("delete channel: {}", e)))
+    }
+
     // ============ Category wasm 桥 ============
 
     #[wasm_bindgen(js_name = listCategories)]

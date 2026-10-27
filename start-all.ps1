@@ -62,7 +62,7 @@ Remove-Item Env:KAEDE_SKIP_LIVEKIT_ENV_CHECK -ErrorAction SilentlyContinue
 `$env:RUST_LOG = 'info,kaede_server=debug'
 Set-Location '$root'
 Write-Host '=== Kaede 后端 ===' -ForegroundColor Cyan
-cargo run -p kaede-server --features dev-mode
+cargo run -p kaede-server --bin kaede-server --features dev-mode
 "@
 Start-Process pwsh -ArgumentList '-NoExit', '-Command', $backendCmd -WindowStyle Normal
 
