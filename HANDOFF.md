@@ -1,10 +1,10 @@
 KaedeNiwa HANDOFF
 =================
 
-最后更新：2026-10-25
+最后更新：2026-10-27
 面向：接手的 AI 工程师 / 人类工程师
-状态：14/14 e2e 全绿，可公网小规模部署（局域网 / 稳定 Wi-Fi / ≤10 人）
-HEAD：b984eaf
+状态：CI 12/12 全绿（含 e2e headless 6 个非 media），媒体层 E2EE 闭环，UI 重做完成
+HEAD：e2eb653（ui-rewrite / main 已 ff 同步）
 
 
 第一部分 项目定位
@@ -33,7 +33,7 @@ KaedeNiwa = Discord 的使用体验 + Signal 同级的端到端加密 + 私有�
     读代码 > 读注释（早期归档有误导描述）
 
 
-第二部分 当前状态（2026-10-25）
+第二部分 当前状态（2026-10-27）
 =============================
 
   14/14 e2e 测试全绿（约 30 分钟一轮）
@@ -933,7 +933,7 @@ DELETE ... WHERE login_id=? AND token!=?，新登录踢旧。
 =================================================================
 
 状态：CI 12/12 全绿（含 e2e headless）
-HEAD：本轮提交后更新
+HEAD：e2eb653
 
 ## 1. P0-1 完成：e2e headless 适配
 
@@ -975,3 +975,65 @@ main 之前停在 7665db0，落后 ui-rewrite 40+ commit（ui-rewrite..main = 0�
 3. e2e job 里 `set -e` 让整个 job 只要一个 test 失败就红，日志里 wait_port 超时会
    自动 tail backend.log / vite.log，排查"服务没起来"很快。
 
+
+第二十一部分 2026-10-27 会话收尾（本会话真实结束状态）
+========================================================
+
+状态：CI 12/12 全绿（含 e2e headless），main 已 ff 同步，Docker 本地可用
+HEAD：e2eb653（ui-rewrite / main）
+
+## 1. 本会话最终成果
+
+| 项 | 状态 |
+|---|---|
+| CI 完整管线 | 12/12 job 全绿（含 e2e headless） |
+| e2e 覆盖（CI 上） | test-1 / 2 / 3 / 12 / 13 / 14（6 个非 media） |
+| e2e 覆盖（本地跑） | 14/14 单跑全绿（media 4-11 需 -FreshEachMediaTest 本地跑） |
+| main 分支 | git merge --ff-only ui-rewrite，与 ui-rewrite 完全同步 |
+| 生产 P0 修复 | keypackage fetch 真限流（check_rate_scoped / check_rate_key） |
+| HANDOFF 顶部状态 | 更新为 2026-10-27 CI 12/12 全绿 |
+
+## 2. 关键 commit 序列（本会话）
+
+e2eb653 <- fdc93be <- db9ff8d <- b8dfd4f <- 36e2014 <- 0be46ad <- f4a313b
+
+全部已 push 到 origin/ui-rewrite 和 origin/main。
+
+## 3. 已知仍待办（按优先级）
+
+### P0（生产闸门）
+
+1. deploy/ 本地 Docker 验证（本会话已确认 docker 29.8.1 + compose v5.5.1 可用）
+   - docker compose -f deploy/docker-compose.yml up -d --build
+   - 检查 Caddy WebSocket upgrade（/ws）
+   - 检查 LiveKit 端口映射（7880/7881/7882）
+   - 检查 SQLite volume 挂载（kaede-data）
+   - 建议先用 KAEDE_DOMAIN=localhost 在本地验证 HTTP + WS 通路
+
+### P1（生产后 1-2 周）
+
+2. revoke_others_kicks_active_ws_immediately 重写（当前仍 #[ignore]）
+   - 测试期望 ServerMessage::Error { Unauthenticated }，实际是 ConnectionReset
+   - 根因：/api/sessions/revoke-others handler 可能没 emit 主动踢 WS 的帧
+   - 对比 logout_revokes_session_and_kicks_ws（PASS），两处路径行为不一致
+
+3. main 与 ui-rewrite 后续同步：本会话后 ui-rewrite 若继续提交，main 需要再 ff
+
+### P2
+
+4. UI 剩余：DM 视图（wasm 桥已有）、好友面板（wasm 桥未做）、附件上传（wasm 桥未做）、Lexical、Emoji picker、响应式移动端
+5. 429 退避只覆盖 join_channel：post_message / livekit/token / upload 等端点仍无退避
+6. media e2e 进 CI：test-4/5/6/7/8/9/10/11 需要真实 getDisplayMedia / LiveKit，headless 下不稳定
+7. test-8 全量跑 flaky：net::ERR_NO_BUFFER_SPACE，单跑 100% 过
+
+## 4. 本会话最后悔的一件事
+
+PowerShell -replace 的 + 陷阱把 lib.rs 写坏（3167 行丢失），靠 git revert 恢复。
+教训：批量改文件用 Node，不用 PowerShell 的 -replace 加字符串拼接。
+
+## 5. 给接手方的最后一句话（更新版）
+
+这个项目现在 CI 全绿、14/14 本地 e2e 单跑全绿、E2EE 媒体闭环、UI 重做完成。
+不要再说"CI 未验证"——已经验证了，12/12 全绿。
+下一步是 deploy/ 本地 Docker 验证（P0-2），然后是 revoke_others 重写和 UI 剩余。
+读代码 > 读文档，跑测试 > 相信描述。
