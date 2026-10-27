@@ -7,7 +7,9 @@ import { useMediaState } from '../hooks/useLiveKitRoom'
 import { MediaBar } from './MediaBar'
 import { ScreenShareView } from './ScreenShareView'
 import { IconHash, IconVolume, IconSun, IconMoon, IconSearch, IconUsers } from './icons'
-import { type Theme, getStoredTheme, applyTheme } from '../lib/theme'
+import { useTheme } from '../lib/useTheme'
+import { useI18n } from '../stores/i18n'
+import { SettingsView } from './SettingsView'
 import { DMView } from './DMView'
 import { FriendsView } from './FriendsView'
 import { MessageAttachments } from './MessageAttachments'
@@ -29,7 +31,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     peerStatus,
   } = useChatStore()
   const richInputRef = useRef<RichTextInputHandle | null>(null)
-  const [theme, setTheme] = useState<Theme>(getStoredTheme)
+  const { theme, setTheme } = useTheme()
+  const { t } = useI18n()
   const [showMembers, setShowMembers] = useState(true)
   const addMemberQueueRef = useRef<Promise<void>>(Promise.resolve())
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -282,9 +285,6 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [currentMessages.length, currentPending.length])
 
-  useEffect(() => {
-    applyTheme(theme)
-  }, [theme])
 
   const handleJoinMedia = async () => {
     const client = getClient()
@@ -615,7 +615,14 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center text-[var(--text-muted)]">
                 <div className="text-xl font-bold mb-2 capitalize">{activeView}</div>
-                <div className="text-sm">Under construction</div>
+                {activeView === 'settings' ? (
+              <div className="w-full h-full overflow-y-auto"><SettingsView /></div>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full gap-2">
+                <h1 className="text-2xl font-extrabold text-[var(--text-main)]">{t('more.title')}</h1>
+                <p className="text-[13px] text-[var(--text-muted)]">{t('more.placeholder')}</p>
+              </div>
+            )}
               </div>
             )}
           </main>
@@ -632,17 +639,17 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             <div className="flex flex-col">
               <span className="text-[13px] font-semibold leading-tight text-[var(--text-main)]">{loginId}</span>
               <button onClick={onLogout} className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text-main)] text-left transition-colors mt-0.5">
-                Logout
+                {t('settings.accountLogout')}
               </button>
             </div>
           </div>
 
           <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-8 text-[13px] font-medium text-[var(--text-muted)]">
-            <span onClick={() => setActiveView('chat')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'chat' ? 'text-[var(--text-main)]' : ''}`}>Groups</span>
-            <span onClick={() => setActiveView('dms')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'dms' ? 'text-[var(--text-main)]' : ''}`}>DMs</span>
-            <span onClick={() => setActiveView('friends')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'friends' ? 'text-[var(--text-main)]' : ''}`}>Friends</span>
-            <span onClick={() => setActiveView('settings')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'settings' ? 'text-[var(--text-main)]' : ''}`}>Settings</span>
-            <span onClick={() => setActiveView('more')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'more' ? 'text-[var(--text-main)]' : ''}`}>More</span>
+            <span onClick={() => setActiveView('chat')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'chat' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.groups')}</span>
+            <span onClick={() => setActiveView('dms')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'dms' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.dms')}</span>
+            <span onClick={() => setActiveView('friends')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'friends' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.friends')}</span>
+            <span onClick={() => setActiveView('settings')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'settings' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.settings')}</span>
+            <span onClick={() => setActiveView('more')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'more' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.more')}</span>
           </div>
 
           <div className="ml-auto w-[200px] text-right text-[11px] text-[var(--text-muted)] font-mono">

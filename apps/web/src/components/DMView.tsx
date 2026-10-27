@@ -6,6 +6,7 @@ import { MessageAttachments } from './MessageAttachments'
 import { RichTextInput, type RichTextInputHandle } from './RichTextInput'
 import { MessageText } from './MessageText'
 import { extractMessage } from '../lib/messageUtils'
+import { useI18n } from '../stores/i18n'
 
 export function DMView() {
   const convs = useChatStore(s => s.dmConversations)
@@ -17,6 +18,7 @@ export function DMView() {
   const setDmMessages = useChatStore(s => s.setDmMessages)
   const appendDmMessage = useChatStore(s => s.appendDmMessage)
 
+  const { t } = useI18n()
   const richInputRef = useRef<RichTextInputHandle | null>(null)
   const [newPeer, setNewPeer] = useState('')
   const [showNew, setShowNew] = useState(false)
@@ -142,13 +144,13 @@ export function DMView() {
     <div className="flex h-full w-full max-w-[1000px] mx-auto gap-8">
       <div className="w-[300px] flex flex-col shrink-0">
         <div className="flex items-center justify-between mb-6 mt-1">
-          <h1 className="text-3xl font-extrabold tracking-tight text-[var(--text-main)]">Messages</h1>
+          <h1 className="text-3xl font-extrabold tracking-tight text-[var(--text-main)]">{t('dm.title')}</h1>
           <button
             onClick={() => setShowNew(v => !v)}
             className="px-3 py-1.5 text-[12px] font-semibold rounded-md bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--text-muted)] transition-colors"
             title="New conversation"
           >
-            + New
+            {t('dm.newConv')}
           </button>
         </div>
         {showNew && (
@@ -157,16 +159,16 @@ export function DMView() {
               type="text"
               value={newPeer}
               onChange={e => setNewPeer(e.target.value)}
-              placeholder="peer login_id"
+              placeholder={t('dm.placeholderPeer')}
               className="w-full bg-[var(--bg-app)] text-[var(--text-main)] text-[13px] rounded-md px-3 py-2 outline-none"
               onKeyDown={e => { if (e.key === 'Enter') handleOpen() }}
             />
             <div className="flex gap-2">
               <button onClick={handleOpen} disabled={busy} className="flex-1 px-3 py-1.5 text-[12px] font-semibold rounded-md bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--text-muted)] disabled:opacity-50">
-                {busy ? '...' : 'Open'}
+                {busy ? '...' : t('dm.open')}
               </button>
               <button onClick={() => { setShowNew(false); setNewPeer(''); setError(null) }} className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)]">
-                Cancel
+                {t('dm.cancel')}
               </button>
             </div>
           </div>
@@ -176,7 +178,7 @@ export function DMView() {
         )}
         <div className="flex-1 overflow-y-auto pr-2 space-y-1">
           {convs.length === 0 && (
-            <div className="text-[13px] text-[var(--text-muted)] py-4">No conversations yet</div>
+            <div className="text-[13px] text-[var(--text-muted)] py-4">{t('dm.noConversations')}</div>
           )}
           {convs.map(c => (
             <div
@@ -211,7 +213,7 @@ export function DMView() {
             <div ref={scrollRef} className="flex-1 overflow-y-auto mb-4">
               <div className="flex flex-col gap-4">
                 {msgs.length === 0 && (
-                  <div className="text-[13px] text-[var(--text-muted)] py-8 text-center">No messages yet. Say hi!</div>
+                  <div className="text-[13px] text-[var(--text-muted)] py-8 text-center">{t('dm.noMessages')}</div>
                 )}
                 {msgs.map((m, i) => (
                   <div key={i} className={`flex gap-3 ${isMine(m) ? 'flex-row-reverse' : ''}`}>
@@ -250,7 +252,7 @@ export function DMView() {
             <div className="w-16 h-16 rounded-full bg-[var(--bg-hover)] flex items-center justify-center mb-4">
               <IconHash className="w-8 h-8 opacity-50" />
             </div>
-            <p className="text-[14px]">Select a conversation to start chatting</p>
+            <p className="text-[14px]">{t('dm.selectConversation')}</p>
           </div>
         )}
       </div>

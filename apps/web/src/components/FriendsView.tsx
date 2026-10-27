@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { getClient } from '../wasm/client'
 import { useChatStore, type FriendEntry } from '../stores/chat'
+import { useI18n } from '../stores/i18n'
 
 type Tab = 'online' | 'all' | 'pending'
 
@@ -11,6 +12,7 @@ export function FriendsView() {
   const setActiveConv = useChatStore(s => s.setActiveConv)
   const setActiveView = useChatStore(s => s.setActiveView)
 
+  const { t } = useI18n()
   const [activeTab, setActiveTab] = useState<Tab>('all')
   const [newId, setNewId] = useState('')
   const [showAdd, setShowAdd] = useState(false)
@@ -114,12 +116,12 @@ export function FriendsView() {
   return (
     <div className="flex flex-col h-full w-full max-w-[1000px] mx-auto">
       <div className="flex items-center justify-between mb-6 mt-1">
-        <h1 className="text-3xl font-extrabold tracking-tight text-[var(--text-main)]">Friends</h1>
+        <h1 className="text-3xl font-extrabold tracking-tight text-[var(--text-main)]">{t('friends.title')}</h1>
         <button
           onClick={() => setShowAdd(v => !v)}
           className="px-3 py-1.5 text-[12px] font-semibold rounded-md bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--text-muted)] transition-colors"
         >
-          + Add Friend
+          + {t('friends.addFriend')}
         </button>
       </div>
       {showAdd && (
@@ -128,14 +130,14 @@ export function FriendsView() {
             type="text"
             value={newId}
             onChange={e => setNewId(e.target.value)}
-            placeholder="login_id"
+            placeholder={t('friends.placeholderLogin')}
             className="flex-1 bg-[var(--bg-app)] text-[var(--text-main)] text-[13px] rounded-md px-3 py-2 outline-none"
           />
           <button type="submit" disabled={busy === 'add'} className="px-3 py-1.5 text-[12px] font-semibold rounded-md bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--text-muted)] disabled:opacity-50">
-            {busy === 'add' ? '...' : 'Send'}
+            {busy === 'add' ? '...' : t('friends.send')}
           </button>
           <button type="button" onClick={() => { setShowAdd(false); setNewId(''); setError(null) }} className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)]">
-            Cancel
+            {t('friends.cancel')}
           </button>
         </form>
       )}
@@ -153,13 +155,13 @@ export function FriendsView() {
                 : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'
             }`}
           >
-            {tab} {counts[tab] > 0 && <span className="text-[11px] opacity-60">({counts[tab]})</span>}
+            {tab === 'online' ? t('friends.tabOnline') : tab === 'all' ? t('friends.tabAll') : t('friends.tabPending')} {counts[tab] > 0 && <span className="text-[11px] opacity-60">({counts[tab]})</span>}
           </button>
         ))}
       </div>      <div className="flex-1 overflow-y-auto">
         {filtered.length === 0 && (
           <div className="text-[13px] text-[var(--text-muted)] py-8 text-center">
-            {activeTab === 'pending' ? 'No pending requests.' : activeTab === 'online' ? 'No friends online.' : 'No friends yet. Add one above.'}
+            {activeTab === 'pending' ? t('friends.emptyPending') : activeTab === 'online' ? t('friends.emptyOnline') : t('friends.emptyAll')}
           </div>
         )}
         <div className="flex flex-col gap-2">
@@ -179,7 +181,7 @@ export function FriendsView() {
                     {f.nickname || f.login_id}
                   </span>
                   <span className="text-[11px] text-[var(--text-muted)] truncate">
-                    {f.direction === 'friend' ? 'Friend' : f.direction === 'incoming' ? 'Incoming request' : 'Outgoing request'} · {f.login_id}
+                    {f.direction === 'friend' ? t('friends.statusFriend') : f.direction === 'incoming' ? t('friends.statusIncoming') : t('friends.statusOutgoing')} · {f.login_id}
                   </span>
                 </div>
               </div>
@@ -191,14 +193,14 @@ export function FriendsView() {
                       disabled={busy === f.login_id}
                       className="px-3 py-1.5 bg-[var(--bg-active)] hover:bg-[var(--text-muted)] text-[var(--text-main)] text-[12px] rounded-md font-medium transition-colors disabled:opacity-50"
                     >
-                      Message
+                      {t('friends.actionMessage')}
                     </button>
                     <button
                       onClick={() => handleRemove(f.login_id)}
                       disabled={busy === f.login_id}
                       className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-red-400 transition-colors disabled:opacity-50"
                     >
-                      Remove
+                      {t('friends.actionRemove')}
                     </button>
                   </>
                 )}
@@ -209,14 +211,14 @@ export function FriendsView() {
                       disabled={busy === f.login_id}
                       className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white text-[12px] rounded-md font-medium transition-colors disabled:opacity-50"
                     >
-                      Accept
+                      {t('friends.actionAccept')}
                     </button>
                     <button
                       onClick={() => handleRemove(f.login_id)}
                       disabled={busy === f.login_id}
                       className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-red-400 transition-colors disabled:opacity-50"
                     >
-                      Reject
+                      {t('friends.actionReject')}
                     </button>
                   </>
                 )}
@@ -226,7 +228,7 @@ export function FriendsView() {
                     disabled={busy === f.login_id}
                     className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-red-400 transition-colors disabled:opacity-50"
                   >
-                    Cancel request
+                    {t('friends.actionCancel')}
                   </button>
                 )}
               </div>

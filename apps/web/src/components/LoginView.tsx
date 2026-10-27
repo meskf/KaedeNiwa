@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useAuthStore } from '../stores/auth'
 import { initWasm, getClient, recordLoginArgs, allowReconnect } from '../wasm/client'
+import { useI18n } from '../stores/i18n'
 
 export function LoginView({ onLogin }: { onLogin: () => void }) {
   const [isRegister, setIsRegister] = useState(false)
@@ -10,10 +11,11 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
   const [loginId, setLoginId] = useState('')
   const [password, setPassword] = useState('')
   const setAuth = useAuthStore(s => s.setAuth)
+  const { t } = useI18n()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!loginId || !password) { setError('Please enter account and password'); return }
+    if (!loginId || !password) { setError(t('login.errorEmptyFields')); return }
     setLoading(true)
     setError('')
     try {
@@ -61,16 +63,16 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
         
         <div className="text-center mb-10">
           <h1 className="text-3xl font-extrabold tracking-tight mb-2">
-            {isRegister ? 'Create an account' : 'Welcome back'}
+            {isRegister ? t('login.createAccount') : t('login.welcomeBack')}
           </h1>
           <p className="text-[13px] text-[var(--text-muted)]">
-            {isRegister ? 'Enter your details to create your account.' : 'Enter your details to access your workspace.'}
+            {isRegister ? t('login.subtitleRegister') : t('login.subtitleLogin')}
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-1.5">Server Address</label>
+            <label className="block text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-1.5">{t('login.serverAddress')}</label>
             <input
               type="text"
               value={serverUrl}
@@ -79,17 +81,17 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
             />
           </div>
           <div>
-            <label className="block text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-1.5">Account</label>
+            <label className="block text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-1.5">{t('login.account')}</label>
             <input
               type="text"
               value={loginId}
               onChange={e => setLoginId(e.target.value)}
-              data-testid="login-id" placeholder="e.g. admin"
+              data-testid="login-id" placeholder={t('login.placeholderAccount')}
               className="w-full bg-[var(--bg-hover)] rounded-lg px-3 py-2.5 text-[14px] outline-none text-[var(--text-main)] placeholder-[var(--text-muted)] focus:ring-1 focus:ring-[var(--bg-active)] transition-all"
             />
           </div>
           <div>
-            <label className="block text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-1.5">Password</label>
+            <label className="block text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-1.5">{t('login.password')}</label>
             <input
               type="password"
               value={password}
@@ -110,7 +112,7 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
             disabled={loading}
             className="w-full mt-2 py-2.5 rounded-lg bg-[var(--text-main)] text-[var(--bg-app)] text-[14px] font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
           >
-            {loading ? 'Processing...' : (isRegister ? 'Sign up' : 'Sign in')}
+            {loading ? t('login.processing') : (isRegister ? t('login.signUp') : t('login.signIn'))}
           </button>
         </form>
 
@@ -120,7 +122,7 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
             onClick={() => { setIsRegister(!isRegister); setError(''); }}
             className="text-[13px] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors"
           >
-            {isRegister ? 'Already have an account? Sign in' : 'Don\'t have an account? Sign up'}
+            {isRegister ? t('login.toggleToSignIn') : t('login.toggleToSignUp')}
           </button>
         </div>
       </div>
