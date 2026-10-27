@@ -137,9 +137,74 @@ jobs:
   # Linux CI 没有 msedge 会直接失败。下一轮批量改成读 KAEDE_HEADLESS 环境变量后再开。
   e2e:
     name: e2e (headless)
-    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - run: echo "e2e disabled pending headless adaptation"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: install keyring deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
+      - name: npm ci
+        working-directory: apps/web
+        run: npm ci
+      - name: install playwright chromium
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+      - name: build wasm
+        working-directory: apps/web
+        run: npm run build:wasm
+      - name: build server (release, dev-mode)
+        run: cargo build -p kaede-server --release --features dev-mode
+      - name: run e2e (non-media, headless)
+        working-directory: apps/web
+        env:
+          KAEDE_HEADLESS: "1"
+          KAEDE_SKIP_LIVEKIT_CHECK: "1"
+        run: |
+          set -e
+          # start backend on 18080
+          KAEDE_BIND=0.0.0.0:18080 \
+          LIVEKIT_API_KEY=devkey \
+          LIVEKIT_API_SECRET=secret \
+          LIVEKIT_WS_URL=ws://127.0.0.1:7880 \
+          RUST_LOG=info \
+          ../../target/release/kaede-server > /tmp/backend.log 2>&1 &
+          BACKEND_PID=$!
+          # start vite on 5173
+          npx vite --host 127.0.0.1 --port 5173 > /tmp/vite.log 2>&1 &
+          VITE_PID=$!
+          trap "kill $BACKEND_PID $VITE_PID 2>/dev/null || true" EXIT
+          # wait for ports
+          wait_port() {
+            local port=$1
+            local i=0
+            while ! (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null; do
+              i=$((i+1))
+              if [ $i -ge 60 ]; then
+                echo "port $port timeout"
+                echo "=== backend.log ==="; tail -40 /tmp/backend.log
+                echo "=== vite.log ==="; tail -40 /tmp/vite.log
+                return 1
+              fi
+              sleep 1
+            done
+            echo "port $port ready"
+          }
+          wait_port 18080
+          wait_port 5173
+          # run tests
+          for t in test-1-auto-join test-2-channel-isolation test-3-reconnect test-12-multi-tab test-13-pending-queue test-14-dm-wasm; do
+            echo "===== $t ====="
+            node $t.cjs
+          done

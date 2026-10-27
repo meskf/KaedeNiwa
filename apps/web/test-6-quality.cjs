@@ -1,4 +1,5 @@
-const { chromium, checkPrereqs, login, randName, injectFakeDisplayMedia, setDisableAdaptive } = require('./test-helpers.cjs');
+const { checkPrereqs, login, randName, injectFakeDisplayMedia, setDisableAdaptive } = require('./test-helpers.cjs');
+const { launch } = require('./test-launch.cjs');
 
 async function shareAndMeasure(alice, bob, presetId, expectW, expectH, tolerance = 0.15) {
   console.log(`\n📺 测试画质: ${presetId} (期望 ${expectW}x${expectH})`);
@@ -50,11 +51,7 @@ async function shareAndMeasure(alice, bob, presetId, expectW, expectH, tolerance
   await checkPrereqs();
   console.log('');
 
-  const browser = await chromium.launch({
-    headless: false,
-    channel: 'msedge',
-    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
-  });
+  const browser = await launch({ args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
 
   try {
     const alice = await (await browser.newContext()).newPage();

@@ -1,7 +1,7 @@
-const { chromium } = require('playwright');
+const { launch } = require('./test-launch.cjs');
 
 async function login(page, name) {
-  await page.goto('http://localhost:5173');
+  await page.goto('http://127.0.0.1:5173');
   await page.fill('[data-testid="login-id"]', name);
   await page.fill('[data-testid="login-password"]', 'password123');
   const reg = page.locator('[data-testid="login-toggle-register"]');
@@ -22,7 +22,7 @@ function randName(prefix) {
 
 (async () => {
   console.log('🧪 测试 3: 断线重连');
-  const browser = await chromium.launch({ headless: false, channel: 'msedge' });
+  const browser = await launch();
   try {
     const aliceName = randName('alice');
     const bobName = randName('bob');

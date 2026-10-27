@@ -1,4 +1,5 @@
-const { chromium, checkPrereqs, login, randName, injectFakeDisplayMedia, setDisableAdaptive, typeMessage } = require('./test-helpers.cjs');
+const { checkPrereqs, login, randName, injectFakeDisplayMedia, setDisableAdaptive, typeMessage } = require('./test-helpers.cjs');
+const { launch } = require('./test-launch.cjs');
 
 (async () => {
   console.log('🧪 测试 7: 3 人多人\n');
@@ -6,11 +7,7 @@ const { chromium, checkPrereqs, login, randName, injectFakeDisplayMedia, setDisa
   await checkPrereqs();
   console.log('');
 
-  const browser = await chromium.launch({
-    headless: false,
-    channel: 'msedge',
-    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
-  });
+  const browser = await launch({ args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
 
   try {
     const aliceName = randName('alice');

@@ -1,9 +1,10 @@
-const { chromium, checkPrereqs, login, randName, typeMessage } = require('./test-helpers.cjs');
+const { checkPrereqs, login, randName, typeMessage } = require('./test-helpers.cjs');
+const { launch } = require('./test-launch.cjs');
 
 (async () => {
   console.log('🧪 测试 11: 强制断连 → 自动重连 → backfill');
   await checkPrereqs();
-  const browser = await chromium.launch({ headless: false, channel: 'msedge' });
+  const browser = await launch();
   try {
     const u0Name = randName('u0');
     const u1Name = randName('u1');

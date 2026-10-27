@@ -1,9 +1,10 @@
-const { chromium, checkPrereqs, login, randName } = require('./test-helpers.cjs');
+const { checkPrereqs, login, randName } = require('./test-helpers.cjs');
+const { launch } = require('./test-launch.cjs');
 
 (async () => {
   console.log('🧪 测试 14: DM wasm 桥（openDm / listDmConversations / sendDm）');
   await checkPrereqs();
-  const browser = await chromium.launch({ headless: false, channel: 'msedge' });
+  const browser = await launch();
   try {
     const u0Name = randName('u0');
     const u1Name = randName('u1');

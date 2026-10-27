@@ -1,4 +1,5 @@
-const { chromium, checkPrereqs, login, randName, injectFakeDisplayMedia, setDisableAdaptive } = require('./test-helpers.cjs');
+const { checkPrereqs, login, randName, injectFakeDisplayMedia, setDisableAdaptive } = require('./test-helpers.cjs');
+const { launch } = require('./test-launch.cjs');
 
 const N = 10;
 
@@ -8,15 +9,11 @@ const N = 10;
   await checkPrereqs();
   console.log('');
 
-  const browser = await chromium.launch({
-    headless: false,
-    channel: 'msedge',
-    args: [
+  const browser = await launch({ args: [
       '--use-fake-ui-for-media-stream',
       '--use-fake-device-for-media-stream',
       '--autoplay-policy=no-user-gesture-required',
-    ],
-  });
+    ] });
 
   const users = [];
   try {

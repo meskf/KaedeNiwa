@@ -1,7 +1,8 @@
-const { chromium, checkPrereqs, login, randName } = require('./test-helpers.cjs');
+const { checkPrereqs, login, randName } = require('./test-helpers.cjs');
+const { launch } = require('./test-launch.cjs');
 
 async function loginOnly(page, name) {
-  await page.goto('http://localhost:5173');
+  await page.goto('http://127.0.0.1:5173');
   await page.waitForSelector('[data-testid="login-id"]', { timeout: 10000 });
   await page.fill('[data-testid="login-id"]', name);
   await page.fill('[data-testid="login-password"]', 'password123');
@@ -12,7 +13,7 @@ async function loginOnly(page, name) {
 (async () => {
   console.log('🧪 测试 12: 多 tab / 多设备 session 管理');
   await checkPrereqs();
-  const browser = await chromium.launch({ headless: false, channel: 'msedge' });
+  const browser = await launch();
   try {
     const u0Name = randName('u0');
 
@@ -25,7 +26,7 @@ async function loginOnly(page, name) {
 
     // 同 context 开第二个 tab
     const tab2 = await ctx.newPage();
-    await tab2.goto('http://localhost:5173');
+    await tab2.goto('http://127.0.0.1:5173');
     await tab2.waitForTimeout(3000);
 
     // tab2 应该被 tab-lock 踢回 login 页（UI 有 login 输入框，没 message 输入框）

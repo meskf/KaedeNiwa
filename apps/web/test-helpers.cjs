@@ -14,11 +14,14 @@ async function checkPort(port) {
 }
 
 async function checkPrereqs() {
-  const checks = await Promise.all([
+  const skipLiveKit = process.env.KAEDE_SKIP_LIVEKIT_CHECK === '1';
+  const checks = [
     { name: 'Vite (5173)', ok: await checkPort(5173) },
     { name: 'Kaede Server (18080)', ok: await checkPort(18080) },
-    { name: 'LiveKit (7880)', ok: await checkPort(7880) },
-  ]);
+  ];
+  if (!skipLiveKit) {
+    checks.push({ name: 'LiveKit (7880)', ok: await checkPort(7880) });
+  }
   for (const c of checks) console.log(`   ${c.ok ? '✅' : '❌'} ${c.name}`);
   if (!checks.every(c => c.ok)) {
     console.log('\n❌ 缺少前置服务。请先执行 .\\start-all.ps1 -SkipTest');
@@ -27,7 +30,7 @@ async function checkPrereqs() {
 }
 
 async function login(page, name) {
-  await page.goto('http://localhost:5173');
+  await page.goto('http://127.0.0.1:5173');
   await page.waitForSelector('[data-testid="login-id"]', { timeout: 15000 });
   await page.fill('[data-testid="login-id"]', name);
   await page.fill('[data-testid="login-password"]', 'password123');
