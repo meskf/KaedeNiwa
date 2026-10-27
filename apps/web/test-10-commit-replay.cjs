@@ -48,7 +48,7 @@ const { launch } = require('./test-launch.cjs');
     // u1 恢复后要么实时收到（若 WS 就绪早），要么走 backfill_all_channel_epochs（若晚）
     const u3Page = await (await browser.newContext()).newPage();
     const u3LoginPromise = (async () => {
-      await u3Page.goto('http://localhost:5173');
+      await u3Page.goto('http://127.0.0.1:5173');
       await login(u3Page, u3Name);
       console.log('  u3 登录:', u3Name);
     })();
