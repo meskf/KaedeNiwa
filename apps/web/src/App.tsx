@@ -96,7 +96,7 @@ export default function App() {
 
   if (booting) {
     return (
-      <div className="flex h-full w-full items-center justify-center bg-[var(--bg-base)] text-[var(--text-secondary)]">
+      <div className="flex h-full w-full items-center justify-center bg-[var(--bg-app)] text-[var(--text-muted)]">
         <div className="text-sm">Loading...</div>
       </div>
     )

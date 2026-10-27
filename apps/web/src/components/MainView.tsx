@@ -6,9 +6,14 @@ import { connectMedia, disconnectMedia, updateE2EEKey } from '../lib/livekit'
 import { useMediaState } from '../hooks/useLiveKitRoom'
 import { MediaBar } from './MediaBar'
 import { ScreenShareView } from './ScreenShareView'
-import { IconHash, IconVolume, IconSun, IconMoon, IconSend, IconSearch, IconUsers } from './icons'
+import { IconHash, IconVolume, IconSun, IconMoon, IconSearch, IconUsers } from './icons'
+import { type Theme, getStoredTheme, applyTheme } from '../lib/theme'
 import { DMView } from './DMView'
 import { FriendsView } from './FriendsView'
+import { MessageAttachments } from './MessageAttachments'
+import { RichTextInput, type RichTextInputHandle } from './RichTextInput'
+import { MessageText } from './MessageText'
+import { extractMessage } from '../lib/messageUtils'
 
 export function MainView({ onLogout }: { onLogout: () => void }) {
   const loginId = useAuthStore(s => s.loginId)
@@ -23,8 +28,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     pendingMessages, addPending, removePending, markPendingFailed, incrementRetry,
     peerStatus,
   } = useChatStore()
-  const [input, setInput] = useState('')
-  const [theme, setTheme] = useState<'dark' | 'light'>('light')
+  const richInputRef = useRef<RichTextInputHandle | null>(null)
+  const [theme, setTheme] = useState<Theme>(getStoredTheme)
   const [showMembers, setShowMembers] = useState(true)
   const addMemberQueueRef = useRef<Promise<void>>(Promise.resolve())
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -187,31 +192,34 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             console.log(`[EpochChanged] skip rotate: media connected=${m.connected} mediaCh=${m.channelId}`)
           }
         }
+        if (ev.AttachmentProgress) {
+          const { name, sent, total } = ev.AttachmentProgress
+          const pendings = useChatStore.getState().pendingAttachments
+          const target = pendings.find((a: any) => a.name === name && a.status === 'uploading')
+          if (target) useChatStore.getState().updatePendingAttachment(target.id, { sent, total })
+          return
+        }
         if (ev.ChannelMessage) {
           if (ev.ChannelMessage.channel_id !== useChatStore.getState().currentChannel) return
           try {
-            const plaintext = ev.ChannelMessage.plaintext
-            let text = ''
-            if (Array.isArray(plaintext)) text = new TextDecoder().decode(new Uint8Array(plaintext))
-            else if (typeof plaintext === 'string') text = plaintext
+            const { text, attachments } = extractMessage(ev.ChannelMessage.plaintext)
             useChatStore.getState().addMessage(useChatStore.getState().currentChannel, {
               sender: ev.ChannelMessage.from || 'Unknown',
               plaintext: text,
               ts: ev.ChannelMessage.ts || Date.now(),
+              attachments: ev.ChannelMessage.attachments || attachments,
             })
           } catch (err) { console.error('Parse message failed:', err) }
           return
         }
         if (ev.DmReceived) {
           try {
-            const plaintext = ev.DmReceived.plaintext
-            let text = ''
-            if (Array.isArray(plaintext)) text = new TextDecoder().decode(new Uint8Array(plaintext))
-            else if (typeof plaintext === 'string') text = plaintext
+            const { text, attachments } = extractMessage(ev.DmReceived.plaintext)
             useChatStore.getState().appendDmMessage(ev.DmReceived.conv_id, {
               sender: ev.DmReceived.from || 'Unknown',
               plaintext: text,
               ts: ev.DmReceived.ts || Date.now(),
+              attachments: ev.DmReceived.attachments || attachments,
             })
           } catch (err) { console.error('Parse DM failed:', err) }
           return
@@ -229,7 +237,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         if (ev.AppMessageReceived) {
           if (ev.AppMessageReceived.channel_id !== useChatStore.getState().currentChannel) return
           try {
-            const text = new TextDecoder().decode(new Uint8Array(ev.AppMessageReceived.payload))
+            const { text } = extractMessage(ev.AppMessageReceived.payload)
             useChatStore.getState().addMessage(useChatStore.getState().currentChannel, {
               sender: ev.AppMessageReceived.from || 'Unknown',
               plaintext: text,
@@ -269,7 +277,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   }, [currentMessages.length, currentPending.length])
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark')
+    applyTheme(theme)
   }, [theme])
 
   const handleJoinMedia = async () => {
@@ -303,22 +311,46 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     useChatStore.getState().setPeerStatus('')
   }
 
-  const handleSend = async (e?: React.FormEvent) => {
-    e?.preventDefault()
-    if (!input.trim()) return
-    const text = input.trim()
+  const handleSend = async (text: string) => {
     const client = getClient()
     if (!client) return
-    const id = Date.now().toString() + Math.random().toString(36).slice(2)
-    addPending({ id, channelId: currentChannel, text, ts: Date.now(), status: 'sending', retries: 0 })
-    setInput('')
+    const pendingAtts = useChatStore.getState().pendingAttachments.filter(a => a.status !== 'uploaded')
+
+    if (pendingAtts.length === 0) {
+      if (!text) return
+      const id = Date.now().toString() + Math.random().toString(36).slice(2)
+      addPending({ id, channelId: currentChannel, text, ts: Date.now(), status: 'sending', retries: 0 })
+      try {
+        await client.send_message(currentChannel, text)
+        removePending(id)
+        addMessage(currentChannel, { sender: loginId, plaintext: text, ts: Date.now() })
+      } catch (e) {
+        console.error('send failed:', e)
+        markPendingFailed(id)
+      }
+      return
+    }
+
+    const uploaded: any[] = []
+    for (const p of pendingAtts) {
+      useChatStore.getState().updatePendingAttachment(p.id, { status: 'uploading', sent: 0, total: p.size })
+      try {
+        const raw = await client.uploadAttachment(currentChannel, p.name, p.mime, p.bytes)
+        const att = typeof raw === 'string' ? JSON.parse(raw) : raw
+        uploaded.push(att)
+        useChatStore.getState().updatePendingAttachment(p.id, { status: 'uploaded', attachment: att })
+      } catch (err: any) {
+        console.error('upload failed:', err)
+        useChatStore.getState().updatePendingAttachment(p.id, { status: 'failed', error: String(err) })
+        return
+      }
+    }
     try {
-      await client.send_message(currentChannel, text)
-      removePending(id)
-      addMessage(currentChannel, { sender: loginId, plaintext: text, ts: Date.now() })
-    } catch (e) {
-      console.error('send failed:', e)
-      markPendingFailed(id)
+      await client.sendMessageWithAttachments(currentChannel, text, JSON.stringify(uploaded))
+      addMessage(currentChannel, { sender: loginId, plaintext: text, ts: Date.now(), attachments: uploaded as any })
+      useChatStore.getState().clearPendingAttachments()
+    } catch (err: any) {
+      console.error('send with attachments failed:', err)
     }
   }
 
@@ -360,7 +392,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             >
               <IconUsers className="w-4 h-4" />
             </button>
-            <button
+            <button data-testid="theme-toggle" aria-label="Toggle theme"
               onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
               className="w-8 h-8 flex items-center justify-center rounded-md text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition-colors"
             >
@@ -456,8 +488,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                       <div className="w-7 h-7 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[11px] font-bold text-[var(--text-main)]">
                         {getInitial(uid)}
                       </div>
-                      <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 border-2 border-[var(--bg-app)] rounded-full"></div>
-                    </div>
+                      </div>
                     <span className="text-[13px] font-medium text-[var(--text-main)]">{uid}</span>
                   </div>
                 ))}
@@ -504,13 +535,14 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 </div>
 
                 {inVoice && <MediaBar channelId={currentChannel} />}
-                
+
+                {/* 屏幕共享独立区域 */}
+                <div className="w-full flex justify-center px-4 mt-2">
+                  <ScreenShareView />
+                </div>
 
                 {/* 消息列表 */}
-                
-        <div className="flex-1 overflow-y-auto overflow-x-hidden mb-2 pr-2 w-full">
-                  
-        <ScreenShareView />
+                <div className="flex-1 overflow-y-auto overflow-x-hidden mb-2 pr-2 w-full">
         
             
             
@@ -526,9 +558,13 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                             <span className="font-semibold text-[14px] text-[var(--text-main)]">{msg.sender}</span>
                             <span className="text-[11px] text-[var(--text-muted)]">{new Date(msg.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                           </div>
-                          <div className="text-[14px] mt-0.5 whitespace-pre-wrap leading-relaxed text-[var(--text-main)]">
-                            {(msg as any).plaintext ?? (msg as any).text ?? ''}
-                          </div>
+                          <MessageText
+                            text={(msg as any).plaintext ?? (msg as any).text ?? ''}
+                            className="text-[14px] mt-0.5 text-[var(--text-main)]"
+                          />
+                          {Array.isArray((msg as any).attachments) && (msg as any).attachments.length > 0 && (
+                            <MessageAttachments targetId={currentChannel} attachments={(msg as any).attachments} />
+                          )}
                         </div>
                       </div>
                     ))}
@@ -554,19 +590,13 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
                 <div data-testid="peer-status" className="text-[11px] text-[var(--text-muted)] h-5 w-full mt-2">{peerStatus}</div>
 
-                <form onSubmit={handleSend} className="w-full flex items-center gap-2 bg-[var(--bg-hover)] rounded-md px-4 py-3 shrink-0 mb-2">
-                  <input
-                    data-testid="message-input"
-                    type="text"
-                    value={input}
-                    onChange={e => setInput(e.target.value)}
+                <div className="w-full flex items-end gap-2 bg-[var(--bg-hover)] rounded-md px-3 py-2 shrink-0 mb-2">
+                  <RichTextInput
+                    handleRef={richInputRef}
+                    onSubmit={handleSend}
                     placeholder={`Message #${currentChannelName}`}
-                    className="flex-1 bg-transparent outline-none text-[14px] placeholder-[var(--text-muted)] text-[var(--text-main)]"
                   />
-                  <button type="submit" className="text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors p-1" title="Send">
-                    <IconSend className="w-4 h-4" />
-                  </button>
-                </form>
+                </div>
               </div>
             ) : activeView === 'dms' ? (
               <div className="flex-1 py-4">

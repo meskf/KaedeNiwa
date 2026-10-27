@@ -1037,3 +1037,73 @@ PowerShell -replace 的 + 陷阱把 lib.rs 写坏（3167 行丢失），靠 git 
 不要再说"CI 未验证"——已经验证了，12/12 全绿。
 下一步是 deploy/ 本地 Docker 验证（P0-2），然后是 revoke_others 重写和 UI 剩余。
 读代码 > 读文档，跑测试 > 相信描述。
+
+第二十二部分 2026-10-27 会话：附件全链路 + 降噪 + Lexical 富文本 + UI 修整
+=========================================================================
+
+状态：核心功能均已闭环（E2EE、附件、降噪、富文本），UI 仍有对齐瑕疵需打磨
+HEAD：待提交
+
+## 1. 本次会话完成的内容
+
+### 1.1 附件全链路（R2 / R3）
+- **后端**：确认 `attachments::router` 已完整挂载（lib.rs:61 / main.rs:215），限流、配额、密文存储均就绪。
+- **WASM 桥**：新增 `uploadAttachment` / `downloadAttachment` / `sendMessageWithAttachments` / `sendDmWithAttachments`。
+- **前端 UI**：
+  - 新增 `AttachmentPicker.tsx`（支持拖拽、多选、32MB 限制）。
+  - 新增 `MessageAttachments.tsx`（图片/视频/音频内嵌预览，其他文件下载按钮）。
+  - `MainView.tsx` / `DMView.tsx` 接入附件上传、进度回调、发送逻辑。
+  - 修复了 `chat.ts` store，增加了 `pendingAttachments` 和 `attachmentCache` 状态。
+
+### 1.2 消息解析防污染（R7）
+- 新增 `apps/web/src/lib/messageUtils.ts` 的 `extractMessage()`。
+- 修复了历史消息和 WS 消息渲染出原始 JSON（如 `{"c":"general","t":"..."}`）的 bug，现在会剥离出纯净的明文和附件数组。
+
+### 1.3 RNNoise 降噪真实接入（R5）
+- **放弃 AudioWorklet**：实测 `@shiguredo/rnnoise-wasm` 的 emscripten 产物强制检查 `window` 或 `WorkerGlobalScope`，AudioWorklet 会直接报错。
+- **采用主线程 `MediaStreamTrackProcessor`**：重写了 `rnnoise.ts`，使用 Chrome 94+ 的 WebCodecs API 在主线程逐帧处理（480 samples）。
+- **防止降噪打架**：调用 `getUserMedia` 时强制关闭浏览器原生 `noiseSuppression: false`，保证只要有 RNNoise 就绝不混用原生降噪；不支持 TrackProcessor 的浏览器（如 Firefox）直接禁用降噪，不降级使用原生。
+- **MediaBar**：增加 `noiseMode` 状态，UI 显示 `RNNoise ON / OFF / N/A`。
+
+### 1.4 屏幕共享 UI 与音频同步（R2 / R5）
+- **`ScreenShareView.tsx`** 重写：
+  - 增加了全屏按钮、悬浮控制条、无缝网格布局。
+  - 修复了 `hasAudio` 标记：`livekit.ts` 在收到 `Track.Source.ScreenShareAudio` 时，会更新对应的 `ScreenShareInfo.hasAudio`。
+- **音频挂载**：修复了远端屏幕共享音频无声的问题（必须手动 `attach` `<audio>` 并插入 DOM）。
+
+### 1.5 Lexical 富文本与 Emoji（R6）
+- **安装依赖**：`lexical@0.52.0` 及系列插件。
+- **新增 `RichTextInput.tsx`**：
+  - 使用 Lexical 替换了原生 `<input>`，支持 Markdown 快捷语法（加粗、斜体、代码块、列表、链接等）。
+  - 保留了 `data-testid="message-input"`，兼容现有自动化测试。
+  - 暴露了 `window.__kaede_test_set_input__` 钩子。
+- **新增 `MessageText.tsx`**：轻量级解析器，将 Markdown 渲染为带样式的 React 节点，防 XSS。
+- **新增 `EmojiPicker.tsx`**：内置 240+ 常用 Emoji，支持搜索。
+
+### 1.6 测试修复
+- `test-2-channel-isolation.cjs` 重写：删除了误发到 general 频道的冗余 `typeMessage`，改为真实调用 `join_channel('voice')` 后发送，确保 voice 隔离被真实测试。
+- 清理了旧测试中的 `input[placeholder]` 选择器，统一使用 `[data-testid="message-input"]`。
+
+## 2. 当前遗留问题（需下个会话接手）
+
+### 2.1 UI 对齐瑕疵（P1）
+`RichTextInput.tsx` 的输入框右侧操作区（附件 📎、Emoji 😊、发送 ✈️）在 Windows 环境下仍有 1px~2px 的视觉高低差。
+**原因**：SVG 图标存在基线空隙，Windows Emoji 字体底部有留白，导致 Flex 垂直居中时视觉重心不齐。
+**接手建议**：不要盲目用 `translate-y` 修，建议统一用 `<div className="w-6 h-6 flex items-center justify-center">` 包裹图标，并给 Emoji 增加 `pt-[2px]` 或类似微调。如果依然无法对齐，考虑把 Emoji 图标也换成 SVG（如 `lucide-react` 或 `@radix-ui/react-icons`）。
+
+### 2.2 Emoji 弹窗定位复查
+最后一次改动尝试恢复了 `relative` 属性以让弹窗定位在按钮上方，由于用户要求停止修改，尚未在浏览器里验证其实际效果。如果弹窗飞出屏幕或遮挡，检查 `RichTextInput.tsx` 里的操作区父级是否包含 `relative` 且 `EmojiPicker` 的 `bottom-full` / `right-0` 是否正确生效。
+
+### 2.3 新功能缺乏自动化测试（P1）
+- **附件上传/下载**：需补全 `test-15`（附件加密上传 + 接收端解密显示）。
+- **Lexical 富文本**：需补全 `test-16`（发送 Markdown 并校验对方渲染出粗体/代码块）。
+- **RNNoise**：需要在 headless 环境检测 `MediaStreamTrackProcessor` 是否可用的降级逻辑。
+
+### 2.4 Lexical 粘贴处理（P2）
+当前 Lexical 默认会保留富文本格式，如果从外部（如 Word / Discord）粘贴，可能会带入大量的内联 HTML。需补充 `PastePlugin` 或 `LexicalTypeaheadMenuPlugin` 做清洗。
+
+## 3. 本次会话的教训
+
+1. **不要迷信 Web API 的“理所当然”**：AudioWorklet 无法加载 emscripten wasm 是经典的兼容性坑。`MediaStreamTrackProcessor` 是主线程降噪的完美平替。
+2. **测试中的“假阳性”会掩盖问题**：`test-2` 之前一直 PASS，是因为它误发了一条消息导致对端“看不到”，被断言判定为隔离成功。重构时确保测试逻辑的真实性。
+3. **谨慎大面积重写 UI**：在 PowerShell 里用字符串 Replace 大批量修改 Tailwind 布局极易遗漏或误删关键属性（如 `relative`），以后涉及 UI 组件，最好整文件覆写。

@@ -9,6 +9,7 @@ const INITIAL: MediaState = {
   localScreenSharing: false,
   localMicEnabled: false,
   localNoiseSuppression: true,
+  noiseMode: 'off',
   currentPresetId: '1080p60',
   e2eeEnabled: false,
 }

@@ -1,20 +1,12 @@
-import {
-  Room,
-  RoomEvent,
-  RemoteParticipant,
-  RemoteTrackPublication,
-  RemoteTrack,
-  Track,
-
-  ConnectionState,
-  ExternalE2EEKeyProvider,
-
-} from 'livekit-client'
+import { Room, RoomEvent, RemoteParticipant, RemoteTrackPublication, RemoteTrack, Track, ConnectionState, ExternalE2EEKeyProvider, LocalTrack } from 'livekit-client'
 import { findPreset } from './videoPresets'
+import { startRnnoiseProcessing, isRnnoiseSupported, type RnnoiseHandle } from './rnnoise'
 
 /**
  * LiveKit Room 单例（AES-256 E2EE + simulcast + RNNoise + mic）。
  */
+
+export type NoiseMode = 'rnnoise' | 'off' | 'unsupported'
 
 export interface MediaState {
   connected: boolean
@@ -24,6 +16,7 @@ export interface MediaState {
   localScreenSharing: boolean
   localMicEnabled: boolean
   localNoiseSuppression: boolean
+  noiseMode: NoiseMode
   currentPresetId: string
   e2eeEnabled: boolean
 }
@@ -39,7 +32,9 @@ export interface ParticipantInfo {
 export interface ScreenShareInfo {
   participantIdentity: string
   trackSid: string
+  track: RemoteTrack | LocalTrack
   element: HTMLVideoElement
+  hasAudio: boolean
 }
 
 interface ConnectOptions {
@@ -57,7 +52,9 @@ let currentE2EEEnabled = false
 let currentPresetId = '1080p60'
 let currentMicEnabled = false
 let currentNoiseSuppression = true
+let currentNoiseMode: NoiseMode = 'off'
 let micSourceStream: MediaStream | null = null
+let rnnoiseHandle: RnnoiseHandle | null = null
 let listeners: Set<(state: MediaState) => void> = new Set()
 
 function emit() {
@@ -75,6 +72,7 @@ function getState(): MediaState {
       localScreenSharing: false,
       localMicEnabled: false,
       localNoiseSuppression: true,
+      noiseMode: 'off' as NoiseMode,
       currentPresetId,
       e2eeEnabled: false,
     }
@@ -93,6 +91,7 @@ function getState(): MediaState {
     localScreenSharing: room.localParticipant.isScreenShareEnabled,
     localMicEnabled: currentMicEnabled,
     localNoiseSuppression: currentNoiseSuppression,
+    noiseMode: currentNoiseMode,
     currentPresetId,
     e2eeEnabled,
   }
@@ -203,6 +202,17 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
         document.body.appendChild(el)
         el.play().catch(e => console.warn('[Audio] 播放失败:', e))
         console.log(`[Audio] 已挂载并播放 ${p.identity} 的音频轨道 (${pub.source})`)
+
+        // 屏幕共享音频：标记对应 share 有音轨
+        if (pub.source === Track.Source.ScreenShareAudio) {
+          for (const [sid, info] of screenShareCache) {
+            if (info.participantIdentity === p.identity) {
+              screenShareCache.set(sid, { ...info, hasAudio: true })
+              break
+            }
+          }
+          emit()
+        }
         return // 音频处理完就返回，不再走视频逻辑
       }
 
@@ -225,7 +235,9 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
         screenShareCache.set(track.sid || p.identity, {
           participantIdentity: p.identity,
           trackSid: track.sid || '',
+          track,
           element: el,
+          hasAudio: false,
         })
         emit()
       }
@@ -299,12 +311,60 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
     if (!videoTrack) throw new Error('无视频轨道')
     
     // 用 publishTrack 手动控制 simulcast
-    await currentRoom.localParticipant.publishTrack(videoTrack, {
+    const videoPub = await currentRoom.localParticipant.publishTrack(videoTrack, {
       source: Track.Source.ScreenShare,
       simulcast: false,
       screenShareEncoding: { maxBitrate: preset.bitrate, maxFramerate: preset.fps },
       degradationPreference: 'maintain-resolution',
     })
+
+    // 系统/标签页音频（用户勾选"共享音频"时才有）—— 独立发布
+    const audioTracks = stream.getAudioTracks()
+    console.log('[ScreenShare] audio track present=' + audioTracks.length + ' (constraints.audio=' + JSON.stringify(constraints.audio) + ')')
+    const audioTrack = audioTracks[0]
+    if (audioTrack) {
+      try {
+        await currentRoom.localParticipant.publishTrack(audioTrack, {
+          source: Track.Source.ScreenShareAudio,
+          simulcast: false,
+        })
+        console.log('[ScreenShare] 已发布系统音频')
+        // 更新本地预览 hasAudio
+        const localKey = 'LOCAL-SHARE-' + (videoTrack.id || 'local')
+        const info = screenShareCache.get(localKey)
+        if (info) screenShareCache.set(localKey, { ...info, hasAudio: true })
+        emit()
+      } catch (e) {
+        console.warn('[ScreenShare] 音频发布失败:', e)
+      }
+    } else {
+      console.log('[ScreenShare] 无系统音频轨道（用户未勾选/浏览器未提供）')
+    }
+
+    // 本地预览
+    try {
+      const localTrack = videoPub.track
+      if (localTrack) {
+        const localEl = document.createElement('video')
+        localEl.autoplay = true
+        localEl.muted = true
+        localEl.playsInline = true
+        localTrack.attach(localEl)
+        localEl.play().catch(() => {})
+        const sid = (localTrack as any).sid || (localTrack as any).mediaStreamTrack?.id || 'local'
+        const localKey = 'LOCAL-SHARE-' + sid
+        screenShareCache.set(localKey, {
+          participantIdentity: currentRoom.localParticipant.identity + ' (me)',
+          trackSid: localKey,
+          track: localTrack,
+          element: localEl,
+          hasAudio: audioTracks.length > 0,
+        })
+        emit()
+      }
+    } catch (e) {
+      console.warn('[ScreenShare] 本地预览注入失败:', e)
+    }
     
     // 监听用户点系统停止共享
     videoTrack.onended = () => {
@@ -329,8 +389,21 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
 
 export async function stopScreenShare(): Promise<void> {
   if (!currentRoom) return
+  // 清理本地预览
+  for (const key of Array.from(screenShareCache.keys())) {
+    if (key.startsWith('LOCAL-SHARE-')) {
+      const info = screenShareCache.get(key)
+      try { info?.track.detach().forEach(el => el.remove()) } catch {}
+      screenShareCache.delete(key)
+    }
+  }
   for (const pub of currentRoom.localParticipant.videoTrackPublications.values()) {
     if (pub.source === Track.Source.ScreenShare) {
+      await currentRoom.localParticipant.unpublishTrack(pub.track!)
+    }
+  }
+  for (const pub of currentRoom.localParticipant.audioTrackPublications.values()) {
+    if (pub.source === Track.Source.ScreenShareAudio) {
       await currentRoom.localParticipant.unpublishTrack(pub.track!)
     }
   }
@@ -343,26 +416,51 @@ export async function stopScreenShare(): Promise<void> {
 export async function enableMicrophone(noiseSuppression: boolean): Promise<void> {
   if (!currentRoom) throw new Error('未加入媒体房间')
 
-  // 麦克风：浏览器原生降噪（RNNoise AudioWorklet 集成放下轮）
   const disableEcho = typeof window !== 'undefined' && (window as any).__KAEDE_TEST_DISABLE_ECHO__ === true
+
+  // 关键：始终关闭浏览器原生 noiseSuppression。
+  // 走 RNNoise 时，原生 NS 会和它打架导致音质二次失真；不走 RNNoise 时也不能用原生 NS 兜底
+  // （用户明确要求"必须纯 RNNoise"）。AEC/AGC 保留——它们是不同功能，不冲突。
   micSourceStream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: !disableEcho,
-      noiseSuppression: noiseSuppression,
+      noiseSuppression: false,
       autoGainControl: true,
       sampleRate: 48000,
     },
   })
 
-  const track = micSourceStream.getAudioTracks()[0]
-  await currentRoom.localParticipant.publishTrack(track, {
+  let publishTrack = micSourceStream.getAudioTracks()[0]
+  let mode: NoiseMode = 'off'
+
+  if (noiseSuppression) {
+    if (!isRnnoiseSupported()) {
+      console.warn('[Mic] RNNoise 需要 MediaStreamTrackProcessor；当前浏览器不支持（Firefox 需 flag）。降噪已关闭，原生 NS 不会启用。')
+      mode = 'unsupported'
+    } else {
+      const handle = await startRnnoiseProcessing(publishTrack)
+      if (handle) {
+        rnnoiseHandle = handle
+        publishTrack = handle.track
+        mode = 'rnnoise'
+        console.log('[Mic] RNNoise 已启用（原生 NS 已关闭）')
+      } else {
+        console.warn('[Mic] RNNoise 启动失败，降噪关闭（原生 NS 不会启用）')
+        mode = 'unsupported'
+      }
+    }
+  }
+
+  await currentRoom.localParticipant.publishTrack(publishTrack, {
     source: Track.Source.Microphone,
     simulcast: false,
+    dtx: false, // 【修复】禁用 DTX，防止降噪后音质断裂
   })
 
   currentMicEnabled = true
   currentNoiseSuppression = noiseSuppression
-  console.log(`[Mic] 已开启，noiseSuppression=${noiseSuppression}`)
+  currentNoiseMode = mode
+  console.log(`[Mic] 已开启，mode=${mode}`)
   emit()
 }
 
@@ -373,11 +471,16 @@ export async function disableMicrophone(): Promise<void> {
       await currentRoom.localParticipant.unpublishTrack(pub.track!)
     }
   }
+  if (rnnoiseHandle) {
+    try { await rnnoiseHandle.stop() } catch {}
+    rnnoiseHandle = null
+  }
   if (micSourceStream) {
     micSourceStream.getTracks().forEach(t => t.stop())
     micSourceStream = null
   }
   currentMicEnabled = false
+  currentNoiseMode = 'off'
   emit()
 }
 

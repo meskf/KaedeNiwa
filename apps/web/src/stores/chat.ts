@@ -1,3 +1,4 @@
+import type { Attachment } from '../protocol/Attachment';
 import { create } from 'zustand';
 
 export interface PendingMsg {
@@ -9,10 +10,24 @@ export interface PendingMsg {
   retries: number;
 }
 
+export interface PendingAttachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  bytes: Uint8Array;
+  status: 'pending' | 'uploading' | 'uploaded' | 'failed';
+  sent: number;
+  total: number;
+  attachment?: Attachment;
+  error?: string;
+}
+
 export interface ChatMessage {
   sender: string;
   plaintext: string;
   ts: number;
+  attachments?: Attachment[];
 }
 
 export interface ChannelInfo {
@@ -33,6 +48,7 @@ export interface DmMessage {
   sender: string;
   ts: number;
   plaintext: string;
+  attachments?: Attachment[];
 }
 
 export interface FriendEntry {
@@ -80,6 +96,14 @@ interface ChatState {
   appendDmMessage: (convId: string, msg: DmMessage) => void;
   setFriends: (f: FriendEntry[]) => void;
   setServerMembers: (m: string[]) => void;
+
+  pendingAttachments: PendingAttachment[];
+  attachmentCache: Record<string, string>;
+  addPendingAttachment: (a: PendingAttachment) => void;
+  updatePendingAttachment: (id: string, patch: Partial<PendingAttachment>) => void;
+  removePendingAttachment: (id: string) => void;
+  clearPendingAttachments: () => void;
+  setAttachmentUrl: (id: string, url: string) => void;
 }
 
 export const useChatStore = create<ChatState>((set) => ({
@@ -97,6 +121,8 @@ export const useChatStore = create<ChatState>((set) => ({
   dmMessages: {},
   friends: [],
   serverMembers: [],
+  pendingAttachments: [],
+  attachmentCache: {},
 
   setChannels: (channels) => set({ channels }),
   setChannel: (currentChannel) => set({ currentChannel }),
@@ -147,4 +173,20 @@ export const useChatStore = create<ChatState>((set) => ({
   })),
   setFriends: (friends) => set({ friends }),
   setServerMembers: (serverMembers) => set({ serverMembers }),
+
+  addPendingAttachment: (a) => set((state) => ({
+    pendingAttachments: [...state.pendingAttachments, a]
+  })),
+  updatePendingAttachment: (id, patch) => set((state) => ({
+    pendingAttachments: state.pendingAttachments.map(a =>
+      a.id === id ? { ...a, ...patch } : a
+    )
+  })),
+  removePendingAttachment: (id) => set((state) => ({
+    pendingAttachments: state.pendingAttachments.filter(a => a.id !== id)
+  })),
+  clearPendingAttachments: () => set({ pendingAttachments: [] }),
+  setAttachmentUrl: (id, url) => set((state) => ({
+    attachmentCache: { ...state.attachmentCache, [id]: url }
+  })),
 }));

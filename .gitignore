@@ -50,3 +50,33 @@ apps/web/test-debug.cjs
 apps/web/test-e2e.cjs
 apps/web/test-timing.cjs
 apps/web/test-diag*.cjs
+
+# local probe / patch scripts (ad-hoc, not committed)
+_probe*.cjs
+_patch*.cjs
+_fix*.cjs
+_add-*.cjs
+_tree.txt
+_backup*.diff
+_backup*.dill
+apps/web/_probe*.cjs
+apps/web/_patch*.cjs
+apps/web/_fix*.cjs
+apps/web/_add-*.cjs
+
+# apps/web ad-hoc scripts (not committed)
+apps/web/probe.cjs
+apps/web/fix-*.mjs
+apps/web/patch-*.cjs
+apps/web/extract*.cjs
+
+# root-level ad-hoc scripts from AI sessions
+/clean-dup.cjs
+/finalize.mjs
+/fix-*.cjs
+/patch-*.cjs
+/patch-test*.cjs
+/verify-fixes.cjs
+/screenshots/
+/server-*.log
+apps/web/fix-r6.mjs

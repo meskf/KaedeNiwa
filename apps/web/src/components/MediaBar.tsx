@@ -56,10 +56,22 @@ export function MediaBar({ channelId }: Props) {
     }
   }
 
-  const handleToggleNoise = () => {
+  const handleToggleNoise = async () => {
     const next = !noiseOn
     setNoiseOn(next)
     setNoiseSuppression(next)
+    // RNNoise 需要在 getUsermedia 之后建立流水线；运行时切换必须重建轨道。
+    // 简化实现：提示用户手动重开麦生效（重建 track 会让对端看到重连，代价较大）。
+    if (media.localMicEnabled) {
+      // 立即关闭再开启，触发 pipeline 重建
+      try {
+        await disableMicrophone()
+        await enableMicrophone(next)
+        setMicOn(true)
+      } catch (e: any) {
+        setError(String(e))
+      }
+    }
   }
 
   const handleLeave = async () => {
@@ -108,13 +120,20 @@ export function MediaBar({ channelId }: Props) {
           <button
             data-testid="media-noise-toggle"
             data-noise={noiseOn ? 'on' : 'off'}
+            data-mode={media.noiseMode}
             onClick={handleToggleNoise}
             className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
               noiseOn ? 'bg-[var(--text-primary)] text-[var(--bg-base)]' : 'bg-[var(--bg-active)] text-[var(--text-secondary)]'
             }`}
-            title="RNNoise 降噪"
+            title={
+              media.noiseMode === 'unsupported'
+                ? 'RNNoise 需要 Chrome 94+ / Edge / Safari 15.4+'
+                : noiseOn ? 'RNNoise ON' : 'RNNoise OFF'
+            }
           >
-            {noiseOn ? 'NS ON' : 'NS OFF'}
+            {media.noiseMode === 'unsupported'
+              ? 'RNNoise N/A'
+              : noiseOn ? 'RNNoise ON' : 'RNNoise OFF'}
           </button>
         )}
 

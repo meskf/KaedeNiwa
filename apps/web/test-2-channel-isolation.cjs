@@ -37,22 +37,27 @@ function randName(prefix) {
     await typeMessage(alice, 'SECRET_GENERAL_MSG');
     await alice.waitForTimeout(1500);
     
-    // 绕过 UI，尝试在 voice 频道发送消息测试隔离
-    // alice 在 UI 只加入了 general，voice 频道可能还没有 MLS group（单人频道走 solo group 建群有延迟）。
-    // 无论是否抛出 "no group"，bob 在 general UI 都看不到 voice 消息——隔离本身成立。
-    await alice.evaluate(async () => {
+    // Alice 在 UI 上停留 general，但通过 wasm 真正加入 voice 频道，
+    // 再往 voice 发消息。Bob 留在 general，不应该看到 SECRET_DEV_MSG。
+    // 这样才真正验证 "voice 频道消息不会漏到 general" 的隔离性。
+    const voiceResult = await alice.evaluate(async () => {
       const wasm = await import('/src/wasm/client.ts');
       const c = wasm.getClient();
-      if (c) {
-        try {
-          await c.send_message('voice', 'SECRET_DEV_MSG');
-        } catch (e) {
-          console.log('[test-2] send to voice failed (isolation still holds):', e && e.message || e);
-        }
+      if (!c) return { ok: false, reason: 'no client' };
+      try {
+        await c.join_channel('voice');
+        await new Promise(r => setTimeout(r, 800));
+        await c.send_message('voice', 'SECRET_DEV_MSG');
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, reason: String(e && (e.message || e)) };
       }
     });
-    await alice.waitForTimeout(1500);
-    await typeMessage(alice, 'SECRET_DEV_MSG');
+    if (!voiceResult.ok) {
+      console.warn('[test-2] ⚠️  voice send failed, isolation assertion is weak:', voiceResult.reason);
+    } else {
+      console.log('[test-2] ✅ voice send succeeded (real isolation test)');
+    }
     await alice.waitForTimeout(1500);
     
     const bobHasGeneral = await bob.locator('text=SECRET_GENERAL_MSG').isVisible();

@@ -187,6 +187,75 @@ impl JsClient {
     }
 
     // 拉取指定频道的历史
+    // === 附件 ===
+
+    /// 上传附件到 target（频道 id 或 DM conv_id）。
+    #[wasm_bindgen(js_name = uploadAttachment)]
+    pub async fn upload_attachment(
+        &self,
+        target_id: String,
+        name: String,
+        mime: Option<String>,
+        bytes: Vec<u8>,
+    ) -> Result<JsValue, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let att = room
+            .upload_attachment(&target_id, &name, mime.as_deref(), bytes)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("upload attachment: {e}")))?;
+        Ok(JsValue::from_str(&serde_json::to_string(&att).unwrap()))
+    }
+
+    /// 下载并解密附件。返回明文字节（Uint8Array）。
+    #[wasm_bindgen(js_name = downloadAttachment)]
+    pub async fn download_attachment(
+        &self,
+        target_id: String,
+        id: String,
+        expected_sha256: Option<String>,
+    ) -> Result<Vec<u8>, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.download_attachment(&target_id, &id, expected_sha256.as_deref())
+            .await
+            .map_err(|e| JsValue::from_str(&format!("download attachment: {e}")))
+    }
+
+    /// 发送带附件的频道消息。
+    #[wasm_bindgen(js_name = sendMessageWithAttachments)]
+    pub async fn send_message_with_attachments(
+        &self,
+        channel_id: String,
+        text: String,
+        attachments_json: String,
+    ) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let atts: Vec<kaede_protocol::Attachment> = serde_json::from_str(&attachments_json)
+            .map_err(|e| JsValue::from_str(&format!("parse attachments: {e}")))?;
+        room.send_text_with_attachments(&channel_id, &text, &atts)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("send with attachments: {e}")))
+    }
+
+    /// 发送带附件的 DM。
+    #[wasm_bindgen(js_name = sendDmWithAttachments)]
+    pub async fn send_dm_with_attachments(
+        &self,
+        conv_id: String,
+        text: String,
+        attachments_json: String,
+    ) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let atts: Vec<kaede_protocol::Attachment> = serde_json::from_str(&attachments_json)
+            .map_err(|e| JsValue::from_str(&format!("parse attachments: {e}")))?;
+        room.send_dm_with_attachments(&conv_id, &text, &atts)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("send dm with attachments: {e}")))
+    }
+
     // === 屏幕共享 / 语音 ===
 
     /// 获取 LiveKit token + E2EE seed

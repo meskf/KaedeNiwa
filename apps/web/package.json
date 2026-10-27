@@ -11,8 +11,16 @@
     "build:wasm": "wasm-pack build ../../crates/kaede-client-wasm --target web --out-dir ../../apps/web/src/wasm/pkg"
   },
   "dependencies": {
+    "@lexical/code": "^0.52.0",
+    "@lexical/link": "^0.52.0",
+    "@lexical/list": "^0.52.0",
+    "@lexical/markdown": "^0.52.0",
+    "@lexical/react": "^0.52.0",
+    "@lexical/rich-text": "^0.52.0",
+    "@lexical/utils": "^0.52.0",
     "@shiguredo/rnnoise-wasm": "^2025.1.5",
     "@tanstack/react-query": "^5.62.0",
+    "lexical": "^0.52.0",
     "livekit-client": "^2.23.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

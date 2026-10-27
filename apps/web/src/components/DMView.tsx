@@ -1,7 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { IconSend, IconHash } from './icons'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { IconHash } from './icons'
 import { getClient } from '../wasm/client'
 import { useChatStore } from '../stores/chat'
+import { MessageAttachments } from './MessageAttachments'
+import { RichTextInput, type RichTextInputHandle } from './RichTextInput'
+import { MessageText } from './MessageText'
+import { extractMessage } from '../lib/messageUtils'
 
 export function DMView() {
   const convs = useChatStore(s => s.dmConversations)
@@ -13,7 +17,7 @@ export function DMView() {
   const setDmMessages = useChatStore(s => s.setDmMessages)
   const appendDmMessage = useChatStore(s => s.appendDmMessage)
 
-  const [input, setInput] = useState('')
+  const richInputRef = useRef<RichTextInputHandle | null>(null)
   const [newPeer, setNewPeer] = useState('')
   const [showNew, setShowNew] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -44,11 +48,15 @@ export function DMView() {
       try {
         const raw = await c.dmLoadHistory(activeConvId, 50)
         const arr = typeof raw === 'string' ? JSON.parse(raw) : raw
-        const mapped = (arr || []).map((m: any) => ({
-          sender: m.sender,
-          ts: Number(m.ts),
-          plaintext: m.plaintext,
-        }))
+        const mapped = (arr || []).map((m: any) => {
+          const { text, attachments } = extractMessage(m.plaintext)
+          return {
+            sender: m.sender,
+            ts: Number(m.ts),
+            plaintext: text,
+            attachments: m.attachments || attachments,
+          }
+        })
         setDmMessages(activeConvId, mapped)
         if (mapped.length > 0) {
           const latest = mapped.reduce((a: number, b: { ts: number }) => Math.max(a, b.ts), 0)
@@ -63,21 +71,46 @@ export function DMView() {
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
   }, [msgs.length])
-  const handleSend = async (e: FormEvent) => {
-    e.preventDefault()
-    if (!input.trim() || !activeConvId || busy) return
+  const handleSend = async (text: string) => {
+    if (!activeConvId || busy) return
+    const pendingAtts = useChatStore.getState().pendingAttachments.filter(a => a.status !== 'uploaded')
+    if (!text && pendingAtts.length === 0) return
     const c = getClient()
     if (!c) return
-    const text = input.trim()
-    const ts = Date.now()
-    setInput('')
+
     setBusy(true)
     setError(null)
-    appendDmMessage(activeConvId, { sender: '__me__', ts, plaintext: text })
+
+    if (pendingAtts.length === 0) {
+      const ts = Date.now()
+      appendDmMessage(activeConvId, { sender: '__me__', ts, plaintext: text })
+      try { await c.sendDm(activeConvId, text) }
+      catch (e: any) { setError(String(e)) }
+      finally { setBusy(false) }
+      return
+    }
+
+    const uploaded: any[] = []
+    for (const p of pendingAtts) {
+      useChatStore.getState().updatePendingAttachment(p.id, { status: 'uploading', sent: 0, total: p.size })
+      try {
+        const raw = await c.uploadAttachment(activeConvId, p.name, p.mime, p.bytes)
+        const att = typeof raw === 'string' ? JSON.parse(raw) : raw
+        uploaded.push(att)
+        useChatStore.getState().updatePendingAttachment(p.id, { status: 'uploaded', attachment: att })
+      } catch (err: any) {
+        setError(String(err))
+        useChatStore.getState().updatePendingAttachment(p.id, { status: 'failed', error: String(err) })
+        setBusy(false)
+        return
+      }
+    }
     try {
-      await c.sendDm(activeConvId, text)
-    } catch (e: any) {
-      setError(String(e))
+      await c.sendDmWithAttachments(activeConvId, text, JSON.stringify(uploaded))
+      appendDmMessage(activeConvId, { sender: '__me__', ts: Date.now(), plaintext: text, attachments: uploaded as any })
+      useChatStore.getState().clearPendingAttachments()
+    } catch (err: any) {
+      setError(String(err))
     } finally {
       setBusy(false)
     }
@@ -194,24 +227,22 @@ export function DMView() {
                           {new Date(m.ts).toLocaleTimeString()}
                         </span>
                       </div>
-                      <div className="text-[14px] mt-0.5 text-[var(--text-main)] break-words">{m.plaintext}</div>
+                      <MessageText text={m.plaintext} className="text-[14px] mt-0.5 text-[var(--text-main)]" />
+                      {m.attachments && m.attachments.length > 0 && activeConvId && (
+                        <MessageAttachments targetId={activeConvId} attachments={m.attachments} />
+                      )}
                     </div>
                   </div>
                 ))}
               </div>
             </div>            <div className="pb-2 shrink-0">
-              <form onSubmit={handleSend} className="w-full flex items-center gap-3 rounded-md px-4 py-3 bg-[var(--bg-hover)]">
-                <input
-                  type="text"
-                  value={input}
-                  onChange={e => setInput(e.target.value)}
+              <div className="w-full flex items-end gap-2 rounded-md px-3 py-2 bg-[var(--bg-hover)]">
+                <RichTextInput
+                  handleRef={richInputRef}
+                  onSubmit={handleSend}
                   placeholder={`Message @${activeConv.peer_nickname || activeConv.peer_login_id}`}
-                  className="bg-transparent outline-none flex-1 text-[14px] placeholder-[var(--text-muted)] text-[var(--text-main)]"
                 />
-                <button type="submit" disabled={busy} className="text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors disabled:opacity-50" title="Send">
-                  <IconSend className="w-4 h-4" />
-                </button>
-              </form>
+              </div>
             </div>
           </>
         ) : (

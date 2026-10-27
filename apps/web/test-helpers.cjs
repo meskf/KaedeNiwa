@@ -36,7 +36,7 @@ async function login(page, name) {
   await page.fill('[data-testid="login-password"]', 'password123');
   await page.click('[data-testid="login-toggle-register"]');
   await page.click('[data-testid="login-submit"]');
-  await page.waitForSelector('input[placeholder^="Message #"]', { timeout: 15000 });
+  await page.waitForSelector('[data-testid="message-input"]', { timeout: 15000 });
 }
 
 async function typeMessage(page, text) {
@@ -50,8 +50,9 @@ function randName(prefix) {
 }
 
 // 注入动态尺寸的假屏幕共享（支持 480p / 1080p / 4K）
-async function injectFakeDisplayMedia(page) {
-  await page.addInitScript(() => {
+async function injectFakeDisplayMedia(page, opts = {}) {
+  const withAudio = opts && opts.withAudio === true
+  await page.addInitScript((injectAudio) => {
     if (!navigator.mediaDevices) navigator.mediaDevices = {};
     navigator.mediaDevices.getDisplayMedia = async (constraints) => {
       const v = constraints?.video || {};
@@ -74,9 +75,26 @@ async function injectFakeDisplayMedia(page) {
         ctx.fillText('Frame ' + frame, 40, h / 2 + h / 6);
         frame++;
       }, interval);
-      return canvas.captureStream(fps);
+      const stream = canvas.captureStream(fps);
+      if (injectAudio && constraints && constraints.audio) {
+        try {
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+          const osc = audioCtx.createOscillator();
+          osc.frequency.value = 440;
+          const gain = audioCtx.createGain();
+          gain.gain.value = 0.05;
+          const dest = audioCtx.createMediaStreamDestination();
+          osc.connect(gain);
+          gain.connect(dest);
+          osc.start();
+          dest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+          // 记录到 window 便于测试核查
+          window.__fakeDisplayAudioCtx__ = audioCtx;
+        } catch (e) { console.warn('[fakeDisplayMedia] audio inject failed', e); }
+      }
+      return stream;
     };
-  });
+  }, withAudio);
 }
 
 async function setDisableAdaptive(page) {
