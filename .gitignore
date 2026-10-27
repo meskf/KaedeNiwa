@@ -17,3 +17,36 @@ release/
 .vscode/
 .idea/
 .DS_Store
+
+# ---- 新增 2026-10-27 ----
+# Runtime data (start-all.ps1 把 db 写在仓库根)
+*.db
+*.db-shm
+*.db-wal
+data/
+logs/
+
+# Backups
+*.bak
+*.bak_*
+
+# Test output
+*-output*.log
+full-regression.log
+
+# Audit logs
+.audit/
+
+# Archive (461MB, 保留磁盘不保留 git)
+_archive/
+# One-off debug scripts
+apps/web/extract*.cjs
+apps/web/patch-*.cjs
+
+# Test logs
+test-*.log
+# Non-e2e debug scripts
+apps/web/test-debug.cjs
+apps/web/test-e2e.cjs
+apps/web/test-timing.cjs
+apps/web/test-diag*.cjs
