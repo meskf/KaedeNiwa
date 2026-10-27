@@ -213,17 +213,23 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           return
         }
         if (ev.DmReceived) {
-          try {
-            const { text, attachments } = extractMessage(ev.DmReceived.plaintext)
-            useChatStore.getState().appendDmMessage(ev.DmReceived.conv_id, {
-              sender: ev.DmReceived.from || 'Unknown',
-              plaintext: text,
-              ts: ev.DmReceived.ts || Date.now(),
-              attachments: ev.DmReceived.attachments || attachments,
-            })
-          } catch (err) { console.error('Parse DM failed:', err) }
-          return
-        }
+  if (ev.DmReceived.from === loginId) {
+    // defense: server dm.rs B3 comment claims sender is excluded, but
+    // probe6 (2026-10-27) confirmed server DOES echo back. Filter client-side.
+    // See HANDOFF: DM self-echo bug in server state.send_to.
+  } else {
+    try {
+                const { text, attachments } = extractMessage(ev.DmReceived.plaintext)
+                useChatStore.getState().appendDmMessage(ev.DmReceived.conv_id, {
+                  sender: ev.DmReceived.from || 'Unknown',
+                  plaintext: text,
+                  ts: ev.DmReceived.ts || Date.now(),
+                  attachments: ev.DmReceived.attachments || attachments,
+                })
+              } catch (err) { console.error('Parse DM failed:', err) }
+              return
+  }
+}
         if (ev.FriendsChanged) {
           const c = getClient()
           if (c) {
