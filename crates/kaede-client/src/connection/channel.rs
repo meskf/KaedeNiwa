@@ -432,7 +432,7 @@ impl ServerConnection {
         // 但 u1 本地 snapshot 已恢复到 epoch=N (N>1)。
         // 如果采纳新群 → u1 从 epoch=N 掉回 epoch=1 → 数据丢失。
         // 策略：本地已有 group 且 probe.epoch() < 本地 epoch → 拒绝覆盖。
-        if let Some(_) = existing_group_id {
+        if existing_group_id.is_some() {
             let local_epoch = self.channel_epoch(channel_id).unwrap_or(0);
             let new_epoch = probe.epoch();
             if new_epoch < local_epoch {
