@@ -612,17 +612,16 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               <div className="flex-1 py-4">
                 <FriendsView />
               </div>
+            ) : activeView === 'settings' ? (
+              <div className="flex-1 py-4 overflow-y-auto">
+                <SettingsView />
+              </div>
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center text-[var(--text-muted)]">
-                <div className="text-xl font-bold mb-2 capitalize">{activeView}</div>
-                {activeView === 'settings' ? (
-              <div className="w-full h-full overflow-y-auto"><SettingsView /></div>
-            ) : (
-              <div className="flex flex-col items-center justify-center h-full gap-2">
-                <h1 className="text-2xl font-extrabold text-[var(--text-main)]">{t('more.title')}</h1>
-                <p className="text-[13px] text-[var(--text-muted)]">{t('more.placeholder')}</p>
-              </div>
-            )}
+                <div className="flex flex-col items-center gap-2">
+                  <h1 className="text-2xl font-extrabold text-[var(--text-main)]">{t('more.title')}</h1>
+                  <p className="text-[13px] text-[var(--text-muted)]">{t('more.placeholder')}</p>
+                </div>
               </div>
             )}
           </main>
