@@ -37,6 +37,7 @@ pub fn router(state: AppState) -> Router {
 }
 
 #[derive(serde::Serialize)]
+#[allow(dead_code)]
 struct JoinChannelResp {
     is_first: bool,
 }

@@ -128,6 +128,7 @@ pub async fn ensure_default_channels(pool: &sqlx::SqlitePool) {
     .await;
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod default_channel_tests {
     use super::*;

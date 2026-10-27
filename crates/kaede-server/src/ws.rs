@@ -556,7 +556,6 @@ fn extract_bytes(m: Message) -> anyhow::Result<Vec<u8>> {
 }
 
 /// 查询某个成员的权限等级。
-
 /// 当前频道权威成员：`joined_at` 最早且**在线**的成员。
 ///
 /// 与 `channels::notify_authority` / `notify_member_left` 的投递规则一致。
