@@ -10,6 +10,7 @@ import { IconHash, IconVolume, IconSun, IconMoon, IconSearch, IconUsers } from '
 import { useTheme } from '../lib/useTheme'
 import { useI18n } from '../stores/i18n'
 import { SettingsView } from './SettingsView'
+import { MoreView } from './MoreView'
 import { DMView } from './DMView'
 import { FriendsView } from './FriendsView'
 import { MessageAttachments } from './MessageAttachments'
@@ -617,11 +618,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 <SettingsView />
               </div>
             ) : (
-              <div className="flex-1 flex flex-col items-center justify-center text-[var(--text-muted)]">
-                <div className="flex flex-col items-center gap-2">
-                  <h1 className="text-2xl font-extrabold text-[var(--text-main)]">{t('more.title')}</h1>
-                  <p className="text-[13px] text-[var(--text-muted)]">{t('more.placeholder')}</p>
-                </div>
+              <div className="flex-1 py-4 overflow-y-auto">
+                <MoreView />
               </div>
             )}
           </main>

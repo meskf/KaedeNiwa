@@ -9,7 +9,14 @@ const zh = {
   friends: { title: '好友', addFriend: '添加好友', tabOnline: '在线', tabAll: '全部', tabPending: '待处理', emptyAll: '还没有好友，点上方添加一位吧。', emptyOnline: '没有好友在线。', emptyPending: '没有待处理的请求。', statusFriend: '好友', statusIncoming: '收到请求', statusOutgoing: '已发送请求', actionMessage: '发消息', actionRemove: '移除', actionAccept: '接受', actionReject: '拒绝', actionCancel: '取消请求', send: '发送', cancel: '取消', placeholderLogin: '用户名' },
   dm: { title: '私信', newConv: '+ 新建', noConversations: '还没有会话', selectConversation: '选择一个会话开始聊天', noMessages: '还没有消息，打个招呼吧！', placeholderPeer: '对方用户名', open: '打开', cancel: '取消' },
   settings: { title: '设置', subtitle: '自定义你的 KaedeNiwa 体验', accountTitle: '账户', accountLoginId: '用户名', accountNickname: '昵称', accountServer: '服务器地址', accountLogout: '退出登录', appearanceTitle: '外观', appearanceTheme: '主题', themeLight: '浅色', themeDark: '深色', languageTitle: '语言', languageLabel: '界面语言', languageEnglish: 'English', languageChinese: '中文' },
-  more: { title: '更多', subtitle: '其他功能', placeholder: '即将上线' },
+  more: { title: '更多', subtitle: '其他功能', placeholder: '即将上线',
+    aboutTitle: '关于', aboutVersion: '版本', aboutServer: '服务器', aboutEncryption: '加密',
+    voiceTitle: '语音与视频', voiceStatus: '状态', statusConnected: '已连接', statusNotConnected: '未连接',
+    voiceChannel: '频道', voiceParticipants: '参与者', voiceMic: '麦克风', micOn: '开', micOff: '关',
+    voiceNoise: '降噪', noiseRnnoise: 'RNNoise', noiseOff: '关', noiseUnsupported: '不支持',
+    voiceScreen: '屏幕共享', screenOn: '共享中', screenOff: '未共享', voiceE2EE: '端到端加密',
+    shortcutsTitle: '快捷键', scSend: '发送消息', scNewline: '换行', scClose: '关闭对话框 / 取消',
+    valueE2EEOn: '开启（MLS）', valueE2EEOff: '关闭', valueNa: '—' },
   common: { save: '保存', cancel: '取消', close: '关闭', loading: '加载中...' },
 }
 export default zh

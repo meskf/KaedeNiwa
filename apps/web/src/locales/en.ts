@@ -9,7 +9,14 @@ const en = {
   friends: { title: 'Friends', addFriend: 'Add Friend', tabOnline: 'Online', tabAll: 'All', tabPending: 'Pending', emptyAll: 'No friends yet. Add one above.', emptyOnline: 'No friends online.', emptyPending: 'No pending requests.', statusFriend: 'Friend', statusIncoming: 'Incoming request', statusOutgoing: 'Outgoing request', actionMessage: 'Message', actionRemove: 'Remove', actionAccept: 'Accept', actionReject: 'Reject', actionCancel: 'Cancel request', send: 'Send', cancel: 'Cancel', placeholderLogin: 'login_id' },
   dm: { title: 'Messages', newConv: '+ New', noConversations: 'No conversations yet', selectConversation: 'Select a conversation to start chatting', noMessages: 'No messages yet. Say hi!', placeholderPeer: 'peer login_id', open: 'Open', cancel: 'Cancel' },
   settings: { title: 'Settings', subtitle: 'Customize your KaedeNiwa experience', accountTitle: 'Account', accountLoginId: 'Login ID', accountNickname: 'Nickname', accountServer: 'Server URL', accountLogout: 'Log out', appearanceTitle: 'Appearance', appearanceTheme: 'Theme', themeLight: 'Light', themeDark: 'Dark', languageTitle: 'Language', languageLabel: 'Interface language', languageEnglish: 'English', languageChinese: '中文' },
-  more: { title: 'More', subtitle: 'Additional features', placeholder: 'Coming soon' },
+  more: { title: 'More', subtitle: 'Additional features', placeholder: 'Coming soon',
+    aboutTitle: 'About', aboutVersion: 'Version', aboutServer: 'Server', aboutEncryption: 'Encryption',
+    voiceTitle: 'Voice & Video', voiceStatus: 'Status', statusConnected: 'Connected', statusNotConnected: 'Not connected',
+    voiceChannel: 'Channel', voiceParticipants: 'Participants', voiceMic: 'Microphone', micOn: 'On', micOff: 'Off',
+    voiceNoise: 'Noise suppression', noiseRnnoise: 'RNNoise', noiseOff: 'Off', noiseUnsupported: 'Unsupported',
+    voiceScreen: 'Screen share', screenOn: 'Sharing', screenOff: 'Idle', voiceE2EE: 'E2EE',
+    shortcutsTitle: 'Shortcuts', scSend: 'Send message', scNewline: 'New line', scClose: 'Close dialog / dismiss',
+    valueE2EEOn: 'On (MLS)', valueE2EEOff: 'Off', valueNa: '—' },
   common: { save: 'Save', cancel: 'Cancel', close: 'Close', loading: 'Loading...' },
 }
 export default en
