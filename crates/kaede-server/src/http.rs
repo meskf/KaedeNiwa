@@ -502,7 +502,7 @@ async fn fetch_keypackage(
     let uid = authenticate(&state, &headers).await?;
 
     // 防抽干第一层：单个请求者全局限流（不能同时扫很多人的队列）。
-    if !cfg!(feature = "dev-mode") {
+    if !cfg!(feature = "dev-mode") && !state.check_rate_scoped(&uid, "kp_fetch", 1.0, 2.0) {
         state.metrics.rate_limited();
         return Err(ApiError::TooManyRequests(
             "keypackage fetch rate limited".into(),
@@ -511,13 +511,14 @@ async fn fetch_keypackage(
 
     // 防抽干第一层（补充）：单个请求者对同一 target 的消费速率上限
     // （约 1 次 / 10s，突发 2）。即使攻击者换账号，单账号也无法快速清空队列。
-    #[allow(unused_variables)]
-    let pair_key = format!("kp_pair:{}:{}", uid.as_str(), login_id);
     if !cfg!(feature = "dev-mode") {
-        state.metrics.rate_limited();
-        return Err(ApiError::TooManyRequests(
-            "keypackage fetch rate limited".into(),
-        ));
+        let pair_scope = format!("kp_pair:{}:{}", uid.as_str(), login_id);
+        if !state.check_rate_scoped(&uid, &pair_scope, 0.1, 2.0) {
+            state.metrics.rate_limited();
+            return Err(ApiError::TooManyRequests(
+                "keypackage pair rate limited".into(),
+            ));
+        }
     }
 
     // 好友（双向 accepted）不受目标预算与保留量限制。
@@ -534,15 +535,18 @@ async fn fetch_keypackage(
     if !is_friend {
         // 防抽干第二层：per-target 全局限流（防多账号轮换）。
         if !cfg!(feature = "dev-mode") {
-            state.metrics.rate_limited();
-            tracing::warn!(
-                "keypackage fetch throttled: target={} requester={}",
-                login_id,
-                uid
-            );
-            return Err(ApiError::TooManyRequests(
-                "keypackage fetch throttled".into(),
-            ));
+            let target_scope = format!("kp_target:{}", login_id);
+            if !state.check_rate_scoped(&uid, &target_scope, 0.1, 2.0) {
+                state.metrics.rate_limited();
+                tracing::warn!(
+                    "keypackage fetch throttled: target={} requester={}",
+                    login_id,
+                    uid
+                );
+                return Err(ApiError::TooManyRequests(
+                    "keypackage fetch throttled".into(),
+                ));
+            }
         }
 
         // 防抽干第三层：保留量。队列被消耗到只剩少量时，只有好友还能继续取。
@@ -555,7 +559,7 @@ async fn fetch_keypackage(
         if remaining == 0 {
             return Err(ApiError::NotFound("key_package".into()));
         }
-        if !cfg!(feature = "dev-mode") {
+        if !cfg!(feature = "dev-mode") && remaining < 8 {
             state.metrics.rate_limited();
             tracing::warn!(
                 "keypackage queue reserved: target={} requester={} remaining={}",

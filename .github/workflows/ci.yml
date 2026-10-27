@@ -83,9 +83,7 @@ jobs:
           - kaede-mls
           - kaede-client
 
-          # TODO: kaede-server 的 5 个 regressions 测试因 CI 限流/时序问题失败（429 Too Many Requests），待专项修复后恢复
-
-          # - kaede-server
+          - kaede-server
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
