@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "kaede-client"
-version = "0.0.3"
+version = "0.0.5"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "kaede-client-wasm"
-version = "0.0.3"
+version = "0.0.5"
 dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",
@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "kaede-crypto"
-version = "0.0.3"
+version = "0.0.5"
 dependencies = [
  "aes-gcm",
  "hkdf 0.12.4",
@@ -1856,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "kaede-mls"
-version = "0.0.3"
+version = "0.0.5"
 dependencies = [
  "getrandom 0.2.17",
  "kaede-crypto",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "kaede-protocol"
-version = "0.0.3"
+version = "0.0.5"
 dependencies = [
  "ciborium",
  "quickcheck",
@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "kaede-server"
-version = "0.0.3"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1915,7 +1915,7 @@ dependencies = [
 
 [[package]]
 name = "kaede-storage"
-version = "0.0.3"
+version = "0.0.5"
 dependencies = [
  "async-trait",
  "js-sys",
