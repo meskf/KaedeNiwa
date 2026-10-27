@@ -37,7 +37,19 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const { t } = useI18n()
   const [showMembers, setShowMembers] = useState(true)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; uid: string; inVoice: boolean } | null>(null)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(() => typeof window !== 'undefined' ? window.innerWidth >= 768 : true)
+  useEffect(() => {
+    let wasDesktop = typeof window !== 'undefined' && window.innerWidth >= 768
+    const onResize = () => {
+      const isDesktop = window.innerWidth >= 768
+      if (isDesktop !== wasDesktop) {
+        setSidebarOpen(isDesktop)
+        wasDesktop = isDesktop
+      }
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
   const addMemberQueueRef = useRef<Promise<void>>(Promise.resolve())
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -451,6 +463,16 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           </div>
           <div className="flex items-center gap-1 sm:gap-2 shrink-0">
             <button
+              onClick={() => setSidebarOpen(v => !v)}
+              className={`hidden md:flex w-8 h-8 items-center justify-center rounded-md transition-colors ${sidebarOpen ? 'text-[var(--text-main)] bg-[var(--bg-hover)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'}`}
+              title="Toggle sidebar"
+              data-testid="sidebar-toggle-desktop"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+                <path d="M4 6h16M4 12h16M4 18h16" strokeLinecap="round" />
+              </svg>
+            </button>
+            <button
               onClick={() => setShowMembers(!showMembers)}
               className={`w-8 h-8 flex items-center justify-center rounded-md transition-colors ${showMembers ? 'text-[var(--text-main)] bg-[var(--bg-hover)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'}`}
               title="Toggle Members"
@@ -476,7 +498,17 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           )}
           
           {/* 左侧侧边栏 */}
-          <aside className={`absolute left-0 top-0 bottom-0 w-[200px] sm:w-[180px] lg:w-[200px] flex-col z-30 bg-[var(--bg-app)] transition-transform ${sidebarOpen ? 'flex' : 'hidden'} md:flex`}>
+          <aside className={`absolute left-0 top-0 bottom-0 w-[260px] md:w-[180px] lg:w-[200px] flex-col z-30 bg-[var(--bg-app)] shadow-xl md:shadow-none transition-transform ${sidebarOpen ? 'flex' : 'hidden'}`}>
+            <button
+              onClick={() => setSidebarOpen(false)}
+              className="md:hidden absolute top-3 right-3 w-7 h-7 flex items-center justify-center rounded text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]"
+              aria-label="close sidebar"
+              data-testid="sidebar-close-drawer"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+                <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+              </svg>
+            </button>
             <div className="h-[40px] flex items-center gap-3 mb-6">
               <div className="w-8 h-8 rounded-md bg-[var(--bg-hover)] flex items-center justify-center text-[var(--text-main)] font-bold text-sm shrink-0">
                 K
@@ -495,7 +527,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   <div
     key={ch.id}
     data-testid={`channel-item-${ch.id}`}
-    onClick={() => { setChannel(ch.id); setActiveView('chat'); }}
+    onClick={() => { setChannel(ch.id); setActiveView('chat'); setSidebarOpen(false) }}
     className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex items-center gap-2.5 transition-colors ${
       currentChannel === ch.id && activeView === 'chat'
         ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
@@ -513,7 +545,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 <div
                   key={vc.id}
                   data-testid={`channel-item-${vc.id}`}
-                  onClick={() => { setChannel(vc.id); setActiveView('chat'); }}
+                  onClick={() => { setChannel(vc.id); setActiveView('chat'); setSidebarOpen(false) }}
                   className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex flex-col gap-2 transition-colors ${
                     currentChannel === vc.id && activeView === 'chat'
                       ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
@@ -579,7 +611,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           )}
 
           {/* 主区域 (绝对居中，留出左右安全距离) */}
-          <main className="flex-1 flex flex-col min-w-0 px-3 sm:px-4 md:pl-[200px] md:pr-4 lg:px-[220px]">
+          <main className={`flex-1 flex flex-col min-w-0 px-3 sm:px-4 md:pr-4 lg:pr-[220px] transition-all ${sidebarOpen ? 'md:pl-[200px] lg:pl-[220px]' : 'md:pl-6 lg:pl-6'}`}>
             {activeView === 'chat' ? (
               <div className="flex-1 flex flex-col w-full max-w-[900px] mx-auto min-h-0">
 
