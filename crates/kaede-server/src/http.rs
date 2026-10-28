@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me", get(me))
         .route("/api/keypackages", post(publish_keypackages))
         .route("/api/keypackages/self/count", get(key_package_count))
+        .route("/api/server", get(get_server).patch(patch_server))
         .route("/api/keypackages/{login_id}", get(fetch_keypackage))
         .route("/api/messages", post(post_message))
         .route("/api/messages/{channel_id}", get(get_messages))
@@ -1165,3 +1166,74 @@ mod proxy_tests {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Server Profile (D1)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct ServerProfileResp {
+    name: String,
+    description: String,
+    icon_url: Option<String>,
+}
+
+async fn get_server(State(state): State<AppState>) -> Result<Json<ServerProfileResp>, ApiError> {
+    let row: (String, String, Option<String>) = sqlx::query_as(
+        "SELECT name, description, icon_url FROM server_profile WHERE id = 1"
+    ).fetch_one(&state.pool).await?;
+    
+    Ok(Json(ServerProfileResp {
+        name: row.0,
+        description: row.1,
+        icon_url: row.2,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct PatchServerReq {
+    name: Option<String>,
+    description: Option<String>,
+    icon_url: Option<String>,
+}
+
+async fn patch_server(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PatchServerReq>,
+) -> Result<StatusCode, ApiError> {
+    let uid = authenticate(&state, &headers).await?;
+    
+    // 权限校验：必须具有 op3 (moderator) 或以上权限
+    let op: (String,) = sqlx::query_as("SELECT op FROM members WHERE login_id = ?")
+        .bind(uid.as_str()).fetch_one(&state.pool).await?;
+    let op_level = match op.0.as_str() {
+        "op5" => 5, "op4" => 4, "op3" => 3, "op2" => 2, _ => 1,
+    };
+    if op_level < 3 {
+        return Err(ApiError::Forbidden("requires op3 or higher".into()));
+    }
+
+    let now = db::now_ms();
+    
+    if let Some(name) = req.name {
+        if name.trim().is_empty() || name.len() > 64 {
+            return Err(ApiError::BadRequest("invalid name length".into()));
+        }
+        sqlx::query("UPDATE server_profile SET name = ?, updated_at = ? WHERE id = 1")
+            .bind(name).bind(now).execute(&state.pool).await?;
+    }
+    if let Some(desc) = req.description {
+        if desc.len() > 128 {
+            return Err(ApiError::BadRequest("invalid description length".into()));
+        }
+        sqlx::query("UPDATE server_profile SET description = ?, updated_at = ? WHERE id = 1")
+            .bind(desc).bind(now).execute(&state.pool).await?;
+    }
+    if let Some(icon) = req.icon_url {
+        sqlx::query("UPDATE server_profile SET icon_url = ?, updated_at = ? WHERE id = 1")
+            .bind(icon).bind(now).execute(&state.pool).await?;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}

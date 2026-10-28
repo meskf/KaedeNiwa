@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAuthStore } from '../stores/auth'
+import { useServerStore } from '../stores/server'
 import { useChatStore } from '../stores/chat'
 import { getClient, scheduleReconnect } from '../wasm/client'
 import { connectMedia, disconnectMedia, updateE2EEKey } from '../lib/livekit'
@@ -35,6 +36,13 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
   
   const loginId = useAuthStore(s => s.loginId)
+  const token = useAuthStore(s => s.token)
+  const serverProfile = useServerStore(s => s.profile)
+  const fetchServerProfile = useServerStore(s => s.fetch)
+
+  useEffect(() => {
+    fetchServerProfile(token)
+  }, [token])
   const channelList = useChatStore(s => s.channelList)
   const serverMembers = useChatStore(s => s.serverMembers)
   const setServerMembers = useChatStore(s => s.setServerMembers)
@@ -583,7 +591,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         {/* 顶栏 */}
         <header className="relative h-[40px] shrink-0 flex items-center gap-4 mb-10">
           <div className="flex shrink-0 items-center text-[16px] font-bold tracking-wide">
-            KaedeNiwa
+            {serverProfile.name}
           </div>
           <div className="flex-1 min-w-0 flex justify-center px-2">
             <div className="relative flex items-center w-full max-w-[420px]">
@@ -636,8 +644,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 K
               </div>
               <div className="flex flex-col min-w-0">
-                <span className="text-[14px] font-semibold leading-tight truncate">Kaede Server</span>
-                <span className="text-[11px] text-[var(--text-muted)] truncate">Workspace</span>
+                <span className="text-[14px] font-semibold leading-tight truncate">{serverProfile.name}</span>
+                <span className="text-[11px] text-[var(--text-muted)] truncate">{serverProfile.description}</span>
               </div>
             </div>
 
@@ -889,11 +897,11 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           </div>
 
           <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-8 text-[13px] font-medium text-[var(--text-muted)]">
-            <span onClick={() => setActiveView('chat')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'chat' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.groups')}</span>
-            <span onClick={() => setActiveView('dms')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'dms' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.dms')}</span>
-            <span onClick={() => setActiveView('friends')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'friends' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.friends')}</span>
-            <span onClick={() => setActiveView('settings')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'settings' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.settings')}</span>
-            <span onClick={() => setActiveView('more')} className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'more' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.more')}</span>
+            <span onClick={() => setActiveView('chat')} data-testid="nav-chat" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'chat' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.groups')}</span>
+            <span onClick={() => setActiveView('dms')} data-testid="nav-dms" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'dms' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.dms')}</span>
+            <span onClick={() => setActiveView('friends')} data-testid="nav-friends" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'friends' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.friends')}</span>
+            <span onClick={() => setActiveView('settings')} data-testid="nav-settings" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'settings' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.settings')}</span>
+            <span onClick={() => setActiveView('more')} data-testid="nav-more" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'more' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.more')}</span>
           </div>
 
           <div className="ml-auto w-[200px] text-right text-[11px] text-[var(--text-muted)] font-mono">

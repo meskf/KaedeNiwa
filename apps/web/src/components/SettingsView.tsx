@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useAuthStore } from '../stores/auth'
+import { useServerStore } from '../stores/server'
 import { useChatStore } from '../stores/chat'
 import { useI18n } from '../stores/i18n'
 import { useTheme } from '../lib/useTheme'
@@ -13,6 +14,38 @@ export function SettingsView() {
   const { theme, setTheme } = useTheme()
   const [langOpen, setLangOpen] = useState(false)
   const [dynamicBg, setDynamicBg] = useState(() => localStorage.getItem('kaede-dynamic-bg') === 'true')
+
+  // D1: server profile editing
+  const token = useAuthStore(s => s.token)
+  const profile = useServerStore(s => s.profile)
+  const updateServer = useServerStore(s => s.update)
+  const [profileName, setProfileName] = useState(profile.name)
+  const [profileDesc, setProfileDesc] = useState(profile.description)
+  const [saving, setSaving] = useState(false)
+  const [saveStatus, setSaveStatus] = useState<'ok' | 'forbidden' | 'error' | ''>('')
+
+  useEffect(() => {
+    setProfileName(profile.name)
+    setProfileDesc(profile.description)
+  }, [profile.name, profile.description])
+
+  const dirty = profileName !== profile.name || profileDesc !== profile.description
+
+  const handleSaveServer = async () => {
+    if (!dirty || saving) return
+    setSaving(true)
+    setSaveStatus('')
+    const r = await updateServer(token, { name: profileName.trim(), description: profileDesc.trim() })
+    setSaving(false)
+    if (r.ok) {
+      setSaveStatus('ok')
+      setTimeout(() => setSaveStatus(''), 2000)
+    } else if (r.error === 'forbidden') {
+      setSaveStatus('forbidden')
+    } else {
+      setSaveStatus('error')
+    }
+  }
 
   const toggleDynamicBg = () => {
     const next = !dynamicBg
@@ -58,6 +91,50 @@ export function SettingsView() {
           >
             {t('settings.accountLogout')}
           </button>
+        </div>
+      </section>
+
+      <section className="mb-8">
+        <h2 className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-3">{lang === 'zh' ? '服务器' : 'Server'}</h2>
+        <div className="rounded-lg bg-[var(--bg-hover)] divide-y divide-[var(--bg-active)]">
+          <div className="flex items-center justify-between px-4 py-3 gap-4">
+            <span className="text-[13px] text-[var(--text-muted)] shrink-0">{lang === 'zh' ? '名称' : 'Name'}</span>
+            <input
+              type="text"
+              value={profileName}
+              onChange={(e) => setProfileName(e.target.value)}
+              maxLength={64}
+              className="flex-1 bg-[var(--bg-active)] rounded px-3 py-1.5 text-[13px] text-[var(--text-main)] outline-none focus:ring-1 focus:ring-[var(--text-muted)]"
+              data-testid="settings-server-name"
+            />
+          </div>
+          <div className="flex items-center justify-between px-4 py-3 gap-4">
+            <span className="text-[13px] text-[var(--text-muted)] shrink-0">{lang === 'zh' ? '描述' : 'Description'}</span>
+            <input
+              type="text"
+              value={profileDesc}
+              onChange={(e) => setProfileDesc(e.target.value)}
+              maxLength={128}
+              className="flex-1 bg-[var(--bg-active)] rounded px-3 py-1.5 text-[13px] text-[var(--text-main)] outline-none focus:ring-1 focus:ring-[var(--text-muted)]"
+              data-testid="settings-server-desc"
+            />
+          </div>
+          <div className="flex items-center justify-between px-4 py-3 gap-4">
+            <span className={`text-[12px] ${saveStatus === 'ok' ? 'text-green-500' : (saveStatus === 'forbidden' || saveStatus === 'error') ? 'text-red-500' : 'text-[var(--text-muted)]'}`}>
+              {saveStatus === 'ok' ? (lang === 'zh' ? '已保存' : 'Saved') :
+               saveStatus === 'forbidden' ? (lang === 'zh' ? '需要管理员权限（op3+）' : 'Requires admin (op3+)') :
+               saveStatus === 'error' ? (lang === 'zh' ? '保存失败' : 'Failed') :
+               (lang === 'zh' ? '修改后点击保存' : 'Edit and save')}
+            </span>
+            <button
+              onClick={handleSaveServer}
+              disabled={saving || !dirty}
+              className="px-4 py-1.5 rounded bg-[var(--bg-app)] text-[12px] font-semibold text-[var(--text-main)] hover:opacity-80 disabled:opacity-40 transition-opacity"
+              data-testid="settings-server-save"
+            >
+              {saving ? (lang === 'zh' ? '保存中...' : 'Saving...') : (lang === 'zh' ? '保存' : 'Save')}
+            </button>
+          </div>
         </div>
       </section>
 
