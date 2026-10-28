@@ -213,6 +213,13 @@ async fn require_auth_header(
         return Ok(next.run(req).await);
     }
 
+    // 头像/图标是公开元数据（成员列表所有成员可见），无 Bearer token 也能访问。
+    // 让 <img src="/api/avatars/..."> 可以直接加载，避免前端为每张头像做 blob URL。
+    // POST/DELETE 头像、POST 图标仍在 handler 内 authenticate。
+    if path.starts_with("/api/avatars/") || path == "/api/server/icon" {
+        return Ok(next.run(req).await);
+    }
+
     // 放行：静态文件、WebSocket (业务层会通过 ClientHello 验证 token)、公开认证接口
     if !path.starts_with("/api")
         || path.starts_with("/ws")
