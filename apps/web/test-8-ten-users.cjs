@@ -137,7 +137,11 @@ const N = 10;
 
     // === 阶段 5：U0 共享屏幕，其他 9 人收到 ===
     console.log('🖥️  阶段 5: U0 共享屏幕（720p30）');
-    await users[0].page.locator('[data-testid="media-quality"]').selectOption('720p30');
+    if (await users[0].page.locator('[data-testid="media-quality"]').count() > 0) {
+      await users[0].page.locator('[data-testid="media-quality"]').selectOption('720p30');
+    } else {
+      console.log('   compact MediaBar 无画质选择器，跳过');
+    }
     await users[0].page.click('[data-testid="media-share-toggle"]');
     await users[0].page.waitForSelector('[data-testid="media-share-toggle"]', { timeout: 10000 });
 

@@ -68,7 +68,11 @@ const { launch } = require('./test-launch.cjs');
 
     // ====== 场景 3：Alice 共享屏幕，Bob + Charlie 都能看到 ======
     console.log('\n🖥️ 场景 3: Alice 共享屏幕，Bob + Charlie 都收到');
-    await alice.locator('[data-testid="media-quality"]').selectOption('720p30');
+    if (await alice.locator('[data-testid="media-quality"]').count() > 0) {
+      await alice.locator('[data-testid="media-quality"]').selectOption('720p30');
+    } else {
+      console.log('   compact MediaBar 无画质选择器，跳过');
+    }
     await alice.click('[data-testid="media-share-toggle"]');
     await alice.waitForSelector('[data-testid="media-share-toggle"]', { timeout: 10000 });
 
