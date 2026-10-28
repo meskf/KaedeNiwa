@@ -2111,7 +2111,7 @@ pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, Client
             .to_bytes()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
 
-        if self.conn.channel_has_group(channel_id) || self.is_private_channel(channel_id) {
+        if self.is_private_channel(channel_id) {
             let key = self.conn.channel_export_key(channel_id)?;
             let sealed =
                 kaede_crypto::dm_cipher::seal(&key, channel_id, self.uid.as_str(), "", &bytes)
@@ -3199,3 +3199,4 @@ mod history_fold_tests {
         assert!(!out[0].edited);
     }
 }
+

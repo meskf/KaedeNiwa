@@ -478,6 +478,72 @@ impl JsClient {
 
     // ============ Channel list wasm 桥 ============
 
+    #[wasm_bindgen(js_name = joinChannelWithPassword)]
+    pub async fn join_channel_with_password(
+        &self,
+        channel_id: String,
+        password: String,
+    ) -> Result<(), JsValue> {
+        let room = {
+            let guard = self.room.lock().unwrap();
+            guard.as_ref().cloned()
+        };
+        let Some(room) = room else {
+            return Err(JsValue::from_str("not logged in"));
+        };
+        room.join_channel(&channel_id, &password)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("join channel: {}", e)))
+    }
+
+    #[wasm_bindgen(js_name = sendTyping)]
+    pub async fn send_typing(&self, channel_id: String) -> Result<(), JsValue> {
+        let room = {
+            let guard = self.room.lock().unwrap();
+            guard.as_ref().cloned()
+        };
+        let Some(room) = room else {
+            return Err(JsValue::from_str("not logged in"));
+        };
+        room.send_typing(&channel_id)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("typing error: {}", e)))
+    }
+
+    #[wasm_bindgen(js_name = sendReaction)]
+    pub async fn send_reaction(
+        &self,
+        channel_id: String,
+        target_ts: i64,
+        emoji: String,
+        action: String,
+    ) -> Result<(), JsValue> {
+        let room = {
+            let guard = self.room.lock().unwrap();
+            guard.as_ref().cloned()
+        };
+        let Some(room) = room else {
+            return Err(JsValue::from_str("not logged in"));
+        };
+        room.send_reaction(&channel_id, target_ts, &emoji, &action)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("reaction error: {}", e)))
+    }
+
+    #[wasm_bindgen(js_name = setPresence)]
+    pub async fn set_presence(&self, status: String) -> Result<(), JsValue> {
+        let room = {
+            let guard = self.room.lock().unwrap();
+            guard.as_ref().cloned()
+        };
+        let Some(room) = room else {
+            return Err(JsValue::from_str("not logged in"));
+        };
+        room.set_presence(&status)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("presence error: {}", e)))
+    }
+
     #[wasm_bindgen(js_name = listChannels)]
     pub async fn list_channels(&self) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
@@ -635,3 +701,5 @@ impl JsClient {
             .map_err(|e| JsValue::from_str(&format!("remove friend: {}", e)))
     }
 }
+
+
