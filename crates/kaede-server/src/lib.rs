@@ -7,6 +7,7 @@
 
 pub mod admin;
 pub mod attachments;
+pub mod avatars;
 pub mod categories;
 pub mod channels;
 pub mod config;
@@ -60,6 +61,7 @@ pub async fn spawn_test_server() -> std::io::Result<std::net::SocketAddr> {
     let app = with_middleware(
         http::router(state.clone())
             .merge(attachments::router(state.clone()))
+            .merge(avatars::router(state.clone()))
             .merge(friends::router(state.clone()))
             .merge(dm::router(state.clone()))
             .merge(livekit::router(state.clone()))

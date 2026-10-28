@@ -1,6 +1,7 @@
 //! KaedeNiwa signaling server 入口。
 
 use anyhow::Result;
+use kaede_server::avatars;
 use kaede_server::{
     admin, attachments, categories, channels, config::Config, db, dm, friends, http, livekit,
     members, reads, sessions_api, state::AppState, ws,
@@ -213,6 +214,7 @@ async fn main() -> Result<()> {
     let app = kaede_server::with_middleware(
         http::router(state.clone())
             .merge(attachments::router(state.clone()))
+            .merge(avatars::router(state.clone()))
             .merge(friends::router(state.clone()))
             .merge(dm::router(state.clone()))
             .merge(livekit::router(state.clone()))

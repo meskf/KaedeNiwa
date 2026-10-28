@@ -25,7 +25,7 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .route("/api/register", post(register))
         .route("/api/login", post(login))
-        .route("/api/me", get(me))
+        .route("/api/me", get(me).patch(patch_me))
         .route("/api/keypackages", post(publish_keypackages))
         .route("/api/keypackages/self/count", get(key_package_count))
         .route("/api/server", get(get_server).patch(patch_server))
@@ -376,19 +376,85 @@ async fn login(
 struct MeResp {
     login_id: String,
     nickname: String,
+    bio: String,
+    title: String,
+    avatar_url: String,
 }
 
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<MeResp>, ApiError> {
     let uid = authenticate(&state, &headers).await?;
-    let row: Option<(String,)> = sqlx::query_as("SELECT nickname FROM accounts WHERE login_id = ?")
-        .bind(uid.as_str())
-        .fetch_optional(&state.pool)
-        .await?;
-    let (nickname,) = row.ok_or(ApiError::NotFound("account".into()))?;
+    let row: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT nickname, bio, title, avatar_url FROM members WHERE login_id = ?"
+    )
+    .bind(uid.as_str())
+    .fetch_optional(&state.pool)
+    .await?;
+    let (nickname, bio, title, avatar_url) =
+        row.ok_or_else(|| ApiError::NotFound("member".into()))?;
     Ok(Json(MeResp {
         login_id: uid.0,
         nickname,
+        bio,
+        title,
+        avatar_url,
     }))
+}
+
+#[derive(Deserialize)]
+struct PatchMeReq {
+    nickname: Option<String>,
+    bio: Option<String>,
+    title: Option<String>,
+}
+
+async fn patch_me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PatchMeReq>,
+) -> Result<StatusCode, ApiError> {
+    let uid = authenticate(&state, &headers).await?;
+    let now = db::now_ms();
+
+    if let Some(n) = req.nickname {
+        let n = n.trim().to_string();
+        if n.is_empty() || n.len() > 32 {
+            return Err(ApiError::BadRequest("invalid nickname length".into()));
+        }
+        sqlx::query("UPDATE accounts SET nickname = ? WHERE login_id = ?")
+            .bind(&n)
+            .bind(uid.as_str())
+            .execute(&state.pool)
+            .await?;
+        sqlx::query("UPDATE members SET nickname = ?, updated_at = ? WHERE login_id = ?")
+            .bind(&n)
+            .bind(now)
+            .bind(uid.as_str())
+            .execute(&state.pool)
+            .await?;
+    }
+    if let Some(b) = req.bio {
+        if b.len() > 256 {
+            return Err(ApiError::BadRequest("bio too long".into()));
+        }
+        sqlx::query("UPDATE members SET bio = ?, updated_at = ? WHERE login_id = ?")
+            .bind(b)
+            .bind(now)
+            .bind(uid.as_str())
+            .execute(&state.pool)
+            .await?;
+    }
+    if let Some(t) = req.title {
+        if t.len() > 32 {
+            return Err(ApiError::BadRequest("title too long".into()));
+        }
+        sqlx::query("UPDATE members SET title = ?, updated_at = ? WHERE login_id = ?")
+            .bind(t)
+            .bind(now)
+            .bind(uid.as_str())
+            .execute(&state.pool)
+            .await?;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
