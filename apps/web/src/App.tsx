@@ -94,6 +94,7 @@ export default function App() {
     ;(window as any).__kaede_debug__ = {
       loadHistory: async (ch: string, limit = 50) => parseRaw(await reqClient().load_history(ch, limit)),
       joinChannel: async (ch: string) => reqClient().join_channel(ch),
+      sendMessage: async (ch: string, text: string) => reqClient().send_message(ch, text),
       channelState: async (ch: string) => {
         const c = getClient()
         if (!c) return { error: 'client not ready' }
@@ -131,6 +132,22 @@ export default function App() {
         update: async (id: string, name?: string | null, position?: number | null) =>
                   parseRaw(await reqClient().updateCategory(id, name, position)),
         delete: async (id: string) => reqClient().deleteCategory(id),
+      },
+
+      attachments: {
+        upload: async (targetId: string, name: string, mime: string, bytes: Uint8Array) => {
+          const arr = Array.from(bytes)
+          return parseRaw(await reqClient().uploadAttachment(targetId, name, mime, new Uint8Array(arr)))
+        },
+        download: async (targetId: string, attId: string, expectedSha256?: string | null) => {
+          const buf = await reqClient().downloadAttachment(targetId, attId, expectedSha256 ?? null)
+          return Array.from(buf as Uint8Array)
+        },
+      },
+
+      messages: {
+        sendWithAttachments: async (channelId: string, text: string, attachments: any[]) =>
+          reqClient().sendMessageWithAttachments(channelId, text, JSON.stringify(attachments)),
       },
 
       forceDisconnect: async () => {

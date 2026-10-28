@@ -37,6 +37,8 @@ const TESTS = [
   { id: 't22', name: '好友流程',         file: 'test-22-friends-flow.cjs',     category: 'friends' },
   { id: 't23', name: '分类/频道 CRUD',   file: 'test-23-channel-crud.cjs',     category: 'channels' },
   { id: 't24', name: '搜索面板',         file: 'test-24-search-palette.cjs',   category: 'ui' },
+  { id: 't25', name: '附件 E2E',        file: 'test-25-attachment-e2e.cjs',   category: 'attachments' },
+  { id: 't28', name: '消息历史',         file: 'test-28-message-history.cjs',  category: 'mls' },
 ];
 
 const GREEN = '\x1b[32m', RED = '\x1b[31m', YELLOW = '\x1b[33m', GRAY = '\x1b[90m', RESET = '\x1b[0m';
@@ -116,3 +118,4 @@ function runOne(t, opts) {
 
   process.exit(fail ? 1 : 0);
 })();
+
