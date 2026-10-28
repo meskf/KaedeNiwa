@@ -10,6 +10,7 @@ pub mod attachments;
 pub mod avatars;
 pub mod categories;
 pub mod channels;
+mod nodes;
 pub mod config;
 pub mod db;
 pub mod dm;

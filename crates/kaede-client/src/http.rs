@@ -684,7 +684,45 @@ impl HttpApi {
         Ok(body.messages)
     }
 
-pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, ClientError> {
+
+    pub async fn list_nodes(&self) -> Result<Vec<kaede_protocol::Node>, ClientError> {
+        let resp = self.http.get(format!("{}/api/nodes", self.base_url))
+            .bearer_auth(self.bearer()?)
+            .send().await.map_err(|e| ClientError::Http { status: 500, message: e.to_string() })?;
+        if !resp.status().is_success() { return Err(ClientError::Http { status: resp.status().as_u16(), message: resp.text().await.unwrap_or_default() }); }
+        let nodes = resp.json().await.map_err(|e| ClientError::Protocol(e.to_string()))?;
+        Ok(nodes)
+    }
+    pub async fn create_node(&self, name: &str, kind: &str, parent_id: Option<&str>, is_private: bool, password: Option<&str>) -> Result<kaede_protocol::Node, ClientError> {
+        #[derive(serde::Serialize)]
+        struct Req<'a> { name: &'a str, kind: &'a str, parent_id: Option<&'a str>, is_private: bool, password: Option<&'a str> }
+        let resp = self.http.post(format!("{}/api/nodes", self.base_url))
+            .bearer_auth(self.bearer()?)
+            .json(&Req { name, kind, parent_id, is_private, password })
+            .send().await.map_err(|e| ClientError::Http { status: 500, message: e.to_string() })?;
+        if !resp.status().is_success() { return Err(ClientError::Http { status: resp.status().as_u16(), message: resp.text().await.unwrap_or_default() }); }
+        let node = resp.json().await.map_err(|e| ClientError::Protocol(e.to_string()))?;
+        Ok(node)
+    }
+    pub async fn update_node(&self, id: &str, name: Option<&str>, parent_id: Option<&str>, position: Option<i64>) -> Result<(), ClientError> {
+        #[derive(serde::Serialize)]
+        struct Req<'a> { name: Option<&'a str>, parent_id: Option<&'a str>, position: Option<i64> }
+        let resp = self.http.patch(format!("{}/api/nodes/{}", self.base_url, id))
+            .bearer_auth(self.bearer()?)
+            .json(&Req { name, parent_id, position })
+            .send().await.map_err(|e| ClientError::Http { status: 500, message: e.to_string() })?;
+        if !resp.status().is_success() { return Err(ClientError::Http { status: resp.status().as_u16(), message: resp.text().await.unwrap_or_default() }); }
+        Ok(())
+    }
+    pub async fn delete_node(&self, id: &str) -> Result<(), ClientError> {
+        let resp = self.http.delete(format!("{}/api/nodes/{}", self.base_url, id))
+            .bearer_auth(self.bearer()?)
+            .send().await.map_err(|e| ClientError::Http { status: 500, message: e.to_string() })?;
+        if !resp.status().is_success() { return Err(ClientError::Http { status: resp.status().as_u16(), message: resp.text().await.unwrap_or_default() }); }
+        Ok(())
+    }
+
+    pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, ClientError> {
         let resp = self
             .http
             .get(format!("{}/api/channels", self.base_url))

@@ -139,6 +139,21 @@ export default function App() {
         remove:      async (peer: string) => reqClient().removeFriend(peer),
       },
 
+
+      nodes: {
+        list: async () => {
+          const raw = await reqClient().listNodes()
+          return raw.map((r: any) => typeof r === 'string' ? JSON.parse(r) : r)
+        },
+        create: async (name: string, kind: string, parent_id?: string | null, is_private = false, password?: string | null) => {
+          const raw = await reqClient().createNode(name, kind, parent_id, is_private, password)
+          return parseRaw(raw)
+        },
+        update: async (id: string, name?: string | null, parent_id?: string | null, position?: number | null) =>
+          reqClient().updateNode(id, name, parent_id, position),
+        delete: async (id: string) => reqClient().deleteNode(id),
+      },
+
       channels: {
         list:   async () => parseRaw(await reqClient().listChannels()),
         create: async (name: string, kind: string, category_id?: string | null, is_private?: boolean | null, password?: string | null) =>

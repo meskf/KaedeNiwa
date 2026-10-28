@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { getClient } from '../wasm/client'
 import { useAuthStore } from '../stores/auth'
 import { useMembersStore } from '../stores/members'
 import { useServerStore } from '../stores/server'
@@ -134,15 +135,28 @@ export function SettingsView() {
     }
   }
 
+  
+  
+
   const handleUploadAvatar = async (file: File) => {
     if (uploadingAvatar) return
     setUploadingAvatar(true)
     const r = await uploadAvatar(token, file)
     setUploadingAvatar(false)
     if (r.ok) {
-      fetchMembers(token)
-    } else {
+      useProfileStore.getState().fetchMe(token).then(() => {
+        useProfileStore.setState(s => ({ me: { ...s.me } })) // 强制触发 React 渲染
+      })
+    }
+    if (r.ok) {
+      const newMe = useProfileStore.getState().me
+      useProfileStore.setState({ me: { ...newMe, avatarUrl: newMe.avatarUrl + '?t=' + Date.now() } }) // 强制变化触发渲染
+    }
+    if (!r.ok) {
       alert(r.error || 'avatar upload failed')
+    } else {
+      // 强制刷新全局状态
+      useProfileStore.getState().fetchMe(token); setTimeout(() => window.location.reload(), 300); setTimeout(() => window.location.reload(), 500)
     }
   }
 
@@ -156,7 +170,21 @@ export function SettingsView() {
     setUploadingIcon(true)
     const r = await uploadIcon(token, file)
     setUploadingIcon(false)
-    if (!r.ok) alert(r.error || 'icon upload failed')
+    if (r.ok) {
+      useServerStore.getState().fetch(token).then(() => {
+        useServerStore.setState(s => ({ profile: { ...s.profile } })) // 强制触发 React 渲染
+      })
+    }
+    if (r.ok) {
+      const newProfile = useServerStore.getState().profile
+      useServerStore.setState({ profile: { ...newProfile, icon_url: newProfile.icon_url + '?t=' + Date.now() } }) // 强制变化触发渲染
+    }
+    if (!r.ok) {
+      alert(r.error || 'icon upload failed')
+    } else {
+      // 强制刷新全局状态
+      useServerStore.getState().fetch(token); setTimeout(() => window.location.reload(), 300); setTimeout(() => window.location.reload(), 500)
+    }
   }
 
 
@@ -167,8 +195,29 @@ export function SettingsView() {
   }
 
 
+  const handleCreateRootNode = async () => {
+    const name = window.prompt('输入新建根目录名称:');
+    if (!name) return;
+    const c = getClient();
+    if (!c) return;
+    try {
+      await (c as any).createNode(name, 'folder', null, false, null);
+      const res = await (c as any).listNodes();
+      useChatStore.getState().setNodes(res.map((r: string) => JSON.parse(r)));
+    } catch (e) { alert('创建失败: ' + String(e)); }
+  };
+
   return (
     <div className="flex flex-col h-full w-full max-w-[700px] mx-auto overflow-y-auto">
+
+    <div className="mb-8 p-4 bg-[var(--bg-hover)] rounded-lg">
+      <h3 className="text-[14px] font-bold mb-2">频道目录管理</h3>
+      <p className="text-[12px] text-[var(--text-muted)] mb-3">在这里新建顶级目录。</p>
+      <button onClick={handleCreateRootNode} className="px-4 py-2 bg-[var(--text-main)] text-[var(--bg-app)] rounded font-semibold text-[13px] hover:opacity-90">
+        + 新建根目录
+      </button>
+    </div>
+
       <div className="mb-8 mt-1">
         <h1 className="text-3xl font-extrabold tracking-tight text-[var(--text-main)]">{t('settings.title')}</h1>
         <p className="text-[13px] text-[var(--text-muted)] mt-1">{t('settings.subtitle')}</p>
@@ -187,7 +236,7 @@ export function SettingsView() {
               title={lang === 'zh' ? '点击更换头像' : 'Click to change avatar'}
             >
               {me.avatarUrl ? (
-                <img src={me.avatarUrl} alt="avatar" className="w-full h-full object-cover" />
+                <img src={`/api/avatars/${me.loginId}?t=${Date.now()}`} alt="avatar" className="w-full h-full object-cover" />
               ) : (
                 <span className="text-[24px] font-bold text-[var(--text-muted)]">{(me.nickname || me.loginId || '?').slice(0, 1).toUpperCase()}</span>
               )}
@@ -293,7 +342,7 @@ export function SettingsView() {
                 title={myLevel < 3 ? (lang === 'zh' ? '需要管理员权限' : 'Requires admin') : (lang === 'zh' ? '点击更换图标' : 'Click to change')}
               >
                 {profile.icon_url ? (
-                  <img src={profile.icon_url} alt="icon" className="w-full h-full object-cover" />
+                  <img src={`${profile.icon_url}?t=${Date.now()}`} alt="icon" className="w-full h-full object-cover" />
                 ) : (
                   <span className="text-[16px] font-bold text-[var(--text-muted)]">{profile.name.slice(0, 1).toUpperCase()}</span>
                 )}

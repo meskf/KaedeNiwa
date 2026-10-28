@@ -71,6 +71,7 @@ interface ChatState {
   isAuthority: boolean;
   peerStatus: string;
 
+  nodes: any[];
   channelList: ChannelInfo[];
   categories: Category[];
   dmConversations: DmConversation[];
@@ -78,6 +79,7 @@ interface ChatState {
   dmMessages: Record<string, DmMessage[]>;
   friends: FriendEntry[];
   serverMembers: string[];
+  typingUsers: Record<string, Record<string, number>>;  // channelId -> {uid: expireTs}
 
   setChannels: (chs: string[]) => void;
   setChannel: (ch: string) => void;
@@ -91,6 +93,7 @@ interface ChatState {
   setIsAuthority: (val: boolean) => void;
   setPeerStatus: (status: string) => void;
 
+  setNodes: (nodes: any[]) => void;
   setChannelList: (list: ChannelInfo[]) => void;
   setCategories: (cats: Category[]) => void;
   addCategory: (c: Category) => void;
@@ -102,6 +105,8 @@ interface ChatState {
   appendDmMessage: (convId: string, msg: DmMessage) => void;
   setFriends: (f: FriendEntry[]) => void;
   setServerMembers: (m: string[]) => void;
+  setTyping: (channelId: string, uid: string, ttlMs: number) => void;
+  pruneTyping: () => void;
 
   pendingAttachments: PendingAttachment[];
   attachmentCache: Record<string, string>;
@@ -121,6 +126,7 @@ export const useChatStore = create<ChatState>((set) => ({
   isAuthority: false,
   peerStatus: '',
 
+  nodes: [],
   channelList: [],
   categories: [],
   dmConversations: [],
@@ -128,6 +134,7 @@ export const useChatStore = create<ChatState>((set) => ({
   dmMessages: {},
   friends: [],
   serverMembers: [],
+  typingUsers: {},
   pendingAttachments: [],
   attachmentCache: {},
 
@@ -162,6 +169,7 @@ export const useChatStore = create<ChatState>((set) => ({
   setIsAuthority: (isAuthority) => set({ isAuthority }),
   setPeerStatus: (peerStatus) => set({ peerStatus }),
 
+  setNodes: (nodes) => set({ nodes }),
   setChannelList: (channelList) => set({ channelList }),
   setCategories: (categories) => set({ categories }),
   addCategory: (c) => set((state) => state.categories.some(x => x.id === c.id) ? state : { categories: [...state.categories, c] }),
@@ -183,6 +191,28 @@ export const useChatStore = create<ChatState>((set) => ({
   })),
   setFriends: (friends) => set({ friends }),
   setServerMembers: (serverMembers) => set({ serverMembers }),
+  setTyping: (channelId, uid, ttlMs) => set((state) => {
+    const chan = state.typingUsers[channelId] || {};
+    return {
+      typingUsers: {
+        ...state.typingUsers,
+        [channelId]: { ...chan, [uid]: Date.now() + ttlMs },
+      },
+    };
+  }),
+  pruneTyping: () => set((state) => {
+    const now = Date.now();
+    let changed = false;
+    const next: Record<string, Record<string, number>> = {};
+    for (const [ch, users] of Object.entries(state.typingUsers)) {
+      const kept: Record<string, number> = {};
+      for (const [uid, exp] of Object.entries(users)) {
+        if (exp > now) { kept[uid] = exp; } else { changed = true; }
+      }
+      if (Object.keys(kept).length > 0) { next[ch] = kept; }
+    }
+    return changed ? { typingUsers: next } : state;
+  }),
 
   addPendingAttachment: (a) => set((state) => ({
     pendingAttachments: [...state.pendingAttachments, a]

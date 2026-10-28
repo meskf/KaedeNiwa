@@ -1428,7 +1428,21 @@ impl RoomSession {
 
 
 
-pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, ClientError> {
+
+    pub async fn list_nodes(&self) -> Result<Vec<kaede_protocol::Node>, ClientError> {
+        self.http.list_nodes().await
+    }
+    pub async fn create_node(&self, name: &str, kind: &str, parent_id: Option<&str>, is_private: bool, password: Option<&str>) -> Result<kaede_protocol::Node, ClientError> {
+        self.http.create_node(name, kind, parent_id, is_private, password).await
+    }
+    pub async fn update_node(&self, id: &str, name: Option<&str>, parent_id: Option<&str>, position: Option<i64>) -> Result<(), ClientError> {
+        self.http.update_node(id, name, parent_id, position).await
+    }
+    pub async fn delete_node(&self, id: &str) -> Result<(), ClientError> {
+        self.http.delete_node(id).await
+    }
+
+    pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, ClientError> {
         let list = self.http.list_channels().await?;
         {
             let mut map = self
@@ -1508,8 +1522,12 @@ pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, Client
     }
 
     pub async fn join_channel(&self, channel_id: &str, password: &str) -> Result<(), ClientError> {
-        // 该 API 只用于私密频道；标记后即使 Welcome 失败也不会回退主群加密。
-        self.note_channel_privacy(channel_id, true);
+        // 该 API 可能被前端用于加入公开频道（传空密码），也可能用于私密频道（传密码）。
+        // 只有真正有密码（私密频道）才标记，否则会把公开频道误标记为私密，
+        // 导致后续 send_message 走 0x03 路径报 "private channel key missing"。
+        if !password.is_empty() {
+            self.note_channel_privacy(channel_id, true);
+        }
         // 快速路径：本地已有**多人** group → 只验证密码
         // 单人 group 可能是历史遗留的占位群组（曾用 ensure_channel 创建），必须重走 Welcome
         if self.conn.channel_has_group(channel_id) {

@@ -1006,3 +1006,20 @@ fn export_ts() {
     export_typescript(dir).expect("ts-rs export failed");
     eprintln!("TS types written to {:?}", dir);
 }
+
+
+// ============================================================================
+// 目录树节点（无限嵌套：文件夹 + 频道）
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Node {
+    pub id: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+    pub kind: String,       // "folder" | "text" | "voice"
+    pub position: i64,
+    pub is_private: bool,
+    pub created_at: i64,
+}

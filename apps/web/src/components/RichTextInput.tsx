@@ -57,11 +57,13 @@ interface InnerProps {
   onSubmit: (md: string) => void
   placeholder: string
   handleRef?: RefObject<RichTextInputHandle | null>
+  onTyping?: () => void
 }
 
-function EditorInner({ onSubmit, placeholder, handleRef }: InnerProps) {
+function EditorInner({ onSubmit, placeholder, handleRef, onTyping }: InnerProps) {
   const [editor] = useLexicalComposerContext()
   const markdownRef = useRef('')
+  const lastTypingRef = useRef(0)
 
   const pending = useChatStore(s => s.pendingAttachments)
   const removePending = useChatStore(s => s.removePendingAttachment)
@@ -157,6 +159,13 @@ function EditorInner({ onSubmit, placeholder, handleRef }: InnerProps) {
             state.read(() => {
               markdownRef.current = $serializeToMarkdown()
             })
+            if (onTyping && markdownRef.current.trim()) {
+              const now = Date.now()
+              if (now - lastTypingRef.current > 2000) {
+                lastTypingRef.current = now
+                onTyping()
+              }
+            }
           }}
         />
       </div>
@@ -185,9 +194,10 @@ interface Props {
   placeholder?: string
   disabled?: boolean
   handleRef?: RefObject<RichTextInputHandle | null>
+  onTyping?: () => void
 }
 
-export function RichTextInput({ onSubmit, placeholder = 'Message...', disabled, handleRef }: Props) {
+export function RichTextInput({ onSubmit, placeholder = 'Message...', disabled, handleRef, onTyping }: Props) {
   if (disabled) {
     return <div className="flex-1 text-[14px] text-[var(--text-muted)] py-1">{placeholder}</div>
   }
@@ -199,7 +209,7 @@ export function RichTextInput({ onSubmit, placeholder = 'Message...', disabled, 
   }
   return (
     <LexicalComposer initialConfig={initialConfig}>
-      <EditorInner onSubmit={onSubmit} placeholder={placeholder} handleRef={handleRef} />
+      <EditorInner onSubmit={onSubmit} placeholder={placeholder} handleRef={handleRef} onTyping={onTyping} />
     </LexicalComposer>
   )
 }

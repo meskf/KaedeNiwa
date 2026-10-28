@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAuthStore } from '../stores/auth'
+import { useProfileStore } from '../stores/profile'
 import { useServerStore } from '../stores/server'
 import { useChatStore } from '../stores/chat'
 import { getClient, scheduleReconnect } from '../wasm/client'
@@ -8,7 +9,7 @@ import { useMediaState } from '../hooks/useLiveKitRoom'
 import { MediaBar } from './MediaBar'
 import { ScreenShareView } from './ScreenShareView'
 import { StageManagerServers } from './StageManagerServers'
-import { IconHash, IconVolume, IconSun, IconMoon, IconSearch, IconUsers, IconSettings } from './icons'
+import { IconSun, IconMoon, IconSearch, IconUsers } from './icons'
 import { useTheme } from '../lib/useTheme'
 import { useI18n } from '../stores/i18n'
 import { SettingsView } from './SettingsView'
@@ -20,13 +21,35 @@ import { ChannelSettingsDialog } from './ChannelSettingsDialog'
 import { DMView } from './DMView'
 import { FriendsView } from './FriendsView'
 import { MessageAttachments } from './MessageAttachments'
+import { ChannelTree } from './ChannelTree'
+import { NodeContextMenu } from './NodeContextMenu'
 import { RichTextInput, type RichTextInputHandle } from './RichTextInput'
 import { MessageText } from './MessageText'
 import { extractMessage } from '../lib/messageUtils'
 
 
 
+
 export function MainView({ onLogout }: { onLogout: () => void }) {
+  const [ctxNode, setCtxNode] = useState<{ x: number, y: number, node: any } | null>(null)
+  const setNodes = useChatStore(s => s.setNodes)
+
+  useEffect(() => {
+    const loginId = useAuthStore.getState().loginId
+    if (!loginId) return
+    let cancelled = false
+    ;(async () => {
+      const c = getClient()
+      if (!c) return
+      try {
+        const res = await (c as any).listNodes()
+        const parsed = res.map((r: any) => JSON.parse(r))
+        if (!cancelled) setNodes(parsed)
+      } catch (e) { console.error('load nodes err:', e) }
+    })()
+    return () => { cancelled = true }
+  }, [setNodes])
+
   const [dynamicBg, setDynamicBg] = useState(() => localStorage.getItem('kaede-dynamic-bg') === 'true')
   useEffect(() => {
     const handleToggle = () => setDynamicBg(localStorage.getItem('kaede-dynamic-bg') === 'true')
@@ -35,14 +58,56 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   }, [])
 
   
+  
   const loginId = useAuthStore(s => s.loginId)
   const token = useAuthStore(s => s.token)
+  const fetchMe = useProfileStore(s => s.fetchMe)
   const serverProfile = useServerStore(s => s.profile)
-  const fetchServerProfile = useServerStore(s => s.fetch)
 
   useEffect(() => {
-    fetchServerProfile(token)
-  }, [token])
+    if (token) {
+      fetchMe(token)
+      // 手动拉取 server profile
+      fetch('/api/server', { headers: { Authorization: `Bearer ${token}` } })
+        .then(res => res.ok ? res.json() : null)
+        .then(data => {
+          if (data) {
+            useServerStore.setState({ profile: data })
+          }
+        }).catch(console.error)
+    }
+  }, [token, fetchMe])
+
+  const nodes = useChatStore(s => s.nodes)
+
+  useEffect(() => {
+    if (!loginId) return
+    let cancelled = false
+    ;(async () => {
+      const c = getClient()
+      if (!c) return
+      try {
+        let res = await (c as any).listNodes()
+        let parsed = res.map((r: any) => JSON.parse(r))
+        if (parsed.length === 0 && !cancelled) {
+          // Seed 默认目录结构
+          const folder1 = await (c as any).createNode('文字频道', 'folder', null, false, null)
+          await (c as any).createNode('general', 'text', JSON.parse(folder1).id, false, null)
+          const folder2 = await (c as any).createNode('语音频道', 'folder', null, false, null)
+          await (c as any).createNode('语音大厅', 'voice', JSON.parse(folder2).id, false, null)
+          
+          res = await (c as any).listNodes()
+          parsed = res.map((r: any) => JSON.parse(r))
+        }
+        if (!cancelled) setNodes(parsed)
+      } catch (e) { console.error('load nodes err:', e) }
+    })()
+    return () => { cancelled = true }
+  }, [loginId, setNodes])
+  
+
+  
+
   const channelList = useChatStore(s => s.channelList)
   const serverMembers = useChatStore(s => s.serverMembers)
   const setServerMembers = useChatStore(s => s.setServerMembers)
@@ -53,6 +118,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     messages, setMessages, addMessage,
     pendingMessages, addPending, removePending, markPendingFailed, incrementRetry,
     peerStatus,
+      typingUsers, setTyping, pruneTyping,
   } = useChatStore()
   const categories = useChatStore(s => s.categories)
   const setCategories = useChatStore(s => s.setCategories)
@@ -73,11 +139,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const [manageCategory, setManageCategory] = useState<{ id: string; name: string } | null>(null)
   const [manageCategoryName, setManageCategoryName] = useState('')
 
-  const handleManageCategory = (cat: { id: string; name: string }) => {
-    setManageCategory(cat)
-    setManageCategoryName(cat.name)
-  }
-
+  
   const handleCreateCategory = async () => {
     const name = newCategoryName.trim()
     if (!name) return
@@ -435,6 +497,13 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           if (target) useChatStore.getState().updatePendingAttachment(target.id, { sent, total })
           return
         }
+          if (ev.Typing) {
+            const tch = (ev.Typing as any).channel_id
+            const tfrom = (ev.Typing as any).from
+            if (tch && tfrom) {
+              setTyping(tch, tfrom, 3500)
+            }
+          }
         if (ev.ChannelMessage) {
           if (ev.ChannelMessage.channel_id !== useChatStore.getState().currentChannel) return
           try {
@@ -518,6 +587,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [currentMessages.length, currentPending.length])
+
+  // 1s 间隔清理过期的 typing 条目
+  useEffect(() => {
+    const iv = setInterval(() => pruneTyping(), 1000)
+    return () => clearInterval(iv)
+  }, [pruneTyping])
 
 
   const friends = useChatStore(s => s.friends)
@@ -656,67 +731,9 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
   const getInitial = (str: string) => str ? str.charAt(0).toUpperCase() : '?'
 
-  const renderTextChannel = (ch: any) => (
-    <div
-      key={ch.id}
-      data-testid={`channel-item-${ch.id}`}
-      onClick={() => { setChannel(ch.id); setActiveView('chat') }}
-      className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex items-center gap-2.5 transition-colors ${
-        currentChannel === ch.id && activeView === 'chat'
-          ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
-          : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
-      }`}
-    >
-      <IconHash className="w-4 h-4 opacity-50" /> {ch.name}
-    </div>
-  )
-
-  const renderVoiceChannel = (vc: any) => (
-    <div
-      key={vc.id}
-      data-testid={`channel-item-${vc.id}`}
-      onClick={() => { setChannel(vc.id); setActiveView('chat') }}
-      onDoubleClick={(e) => { e.stopPropagation(); handleJoinMedia(vc.id) }}
-      className={`px-3 py-2 mb-1 rounded-md text-[14px] cursor-pointer flex flex-col gap-2 transition-colors ${
-        currentChannel === vc.id && activeView === 'chat'
-          ? 'bg-[var(--bg-active)] text-[var(--text-main)] font-medium'
-          : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'
-      }`}
-      title="双击加入语音频道"
-    >
-      <div className="flex items-center gap-2.5">
-        <IconVolume className="w-4 h-4 opacity-50" /> {vc.name}
-        {media.connected && media.channelId === vc.id && media.audioBitrate > 0 && (
-          <span data-testid={`voice-bitrate-${vc.id}`} className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--bg-active)] text-[var(--text-muted)]">
-            {media.audioBitrate}K
-          </span>
-        )}
-      </div>
-      {/* 只要在这个频道里，不管当前看的是哪个频道，都显示成员列表 */}
-      {media.connected && media.channelId === vc.id && (
-        <div className="pl-6 flex flex-col gap-1 mt-1">
-          {Object.values(media.participants || {}).map((p: any) => (
-            <div
-              key={p.identity}
-              data-participant={p.identity}
-              data-mic={p.isMicrophoneEnabled ? 'on' : 'off'}
-              data-speaking={p.isSpeaking ? 'on' : 'off'}
-              className="flex items-center gap-2 cursor-pointer hover:bg-[var(--bg-hover)] rounded px-1 -mx-1 py-0.5 transition-colors"
-              onContextMenu={(e) => handleMemberContextMenu(e, p.identity, true)}
-            >
-              <div className="w-5 h-5 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[10px] font-bold text-[var(--text-main)]">
-                {getInitial(p.identity)}
-              </div>
-              <span className="text-[12px] text-[var(--text-main)]">{p.identity}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-
-  const sortedCategories = [...categories].sort((a, b) => Number(a.position) - Number(b.position))
-  const currentChannelInfo = channelList.find(c => c.id === currentChannel)
+  
+  
+    const currentChannelInfo = nodes.find((c: any) => c.id === currentChannel)
   const currentChannelName = currentChannelInfo?.name || currentChannel
   const isVoiceChannel = currentChannelInfo ? currentChannelInfo.kind === 'voice' : false
 
@@ -731,9 +748,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         
         {/* 顶栏 */}
         <header className="relative h-[40px] shrink-0 flex items-center gap-4 mb-10">
-          <div className="flex shrink-0 items-center text-[16px] font-bold tracking-wide">
-            {serverProfile.name}
-          </div>
+          <div className="flex shrink-0 items-center text-[16px] font-bold tracking-wide">KaedeNiwa</div>
           <div className="flex-1 min-w-0 flex justify-center px-2">
             <div className="relative flex items-center w-full max-w-[420px]">
               <IconSearch className="absolute left-3.5 w-4 h-4 text-[var(--text-muted)]" />
@@ -781,105 +796,22 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           {/* 左侧侧边栏 */}
           <aside className={`absolute left-0 top-0 bottom-0 w-[200px] flex-col z-10 ${sidebarOpen ? 'flex' : 'hidden'}`}>
             <div className="h-[40px] flex items-center gap-3 mb-6">
-              <div className="w-8 h-8 rounded-md bg-[var(--bg-hover)] flex items-center justify-center text-[var(--text-main)] font-bold text-sm shrink-0">
-                K
+              <div className="w-8 h-8 rounded-md bg-[var(--bg-hover)] flex items-center justify-center text-[var(--text-main)] font-bold text-sm shrink-0 overflow-hidden">
+                {serverProfile?.icon_url ? (
+                  <img src={serverProfile.icon_url} className="w-full h-full object-cover" />
+                ) : (
+                  'K'
+                )}
               </div>
               <div className="flex flex-col min-w-0">
-                <span className="text-[14px] font-semibold leading-tight truncate">{serverProfile.name}</span>
-                <span className="text-[11px] text-[var(--text-muted)] truncate">{serverProfile.description}</span>
+                <span className="text-[14px] font-semibold leading-tight truncate">{serverProfile?.name || "Kaede Server"}</span>
+                <span className="text-[11px] text-[var(--text-muted)] truncate">{serverProfile?.description || "Workspace"}</span>
               </div>
             </div>
 
             <div className="flex-1 overflow-y-auto pb-2">
-              {categories.length === 0 ? (
-                <>
-                  <div className="mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
-                    Text Channels
-                  </div>
-                  {channelList.filter(c => c.kind === 'text').map(renderTextChannel)}
-                  <div className="mt-8 mb-2 text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
-                    Voice Channels
-                  </div>
-                  {channelList.filter(c => c.kind === 'voice').map(renderVoiceChannel)}
-                </>
-              ) : (
-                <>
-                  {sortedCategories.map((cat: any) => {
-                    const inCat = channelList.filter(c => c.category_id === cat.id)
-                    return (
-                      <div key={cat.id} className="mb-4 group/cat" data-testid={`category-${cat.id}`}>
-                        <div className="mb-2 flex items-center justify-between text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
-                          <span>{cat.name}</span>
-                          <div className="flex items-center gap-1">
-                            <button
-                              onClick={() => handleManageCategory(cat)}
-                              className="opacity-0 group-hover/cat:opacity-100 text-[12px] leading-none hover:text-[var(--text-main)] transition-opacity"
-                              title={lang === 'zh' ? '管理分区' : 'Manage category'}
-                              data-testid={`category-manage-${cat.id}`}
-                            >⚙</button>
-                            <button
-                              onClick={() => setCreateDialogCategory(cat.id)}
-                              className="opacity-0 group-hover/cat:opacity-100 text-[14px] leading-none hover:text-[var(--text-main)] transition-opacity"
-                              title={t('channel.addChannel')}
-                              data-testid={`category-add-${cat.id}`}
-                            >+</button>
-                          </div>
-                        </div>
-                        {inCat.map((ch: any) => (
-                          <div key={ch.id} className="group/ch relative">
-                            {ch.kind === 'voice' ? renderVoiceChannel(ch) : renderTextChannel(ch)}
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setSettingsChannelId(ch.id) }}
-                              className="absolute right-2 top-[7px] opacity-0 group-hover/ch:opacity-100 text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all p-1 flex items-center justify-center rounded hover:bg-[var(--bg-active)]"
-                              title={t('channel.openSettings')}
-                              data-testid={`channel-settings-${ch.id}`}
-                            >
-                              <IconSettings className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )
-                  })}
-                  <div className="mb-4">
-                    <button
-                      onClick={() => setNewCategoryPrompt(true)}
-                      className="w-full text-left px-3 py-1.5 rounded-md text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition-colors flex items-center gap-1.5"
-                      data-testid="new-category-btn"
-                    >
-                      <span className="text-[14px] leading-none">+</span>
-                      <span>{lang === 'zh' ? '新建分区' : 'New Category'}</span>
-                    </button>
-                  </div>
-                  {(() => {
-                    const uncat = channelList.filter(c => !c.category_id)
-                    if (uncat.length === 0) return null
-                    return (
-                      <div className="mb-4 group/cat">
-                        <div className="mb-2 flex items-center justify-between text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
-                          <span>{t('channel.uncategorized')}</span>
-                          <button
-                            onClick={() => setCreateDialogCategory(null)}
-                            className="opacity-0 group-hover/cat:opacity-100 text-[14px] leading-none hover:text-[var(--text-main)] transition-opacity"
-                            title={t('channel.addChannel')}
-                          >+</button>
-                        </div>
-                        {uncat.map((ch: any) => (
-                          <div key={ch.id} className="group/ch relative">
-                            {ch.kind === 'voice' ? renderVoiceChannel(ch) : renderTextChannel(ch)}
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setSettingsChannelId(ch.id) }}
-                              className="absolute right-2 top-2 opacity-0 group-hover/ch:opacity-100 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-opacity"
-                              title={t('channel.openSettings')}
-                            >⚙</button>
-                          </div>
-                        ))}
-                      </div>
-                    )
-                  })()}
-                </>
-              )}
-            </div>
+                <ChannelTree onContextMenu={(e, n) => setCtxNode({ x: e.clientX, y: e.clientY, node: n })} />
+              </div>
             {media.connected && media.channelId && (
               <div className="shrink-0 w-full pb-4 mt-auto">
                 <MediaBar channelId={media.channelId} compact={true} />
@@ -902,9 +834,14 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                     data-testid={`member-row-${uid}`}
                   >
                     <div className="relative">
-                      <div className="w-7 h-7 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[11px] font-bold text-[var(--text-main)]">
-                        {getInitial(uid)}
-                      </div>
+                      <div className="w-7 h-7 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[11px] font-bold text-[var(--text-main)] overflow-hidden relative">
+    <span>{getInitial(uid)}</span>
+    <img
+      src={`/api/avatars/${uid}?t=${Date.now()}`}
+      className="absolute inset-0 w-full h-full object-cover z-10"
+      onError={(e) => { e.currentTarget.style.display = 'none'; }}
+    />
+  </div>
                       </div>
                     <span className="text-[13px] font-medium text-[var(--text-main)] truncate">{uid}</span>
                   </div>
@@ -968,9 +905,14 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             <div className="">
                     {currentMessages.map((msg, idx) => (
                       <div key={(msg as any).id || `${msg.ts}-${msg.sender}-${idx}`} className="group flex gap-3 hover:bg-[var(--bg-hover)] -mx-3 px-3 py-2 rounded-md transition-colors">
-                        <div className="w-9 h-9 rounded-full flex items-center justify-center text-[13px] font-medium shrink-0 bg-[var(--bg-active)] text-[var(--text-main)] mt-0.5">
-                          {getInitial(msg.sender)}
-                        </div>
+                        <div className="w-9 h-9 rounded-full flex items-center justify-center text-[13px] font-medium shrink-0 bg-[var(--bg-active)] text-[var(--text-main)] mt-0.5 overflow-hidden relative">
+    <span>{getInitial(msg.sender)}</span>
+    <img
+      src={`/api/avatars/${msg.sender}?t=${Date.now()}`}
+      className="absolute inset-0 w-full h-full object-cover z-10"
+      onError={(e) => { e.currentTarget.style.display = 'none'; }}
+    />
+  </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-baseline gap-2">
                             <span className="font-semibold text-[14px] text-[var(--text-main)]">{msg.sender}</span>
@@ -988,9 +930,14 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                     ))}
                     {currentPending.map(p => (
                       <div key={p.id} data-testid="pending-msg" data-status={p.status} className="flex gap-3 opacity-50 -mx-3 px-3 py-2 rounded-md">
-                        <div className="w-9 h-9 rounded-full flex items-center justify-center text-[13px] font-medium shrink-0 bg-[var(--bg-active)] text-[var(--text-main)] mt-0.5">
-                          {getInitial(loginId)}
-                        </div>
+                        <div className="w-8 h-8 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[13px] font-bold text-[var(--text-main)] overflow-hidden relative">
+    <span>{getInitial(loginId)}</span>
+    <img
+      src={`/api/avatars/${loginId}?t=${Date.now()}`}
+      className="absolute inset-0 w-full h-full object-cover z-10"
+      onError={(e) => { e.currentTarget.style.display = 'none'; }}
+    />
+  </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-baseline gap-2">
                             <span className="font-semibold text-[14px] text-[var(--text-main)]">{loginId}</span>
@@ -1008,12 +955,37 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
                 <div data-testid="peer-status" className="text-[11px] text-[var(--text-muted)] h-5 w-full mt-2">{peerStatus}</div>
 
+                {(() => {
+                  const chTyping = typingUsers[currentChannel] || {}
+                  const now = Date.now()
+                  const active = Object.entries(chTyping)
+                    .filter(([uid, exp]) => exp > now && uid !== loginId)
+                    .map(([uid]) => uid)
+                  if (active.length === 0) return null
+                  const text = active.length === 1
+                    ? active[0] + " 正在输入..."
+                    : active.length === 2
+                      ? active[0] + " 和 " + active[1] + " 正在输入..."
+                      : active.slice(0, 2).join("、") + " 等 " + active.length + " 人正在输入..."
+                  return (
+                    <div data-testid="typing-indicator" className="text-[11px] text-[var(--text-muted)] italic h-5 w-full mb-1">
+                      {text}
+                    </div>
+                  )
+                })()}
+
                 <div className="w-full pb-4 pt-2 shrink-0">
                   <div className="w-full flex items-end gap-2 bg-[var(--bg-hover)] rounded-md px-3 py-2">
                     <RichTextInput
                       handleRef={richInputRef}
                       onSubmit={handleSend}
                       placeholder={`Message #${currentChannelName}`}
+                      onTyping={() => {
+                        const c = getClient()
+                        if (c && currentChannel) {
+                          (c as any).sendTyping(currentChannel).catch(() => {})
+                        }
+                      }}
                     />
                   </div>
                 </div>
@@ -1043,8 +1015,13 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       <footer className="shrink-0 bg-[var(--bg-footer)] transition-colors">
         <div className="px-16 h-[72px] flex items-center relative transition-colors">
           <div className="w-[200px] shrink-0 flex items-center gap-3">
-            <div className="w-7 h-7 rounded-md bg-[var(--bg-active)] flex items-center justify-center text-[11px] text-[var(--text-main)] font-bold">
-              {getInitial(loginId)}
+            <div className="w-7 h-7 rounded-md bg-[var(--bg-active)] flex items-center justify-center text-[11px] text-[var(--text-main)] font-bold overflow-hidden relative">
+              <span>{getInitial(loginId)}</span>
+              <img
+                src={`/api/avatars/${loginId}?t=${Date.now()}`}
+                className="absolute inset-0 w-full h-full object-cover z-10"
+                onError={(e) => { e.currentTarget.style.display = 'none'; }}
+              />
             </div>
             <div className="flex flex-col">
               <span className="text-[13px] font-semibold leading-tight text-[var(--text-main)] truncate max-w-[120px]">{loginId}</span>
@@ -1157,6 +1134,15 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           onAddFriend={handleCtxAddFriend}
           onRemoveFriend={handleCtxRemoveFriend}
           onClose={() => setCtxMenu(null)}
+        />
+      )}
+    
+      {ctxNode && (
+        <NodeContextMenu 
+          x={ctxNode.x} 
+          y={ctxNode.y} 
+          node={ctxNode.node} 
+          onClose={() => setCtxNode(null)} 
         />
       )}
     </div>

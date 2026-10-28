@@ -35,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/messages/{channel_id}/since/{since_id}", get(get_messages_since))
         // B2: 消息密文上限 4 MiB（附件在 attachments router 里单独 32 MiB）
         .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
+        .merge(crate::nodes::router())
         .with_state(state)
 }
 

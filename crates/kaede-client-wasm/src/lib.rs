@@ -544,6 +544,41 @@ impl JsClient {
             .map_err(|e| JsValue::from_str(&format!("presence error: {}", e)))
     }
 
+    
+    #[wasm_bindgen(js_name = listNodes)]
+    pub async fn list_nodes(&self) -> Result<JsValue, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let nodes = room.list_nodes().await.map_err(|e| JsValue::from_str(&format!("list nodes: {}", e)))?;
+        let arr = js_sys::Array::new();
+        for n in nodes {
+            arr.push(&JsValue::from_str(&serde_json::to_string(&n).unwrap_or_default()));
+        }
+        Ok(arr.into())
+    }
+
+    #[wasm_bindgen(js_name = createNode)]
+    pub async fn create_node(&self, name: String, kind: String, parent_id: Option<String>, is_private: bool, password: Option<String>) -> Result<JsValue, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let node = room.create_node(&name, &kind, parent_id.as_deref(), is_private, password.as_deref()).await.map_err(|e| JsValue::from_str(&format!("create node: {}", e)))?;
+        Ok(JsValue::from_str(&serde_json::to_string(&node).unwrap_or_default()))
+    }
+
+    #[wasm_bindgen(js_name = updateNode)]
+    pub async fn update_node(&self, id: String, name: Option<String>, parent_id: Option<String>, position: Option<i64>) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.update_node(&id, name.as_deref(), parent_id.as_deref(), position).await.map_err(|e| JsValue::from_str(&format!("update node: {}", e)))
+    }
+
+    #[wasm_bindgen(js_name = deleteNode)]
+    pub async fn delete_node(&self, id: String) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.delete_node(&id).await.map_err(|e| JsValue::from_str(&format!("delete node: {}", e)))
+    }
+
     #[wasm_bindgen(js_name = listChannels)]
     pub async fn list_channels(&self) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();

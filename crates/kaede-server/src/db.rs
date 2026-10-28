@@ -312,3 +312,21 @@ pub fn hash_token(token: &str) -> String {
     let h = Sha256::digest(token.as_bytes());
     base64_url(&h)
 }
+
+
+pub async fn init_nodes_table(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS nodes (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            parent_id TEXT,
+            kind TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            is_private INTEGER NOT NULL DEFAULT 0,
+            password_hash TEXT,
+            hash_tier TEXT,
+            created_at INTEGER NOT NULL
+        );"
+    ).execute(pool).await?;
+    Ok(())
+}
