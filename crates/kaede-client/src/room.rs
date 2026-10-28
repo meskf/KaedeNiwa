@@ -612,6 +612,28 @@ impl RoomSession {
     /// 错过的 Commit，避免 epoch 永久落后。
     pub async fn join_room(&self) -> Result<(), ClientError> {
         self.conn.join().await?;
+
+        // 【主群自举】UI 重做时丢失的 become_host / become_guest 决策。
+        // ServerMessage::Joined 到达后 peers 列表反映当前在线用户（不含自己）。
+        // - peers 为空 → 第一个登录，成为 host 建主群
+        // - peers 非空 → 已有 host，成为 guest 等 Welcome
+        // 放在 mls_is_ready 检查外：重连场景 snapshot 已恢复要跳过，不重复 become。
+        if !self.conn.mls_is_ready() {
+            // 给 Joined 事件到达留余量（PQC 环境下稍慢）
+            sleep_ms(400).await;
+            let peers = self.conn.peers();
+            if peers.is_empty() {
+                tracing::info!("[join_room] no peers online, becoming host");
+                self.become_host().await?;
+            } else {
+                tracing::info!(
+                    "[join_room] {} peers online, becoming guest (host will add us)",
+                    peers.len()
+                );
+                self.become_guest().await?;
+            }
+        }
+
         // P0-2 诊断：确认 reload 后 snapshot 是否恢复
         tracing::info!(
             "[client:{}] join_room: mls_is_ready={} mls_epoch={}",
@@ -1546,32 +1568,16 @@ pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, Client
             Ok(Ok(Err(e))) => Err(ClientError::Protocol(format!("welcome failed: {}", e))),
             Ok(Err(_)) => Err(ClientError::Protocol("welcome channel closed".into())),
             Err(_timeout) => {
-                // 【并发安全】超时后先查成员数：只有确实只有自己时才自建。
-                // 否则 10 人并发 join 时每人 10s 超时都会无脑自建 → 10 个 solo group
-                // → 群组彻底分裂（chaos-1 暴露的问题）。
-                let members = self
-                    .list_channel_members(channel_id)
-                    .await
-                    .unwrap_or_default();
-                if members.len() <= 1 {
-                    tracing::warn!(
-                        "[room] join_channel {} timeout; channel solo ({} members), self-creating group",
-                        channel_id,
-                        members.len()
-                    );
-                    self.conn.channel_ensure_group(channel_id)?;
-                    Ok(())
-                } else {
-                    tracing::error!(
-                        "[room] join_channel {} timeout; channel has {} members, refusing to self-create",
-                        channel_id,
-                        members.len()
-                    );
-                    Err(ClientError::Protocol(format!(
-                        "join timeout: {} other members in channel, cannot self-create group",
-                        members.len()
-                    )))
-                }
+                // 【Dead Authority Takeover】
+                // 如果超时，说明原本的权威成员（不管有几个人）全部离线或死透了，
+                // 根本不可能有 Welcome 发过来。此时如果继续拒绝建群，用户就永远卡在门外。
+                // 所以：只要超时，直接强行重建群组，成为新的权威。
+                tracing::warn!(
+                    "[room] join_channel {} timeout waiting welcome. Assuming dead authority, forcing local group creation.",
+                    channel_id
+                );
+                self.conn.channel_ensure_group(channel_id)?;
+                Ok(())
             }
         }
     }

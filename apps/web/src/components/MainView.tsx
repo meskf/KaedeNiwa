@@ -189,7 +189,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       const client = getClient()
       if (!client) { setTimeout(initChannel, 200); return }
       try {
-        await client.join_channel(CH)
+        if (!(window as any).__kaede_join_locks__) (window as any).__kaede_join_locks__ = {}
+        const locks = (window as any).__kaede_join_locks__
+        if (!locks[CH]) {
+          locks[CH] = client.join_channel(CH).finally(() => { delete locks[CH] })
+        }
+        await locks[CH]
         if (cancelled) return
         const hist = await client.load_history(CH, 50)
         if (cancelled) return
@@ -210,7 +215,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             setMessages(CH, merged)
           }
         }
-      } catch (e) {
+      } catch (e: any) {
+        const msg = String(e)
+        if (msg.includes('welcome channel closed')) {
+          console.warn('[initChannel] concurrent join detected, ignoring...')
+          return
+        }
         console.error('[initChannel] join failed (attempt ' + attempt + '):', e)
         if (!cancelled && attempt < MAX_ATTEMPTS) {
           attempt++
@@ -290,6 +300,22 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             } catch (e) { console.error('ensure_channel failed:', e) }
           }
         }
+        if (ev.PendingWelcome) {
+          // 主群 Welcome 自动接受：私有化服务器注册用户即可信任，不需弹窗。
+          // 频道 Welcome 走 ChannelSync 0x04，不在此事件里；DM Welcome 走 DmWelcome。
+          // 用 setTimeout(0) 异步：避免在 wasm event loop 的同步回调里重入。
+          const sender = ev.PendingWelcome.sender_login_id || ev.PendingWelcome.from
+          console.log(`[main-group] auto-accepting welcome from ${sender}`)
+          setTimeout(() => {
+            try {
+              client.acceptPendingWelcome(sender)
+              console.log(`[main-group] accepted welcome from ${sender}`)
+            } catch (e: any) {
+              console.warn(`[main-group] accept welcome failed:`, String(e).slice(0, 200))
+            }
+          }, 0)
+          return
+        }
         if (ev.ChannelMemberJoined) {
           const { channel_id, requester } = ev.ChannelMemberJoined
           if (channel_id !== useChatStore.getState().currentChannel) return
@@ -305,6 +331,18 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         if (ev.PeerJoined) {
           const uid = ev.PeerJoined.uid
           setServerMembers(Array.from(new Set([...useChatStore.getState().serverMembers, uid])))
+          // 【主群】如果我是主群 host（第一个登录用户），把新 peer 加进主群。
+          // 这是 UI 重做时丢失的 host 自动拉人逻辑。频道群的 Add 在下面 add_member_to_channel。
+          if (client.isMlsHost && client.isMlsHost()) {
+            useChatStore.getState().setPeerStatus(`Adding ${uid} to main group...`)
+            client.hostAddPeer(uid).then(() => {
+              console.log(`[main-group] added ${uid}`)
+            }).catch((e: any) => {
+              const msg = String(e)
+              if (msg.includes("already in group") || msg.includes("already_member")) return
+              console.warn(`[main-group] hostAddPeer ${uid} failed:`, msg)
+            })
+          }
           if (!useChatStore.getState().isAuthority) return
           useChatStore.getState().setPeerStatus(`Adding ${uid}...`)
           addMemberQueueRef.current = addMemberQueueRef.current.then(async () => {
@@ -530,15 +568,18 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
   const handleJoinMedia = async (targetCh: string) => {
     const client = getClient()
-    if (!client) return
-    if (media.connected && media.channelId === targetCh) return // 避免重复加入
+    if (!client) { console.error('[join-media] no client'); return }
+    if (media.connected && media.channelId === targetCh) { console.log('[join-media] already in', targetCh); return }
+    console.log(`[join-media] start ${targetCh}`)
 
     try {
       useChatStore.getState().setPeerStatus('Joining voice...')
       await client.join_channel(targetCh)
+      console.log(`[join-media] join_channel OK ${targetCh}`)
       await new Promise(r => setTimeout(r, 500))
       const tokenJson = await client.begin_media_session(targetCh)
       const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
+      console.log(`[join-media] media session OK, e2ee_seed=${tokenData.e2ee_seed ? 'yes' : 'no'}`)
       await connectMedia({
         wsUrl: tokenData.ws_url,
         token: tokenData.token,
@@ -546,8 +587,10 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         e2eeKeyB64: tokenData.e2ee_seed,
         disableAdaptive: (window as any).__KAEDE_TEST_DISABLE_ADAPTIVE__ === true,
       })
+      console.log(`[join-media] connectMedia OK ${targetCh}`)
       useChatStore.getState().setPeerStatus('Joined voice' + (tokenData.e2ee_seed ? ' (E2EE)' : ''))
     } catch (e: any) {
+      console.error(`[join-media] FAILED ${targetCh}:`, String(e).slice(0, 400))
       useChatStore.getState().setPeerStatus('Join voice failed: ' + e)
     }
   }
@@ -846,11 +889,11 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
           {/* 右侧成员列表 */}
           {showMembers && activeView === 'chat' && (
-            <aside className="absolute right-0 top-0 bottom-0 w-[200px] flex-col z-10 flex">
+            <aside className="absolute right-0 top-0 bottom-0 w-[200px] flex-col z-10 flex overflow-hidden">
               <div className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-4 mt-0">
                 Members
               </div>
-              <div className="flex flex-col gap-3">
+              <div className="flex-1 overflow-y-auto pr-1 flex flex-col gap-3">
                 {(serverMembers.length > 0 ? serverMembers : [loginId]).map(uid => (
                   <div
                     key={uid}

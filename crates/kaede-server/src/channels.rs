@@ -465,7 +465,11 @@ async fn join_channel(
     Path(id): Path<String>,
     Json(req): Json<JoinChannelReq>,
 ) -> Result<StatusCode, ApiError> {
-    let uid = authenticate(&state, &headers).await?;
+        let uid = authenticate(&state, &headers).await?;
+
+    // 【并发终极锁】强制串行化所有频道的加入请求，防止 A 和 B 同时 SELECT 查不到对方，各自建群。
+    let _guard = state.join_channel_lock.lock().await;
+
 
     // C10: per-uid 限流，防频道密码暴破
     if !state.check_rate_scoped(&uid, "join_channel", 0.5, 3.0) {

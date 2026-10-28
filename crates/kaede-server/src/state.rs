@@ -186,6 +186,8 @@ pub struct AppState {
     pub started_at: Instant,
     /// 内存日志环形缓冲，admin /api/logs 从这里读。
     pub log_buffer: crate::admin::logs::LogBuffer,
+    /// 【并发锁】强制串行化 join_channel，防止并发建群导致 Key 分裂。
+    pub join_channel_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -243,6 +245,7 @@ impl AppState {
         });
         Self {
             pool,
+            join_channel_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             cfg,
             room: Arc::new(Mutex::new(Room::default())),
             rate_buckets,

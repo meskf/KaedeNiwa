@@ -16,8 +16,14 @@ struct WasmObserver {
 
 impl ClientObserver for WasmObserver {
     fn on_event(&self, event: ClientEvent) {
-        let cb_borrow = self.callback.lock().unwrap();
-        if let Some(cb) = cb_borrow.as_ref() {
+        // 【死锁修复】不能在持有 callback 锁时调 JS。
+        // 否则 JS 回调里调 acceptPendingWelcome → emit PendingWelcomeResolved
+        // → 再次进入 on_event → 递归获取 callback 锁 → wasm panic。
+        let cb_opt = {
+            let cb_borrow = self.callback.lock().unwrap();
+            cb_borrow.clone()
+        };
+        if let Some(cb) = cb_opt {
             if let Ok(json) = serde_json::to_string(&event) {
                 let js_val = JsValue::from_str(&json);
                 let _ = cb.call1(&JsValue::NULL, &js_val);
@@ -50,14 +56,21 @@ impl JsClient {
     #[wasm_bindgen(js_name = setOnEvent)]
     pub fn set_on_event(&self, callback: Function) {
         *self.observer.callback.lock().unwrap() = Some(callback);
-        let mut queue = self.observer.queue.lock().unwrap();
-        if !queue.is_empty() {
-            if let Some(cb) = self.observer.callback.lock().unwrap().as_ref() {
-                for ev in queue.drain(..) {
-                    if let Ok(json) = serde_json::to_string(&ev) {
-                        let js_val = JsValue::from_str(&json);
-                        let _ = cb.call1(&JsValue::NULL, &js_val);
-                    }
+        // 先 drain 到本地 Vec，释放 queue 锁，再 clone callback，最后调 JS。
+        let queued: Vec<ClientEvent> = {
+            let mut queue = self.observer.queue.lock().unwrap();
+            if queue.is_empty() { return; }
+            queue.drain(..).collect()
+        };
+        let cb_opt = {
+            let cb_borrow = self.observer.callback.lock().unwrap();
+            cb_borrow.clone()
+        };
+        if let Some(cb) = cb_opt {
+            for ev in queued {
+                if let Ok(json) = serde_json::to_string(&ev) {
+                    let js_val = JsValue::from_str(&json);
+                    let _ = cb.call1(&JsValue::NULL, &js_val);
                 }
             }
         }
@@ -104,13 +117,69 @@ impl JsClient {
             .await
             .map_err(|e| JsValue::from_str(&format!("Join error: {}", e)))?;
 
-        // 【核心】让新用户自动上传 KeyPackage，供别人拉进频道群组使用
-        if let Err(e) = room.become_guest().await {
-            tracing::warn!("become_guest failed: {}", e);
-        }
+        // become_host / become_guest 的决策已上移到 RoomSession::join_room，
+        // 这里不再重复调用（避免重复发布 KeyPackage）。
 
         *self.room.lock().unwrap() = Some(room);
         Ok(())
+    }
+
+    /// 主群 host 主动把新登录的 peer 加进主群（含 Add + Welcome + Commit）。
+    /// 幂等：peer 已在群时是 no-op。
+    #[wasm_bindgen(js_name = hostAddPeer)]
+    pub async fn host_add_peer(&self, peer: String) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let uid = kaede_protocol::UserId::from(peer);
+        room.host_add_peer(&uid)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("hostAddPeer: {}", e)))
+    }
+
+    /// 主群是否处于"我是第一个成员（host）"状态。
+    /// true = 收到 PeerJoined 时应该调 hostAddPeer 拉人。
+    #[wasm_bindgen(js_name = isMlsHost)]
+    pub fn is_mls_host(&self) -> bool {
+        let room_opt = self.room.lock().unwrap().clone();
+        if let Some(room) = room_opt {
+            let conn = room.connection();
+            conn.mls_is_ready() && conn.mls_member_uids().len() == 1
+        } else {
+            false
+        }
+    }
+
+    /// 用户确认接受来自 sender 的主群 Welcome（Signal 模型的 UI 回调）。
+    #[wasm_bindgen(js_name = acceptPendingWelcome)]
+    pub fn accept_pending_welcome(&self, sender_login_id: String) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.connection()
+            .accept_pending_welcome(&sender_login_id)
+            .map_err(|e| JsValue::from_str(&format!("acceptPendingWelcome: {}", e)))
+    }
+
+    /// 用户拒绝来自 sender 的主群 Welcome。
+    #[wasm_bindgen(js_name = rejectPendingWelcome)]
+    pub fn reject_pending_welcome(&self, sender_login_id: String) -> Result<(), JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        room.connection().reject_pending_welcome(&sender_login_id);
+        Ok(())
+    }
+
+    /// 列出当前所有 pending 主群 Welcome（UI 渲染对话框用）。
+    #[wasm_bindgen(js_name = listPendingWelcomes)]
+    pub fn list_pending_welcomes(&self) -> Result<JsValue, JsValue> {
+        let room_opt = self.room.lock().unwrap().clone();
+        let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
+        let list = room.connection().pending_welcome_info();
+        let json: Vec<serde_json::Value> = list.iter().map(|p| serde_json::json!({
+            "sender_login_id": p.sender_login_id,
+            "is_rebuild": p.is_rebuild,
+            "age_secs": p.age_secs,
+        })).collect();
+        Ok(JsValue::from_str(&serde_json::to_string(&json).unwrap_or_else(|_| "[]".into())))
     }
 
     /// P0-1 测试钩子：模拟网络错误断开 WS，触发 JS 层自动重连。
