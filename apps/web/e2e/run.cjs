@@ -38,6 +38,7 @@ const TESTS = [
   { id: 't23', name: '分类/频道 CRUD',   file: 'test-23-channel-crud.cjs',     category: 'channels' },
   { id: 't24', name: '搜索面板',         file: 'test-24-search-palette.cjs',   category: 'ui' },
   { id: 't25', name: '附件 E2E',        file: 'test-25-attachment-e2e.cjs',   category: 'attachments' },
+  { id: 't26', name: 'Typing+Reaction',  file: 'test-26-typing-reaction.cjs',  category: 'ui' },
   { id: 't28', name: '消息历史',         file: 'test-28-message-history.cjs',  category: 'mls' },
 ];
 
@@ -118,4 +119,5 @@ function runOne(t, opts) {
 
   process.exit(fail ? 1 : 0);
 })();
+
 

@@ -28,6 +28,28 @@ export default function App() {
     const boot = async () => {
       try {
         await initWasm()
+
+        // [test-hook] 全局捕获所有 ClientEvent 到 window.__kaede_events__
+        // 在 MainView mount 之前 patch，保证 MainView 调 setOnEvent 时走 wrapper
+        ;(window as any).__kaede_events__ = (window as any).__kaede_events__ || []
+        try {
+          const c0: any = getClient()
+          if (c0 && !c0.__kdPatched) {
+            const orig = c0.setOnEvent.bind(c0)
+            c0.setOnEvent = (cb: Function) => {
+              const wrapper = (raw: string) => {
+                try {
+                  ;(window as any).__kaede_events__.push(raw)
+                } catch {}
+                return cb(raw)
+              }
+              return orig(wrapper)
+            }
+            c0.__kdPatched = true
+            console.log('[test-hook] ClientEvent 捕获已挂载')
+          }
+        } catch (e) { console.warn('[test-hook] patch failed:', e) }
+
         const { isLoggedIn: logged, serverUrl, wsUrl, token, loginId } = useAuthStore.getState()
         if (logged && token && loginId) {
           console.log('reconnecting...')
@@ -148,6 +170,28 @@ export default function App() {
       messages: {
         sendWithAttachments: async (channelId: string, text: string, attachments: any[]) =>
           reqClient().sendMessageWithAttachments(channelId, text, JSON.stringify(attachments)),
+      },
+
+      typing: {
+        send: async (ch: string) => reqClient().sendTyping(ch),
+      },
+      reaction: {
+        send: async (ch: string, targetTs: number, emoji: string, action: 'add' | 'remove' = 'add') =>
+          reqClient().sendReaction(ch, BigInt(targetTs), emoji, action),
+      },
+      presence: {
+        set: async (status: string) => reqClient().setPresence(status),
+      },
+
+      events: {
+        list: (type?: string) => {
+          const arr: string[] = (window as any).__kaede_events__ || []
+          const parsed = arr.map(r => { try { return JSON.parse(r) } catch { return null } }).filter(Boolean)
+          if (!type) return parsed
+          return parsed.filter((e: any) => e && typeof e === 'object' && (e.type === type || Object.prototype.hasOwnProperty.call(e, type)))
+        },
+        raw: () => ((window as any).__kaede_events__ || []).slice(),
+        clear: () => { (window as any).__kaede_events__ = [] },
       },
 
       forceDisconnect: async () => {
