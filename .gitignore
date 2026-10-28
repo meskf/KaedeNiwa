@@ -87,3 +87,6 @@ apps/web/_sm-verify.*
 apps/web/_pq-e2e*
 apps/web/_login-dump*
 apps/web/_probe*.json
+
+# PQ e2e test runtime reports (script is tracked, reports are not)
+apps/web/test-pq-e2e-report-*.txt

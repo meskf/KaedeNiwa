@@ -131,7 +131,7 @@ async function register(page, name) {
   report.push('PASS: ' + passed);
   report.push('errors (' + errs.length + '):');
   errs.slice(0, 15).forEach(e => report.push('  ' + e));
-  const reportPath = '_pq-e2e-report-' + ts + '.txt';
+  const reportPath = 'test-pq-e2e-report-' + ts + '.txt';
   fs.writeFileSync(reportPath, report.join('\n'));
   console.log('\n' + report.join('\n'));
   console.log('\n[report] ' + reportPath);

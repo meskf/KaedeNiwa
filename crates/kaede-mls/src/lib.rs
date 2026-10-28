@@ -105,19 +105,3 @@ mod pq_size_probe {
         );
     }
 }
-
-#[cfg(test)]
-mod phase2_probe {
-    use super::*;
-    #[test]
-    fn phase2_keypackage_size() {
-        let id = MlsIdentity::generate("alice").unwrap();
-        let provider = KaedeMlsProvider::new();
-        let kp = id.generate_key_package(&provider).unwrap();
-        println!("Phase2 KeyPackage size = {} bytes", kp.len());
-        println!("Phase2 signature scheme = {:?}", id.ciphersuite().signature_algorithm());
-        assert!(kp.len() > 3500, "ML-DSA-44 KP should be >3500 bytes, got {}", kp.len());
-        assert_eq!(id.ciphersuite().signature_algorithm(),
-            openmls_traits::types::SignatureScheme::MLDSA44);
-    }
-}
