@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMediaState } from '../hooks/useLiveKitRoom'
+import { setScreenShareQuality } from '../lib/livekit'
 
 function VideoPane({ share, multi }: { share: any; multi: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -73,6 +74,24 @@ function VideoPane({ share, multi }: { share: any; multi: boolean }) {
         onClick={toggleFs}
       />
       
+      {/* 接收画质（仅远端共享，本地预览隐藏） */}
+      {!String(share.trackSid).startsWith('LOCAL-SHARE-') && (
+        <div className="absolute top-3 right-14 opacity-0 group-hover:opacity-100 transition-opacity">
+          <select
+            data-testid={`screen-share-quality-${share.trackSid}`}
+            value={share.quality || 'high'}
+            onChange={(e) => setScreenShareQuality(share.trackSid, e.target.value as any)}
+            onClick={(e) => e.stopPropagation()}
+            className="p-1.5 text-xs bg-black/60 hover:bg-black/90 text-white rounded-md backdrop-blur-sm outline-none cursor-pointer"
+            title="接收画质"
+          >
+            <option value="low">360p</option>
+            <option value="medium">720p</option>
+            <option value="high">最高</option>
+          </select>
+        </div>
+      )}
+
       {/* 全屏按钮：只在鼠标悬浮时显示，放在右上角，避免遮挡关键内容 */}
       <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity">
         <button

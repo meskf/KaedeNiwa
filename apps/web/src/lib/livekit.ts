@@ -44,6 +44,8 @@ export interface ScreenShareInfo {
   track: RemoteTrack | LocalTrack
   element: HTMLVideoElement
   hasAudio: boolean
+  /** 接收端画质偏好（仅远端共享生效；本地预览忽略） */
+  quality?: 'low' | 'medium' | 'high'
 }
 
 interface ConnectOptions {
@@ -264,12 +266,15 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
 
       // 2. 处理屏幕共享视频
       if (pub.source === Track.Source.ScreenShare) {
-        // 强制订阅最高档，避免默认订阅 mid/low 层导致分辨率减半
+        // 接收端画质偏好：从缓存读（用户可能切换过），默认 high
+        const cachedQuality = screenShareCache.get(track.sid || '')?.quality || 'high'
         try {
           // @ts-ignore - setVideoQuality 在 2.x 仍可用
-          pub.setVideoQuality?.('high')
-          // 新 API（如果存在）
-          ;(pub as any).setVideoDimensions?.(99999, 99999)
+          pub.setVideoQuality?.(cachedQuality)
+          // 默认行为：high 档不限制分辨率；其他档位让 LiveKit 自动按层
+          if (cachedQuality === 'high') {
+            ;(pub as any).setVideoDimensions?.(99999, 99999)
+          }
         } catch (e) {
           console.warn('[ScreenShare] setVideoQuality 失败:', e)
         }
@@ -284,6 +289,7 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
           track,
           element: el,
           hasAudio: false,
+          quality: cachedQuality,  // 记录当前接收画质
         })
         emit()
       }
@@ -559,6 +565,44 @@ export async function updateE2EEKey(newKeyB64: string): Promise<void> {
   } catch (e) {
     console.error('[E2EE] key 轮换失败:', e)
   }
+}
+
+/**
+ * 接收端设置某路屏幕共享的画质偏好。
+ * - 仅远端共享生效；本地预览（LOCAL-SHARE-）直接 no-op
+ * - 依赖 LiveKit simulcast：发布端 startScreenShare 已开启 simulcast
+ */
+export function setScreenShareQuality(sid: string, quality: 'low' | 'medium' | 'high') {
+  if (!currentRoom) return
+  if (sid.startsWith('LOCAL-SHARE-')) {
+    console.log('[ScreenShare] 本地预览不调 setVideoQuality:', sid)
+    return
+  }
+  const info = screenShareCache.get(sid)
+  if (!info) {
+    console.warn('[ScreenShare] setScreenShareQuality: sid not found', sid)
+    return
+  }
+  let applied = false
+  for (const participant of currentRoom.remoteParticipants.values()) {
+    const pub = participant.getTrackPublicationBySid(sid)
+    if (pub && pub.source === Track.Source.ScreenShare) {
+      try {
+        // @ts-ignore - setVideoQuality 在 2.x 仍可用
+        pub.setVideoQuality?.(quality)
+        console.log(`[ScreenShare] ${sid} -> ${quality}`)
+        applied = true
+      } catch (e) {
+        console.warn('[ScreenShare] setVideoQuality failed:', e)
+      }
+      break
+    }
+  }
+  if (!applied) {
+    console.warn('[ScreenShare] setScreenShareQuality: publication not found for', sid)
+  }
+  screenShareCache.set(sid, { ...info, quality })
+  emit()
 }
 
 export function subscribeMedia(fn: (state: MediaState) => void): () => void {

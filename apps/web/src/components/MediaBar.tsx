@@ -208,6 +208,26 @@ export function MediaBar({ channelId, compact = false }: Props) {
               {micOn ? <IconMic className='w-4 h-4'/> : <IconMicOff className='w-4 h-4'/>}
             </button>
 
+            {/* compact-noise-toggle: 降噪（RNNoise），仅麦克风开启时显示 */}
+            {micOn && (
+              <button
+                data-testid="media-noise-toggle"
+                data-noise={noiseOn ? 'on' : 'off'}
+                data-mode={media.noiseMode}
+                onClick={handleToggleNoise}
+                className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors shrink-0 text-[10px] font-bold ${
+                  noiseOn ? 'bg-[var(--text-main)] text-[var(--bg-app)]' : 'bg-[var(--bg-active)] text-[var(--text-muted)] hover:text-[var(--text-main)]'
+                }`}
+                title={
+                  media.noiseMode === 'unsupported'
+                    ? 'RNNoise 需要 Chrome 94+ / Edge / Safari 15.4+'
+                    : noiseOn ? 'RNNoise ON' : 'RNNoise OFF'
+                }
+              >
+                NS
+              </button>
+            )}
+
             {/* 拒听 */}
             <button
               data-testid="media-deafen-toggle"
