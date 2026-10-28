@@ -306,6 +306,21 @@ MLS_128_MLKEM768X25519_CHACHA20POLY1305_SHA384_MLDSA44
 - TLS 1.3 transport: classical → Phase 3 (X25519MLKEM768)
 - DTLS-SRTP: classical, but overlaid by MLS-derived E2EE
 
+### Size / bandwidth impact
+
+PQ ciphersuites have larger wire footprints than classical ones. Measured on this build:
+
+| Artifact | Classical (Ed25519) | Phase 2 (ML-DSA-44) |
+|---|---|---|
+| KeyPackage | ~300 B | **8660 B** |
+| Welcome (per new member) | ~300 B | ~2.5 KB (sig-dominated) |
+| MLS ApplicationMessage | ~100 B | +2420 B (signature) |
+
+Implications:
+- **LAN / private deployment**: no practical impact.
+- **Weak-network mobile**: per-message signature overhead (~2.4 KB) is noticeable; batching or a lighter suite (ML-DSA-44 is already the smallest) should be considered if bandwidth becomes a problem.
+- **10-member group epoch rotation**: Welcome fan-out ~25 KB — acceptable for text/voice, may need tuning for very large groups.
+
 ### Roadmap
 
 | Phase | Scope | Status |
