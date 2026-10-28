@@ -56,8 +56,8 @@ async function injectFakeDisplayMedia(page, opts = {}) {
     if (!navigator.mediaDevices) navigator.mediaDevices = {};
     navigator.mediaDevices.getDisplayMedia = async (constraints) => {
       const v = constraints?.video || {};
-      const w = v.width?.ideal || 1280;
-      const h = v.height?.ideal || 720;
+      const w = v.width?.ideal || 1920;
+      const h = v.height?.ideal || 1080;
       const fps = v.frameRate?.ideal || 30;
       const canvas = document.createElement('canvas');
       canvas.width = w;

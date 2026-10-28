@@ -80,7 +80,7 @@ function VideoPane({ share, multi }: { share: any; multi: boolean }) {
         <div className="absolute top-3 right-14 opacity-0 group-hover:opacity-100 transition-opacity">
           <select
             data-testid={`screen-share-quality-${share.trackSid}`}
-            value={share.quality || 'high'}
+            value={share.presetId || '1080p60'}
             onChange={(e) => setScreenShareQuality(share.trackSid, e.target.value as any)}
             onClick={(e) => e.stopPropagation()}
             className="p-1.5 text-xs bg-black/60 hover:bg-black/90 text-white rounded-md backdrop-blur-sm outline-none cursor-pointer"
