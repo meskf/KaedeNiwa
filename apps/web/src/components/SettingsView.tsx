@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAuthStore } from '../stores/auth'
 import { useMembersStore } from '../stores/members'
 import { useServerStore } from '../stores/server'
+import { useProfileStore } from '../stores/profile'
 import { useChatStore } from '../stores/chat'
 import { useI18n } from '../stores/i18n'
 import { useTheme } from '../lib/useTheme'
@@ -89,6 +90,76 @@ export function SettingsView() {
     return localStorage.getItem('kaede-stage-manager-mode') || 'auto'
   })
 
+  // ============ 个人资料（头像/昵称/简介/称号）============
+  const me = useProfileStore(s => s.me)
+  const fetchMe = useProfileStore(s => s.fetchMe)
+  const updateMe = useProfileStore(s => s.updateMe)
+  const uploadAvatar = useProfileStore(s => s.uploadAvatar)
+  const [nicknameDraft, setNicknameDraft] = useState(me.nickname)
+  const [bioDraft, setBioDraft] = useState(me.bio)
+  const [titleDraft, setTitleDraft] = useState(me.title)
+  const [savingProfile, setSavingProfile] = useState(false)
+  const [profileSaveStatus, setProfileSaveStatus] = useState<'ok' | 'error' | ''>('')
+  const [uploadingAvatar, setUploadingAvatar] = useState(false)
+  const avatarInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    fetchMe(token)
+  }, [token])
+
+  useEffect(() => {
+    setNicknameDraft(me.nickname)
+    setBioDraft(me.bio)
+    setTitleDraft(me.title)
+  }, [me.nickname, me.bio, me.title])
+
+  const profileDirty = nicknameDraft !== me.nickname || bioDraft !== me.bio || titleDraft !== me.title
+
+  const handleSaveProfile = async () => {
+    if (!profileDirty || savingProfile) return
+    setSavingProfile(true)
+    setProfileSaveStatus('')
+    const r = await updateMe(token, {
+      nickname: nicknameDraft.trim(),
+      bio: bioDraft.trim(),
+      title: titleDraft.trim(),
+    })
+    setSavingProfile(false)
+    if (r.ok) {
+      setProfileSaveStatus('ok')
+      setTimeout(() => setProfileSaveStatus(''), 2000)
+      fetchMembers(token)
+    } else {
+      setProfileSaveStatus('error')
+    }
+  }
+
+  const handleUploadAvatar = async (file: File) => {
+    if (uploadingAvatar) return
+    setUploadingAvatar(true)
+    const r = await uploadAvatar(token, file)
+    setUploadingAvatar(false)
+    if (r.ok) {
+      fetchMembers(token)
+    } else {
+      alert(r.error || 'avatar upload failed')
+    }
+  }
+
+  // ============ 服务器图标 ============
+  const uploadIcon = useServerStore(s => s.uploadIcon)
+  const [uploadingIcon, setUploadingIcon] = useState(false)
+  const iconInputRef = useRef<HTMLInputElement>(null)
+
+  const handleUploadIcon = async (file: File) => {
+    if (uploadingIcon) return
+    setUploadingIcon(true)
+    const r = await uploadIcon(token, file)
+    setUploadingIcon(false)
+    if (!r.ok) alert(r.error || 'icon upload failed')
+  }
+
+
   const changeStageManagerMode = (m: string) => {
     setStageManagerMode(m)
     localStorage.setItem('kaede-stage-manager-mode', m)
@@ -105,12 +176,94 @@ export function SettingsView() {
 
       <section className="mb-8">
         <h2 className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-3">{t('settings.accountTitle')}</h2>
-        <div className="rounded-lg bg-[var(--bg-hover)] divide-y divide-[var(--bg-active)]">
-          <div className="flex items-center justify-between px-4 py-3">
+        <div className="rounded-lg bg-[var(--bg-hover)] overflow-hidden">
+          <div className="flex items-start gap-4 px-4 py-4 border-b border-[var(--bg-active)]">
+            <button
+              type="button"
+              onClick={() => avatarInputRef.current?.click()}
+              disabled={uploadingAvatar}
+              className="relative w-[72px] h-[72px] rounded-full overflow-hidden bg-[var(--bg-active)] flex items-center justify-center shrink-0 group"
+              data-testid="settings-avatar-button"
+              title={lang === 'zh' ? '点击更换头像' : 'Click to change avatar'}
+            >
+              {me.avatarUrl ? (
+                <img src={me.avatarUrl} alt="avatar" className="w-full h-full object-cover" />
+              ) : (
+                <span className="text-[24px] font-bold text-[var(--text-muted)]">{(me.nickname || me.loginId || '?').slice(0, 1).toUpperCase()}</span>
+              )}
+              <span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white text-[11px] font-semibold transition-opacity">
+                {uploadingAvatar ? '...' : (lang === 'zh' ? '更换' : 'Change')}
+              </span>
+            </button>
+            <input
+              ref={avatarInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) handleUploadAvatar(f)
+                e.target.value = ''
+              }}
+            />
+            <div className="flex-1 min-w-0 flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[12px] text-[var(--text-muted)] w-14 shrink-0">{lang === 'zh' ? '昵称' : 'Nickname'}</span>
+                <input
+                  type="text"
+                  value={nicknameDraft}
+                  onChange={(e) => setNicknameDraft(e.target.value)}
+                  maxLength={32}
+                  className="flex-1 bg-[var(--bg-active)] rounded px-3 py-1.5 text-[13px] text-[var(--text-main)] outline-none focus:ring-1 focus:ring-[var(--text-muted)]"
+                  data-testid="settings-nickname-input"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[12px] text-[var(--text-muted)] w-14 shrink-0">{lang === 'zh' ? '简介' : 'Bio'}</span>
+                <input
+                  type="text"
+                  value={bioDraft}
+                  onChange={(e) => setBioDraft(e.target.value)}
+                  maxLength={256}
+                  className="flex-1 bg-[var(--bg-active)] rounded px-3 py-1.5 text-[13px] text-[var(--text-main)] outline-none focus:ring-1 focus:ring-[var(--text-muted)]"
+                  data-testid="settings-bio-input"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[12px] text-[var(--text-muted)] w-14 shrink-0">{lang === 'zh' ? '称号' : 'Title'}</span>
+                <input
+                  type="text"
+                  value={titleDraft}
+                  onChange={(e) => setTitleDraft(e.target.value)}
+                  maxLength={32}
+                  className="flex-1 bg-[var(--bg-active)] rounded px-3 py-1.5 text-[13px] text-[var(--text-main)] outline-none focus:ring-1 focus:ring-[var(--text-muted)]"
+                  data-testid="settings-title-input"
+                />
+              </div>
+              <div className="flex items-center gap-2 mt-1">
+                <span className={`text-[12px] ${profileSaveStatus === 'ok' ? 'text-green-500' : profileSaveStatus === 'error' ? 'text-red-500' : 'text-[var(--text-muted)]'}`}>
+                  {profileSaveStatus === 'ok' ? (lang === 'zh' ? '已保存' : 'Saved') :
+                   profileSaveStatus === 'error' ? (lang === 'zh' ? '保存失败' : 'Failed') :
+                   (lang === 'zh' ? '修改后点击保存' : 'Edit and save')}
+                </span>
+                <div className="ml-auto">
+                  <button
+                    onClick={handleSaveProfile}
+                    disabled={savingProfile || !profileDirty}
+                    className="px-4 py-1.5 rounded bg-[var(--bg-app)] text-[12px] font-semibold text-[var(--text-main)] hover:opacity-80 disabled:opacity-40 transition-opacity"
+                    data-testid="settings-profile-save"
+                  >
+                    {savingProfile ? (lang === 'zh' ? '保存中...' : 'Saving...') : (lang === 'zh' ? '保存' : 'Save')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--bg-active)]">
             <span className="text-[13px] text-[var(--text-muted)]">{t('settings.accountLoginId')}</span>
             <span className="text-[14px] font-semibold text-[var(--text-main)]" data-testid="settings-login-id">{loginId || '—'}</span>
           </div>
-          <div className="flex items-center justify-between px-4 py-3">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--bg-active)]">
             <span className="text-[13px] text-[var(--text-muted)]">{t('settings.accountServer')}</span>
             <span className="text-[13px] text-[var(--text-main)] truncate max-w-[300px]">{serverUrl || '—'}</span>
           </div>
@@ -127,6 +280,41 @@ export function SettingsView() {
       <section className="mb-8">
         <h2 className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-3">{lang === 'zh' ? '服务器' : 'Server'}</h2>
         <div className="rounded-lg bg-[var(--bg-hover)] divide-y divide-[var(--bg-active)]">
+          <div className="flex items-center justify-between px-4 py-3 gap-4">
+            <span className="text-[13px] text-[var(--text-muted)] shrink-0">{lang === 'zh' ? '图标' : 'Icon'}</span>
+            <div className="flex items-center gap-3 ml-auto">
+              <button
+                type="button"
+                onClick={() => iconInputRef.current?.click()}
+                disabled={uploadingIcon || myLevel < 3}
+                className="w-[48px] h-[48px] rounded-[10px] overflow-hidden bg-[var(--bg-active)] flex items-center justify-center relative group disabled:opacity-50"
+                data-testid="settings-server-icon-button"
+                title={myLevel < 3 ? (lang === 'zh' ? '需要管理员权限' : 'Requires admin') : (lang === 'zh' ? '点击更换图标' : 'Click to change')}
+              >
+                {profile.icon_url ? (
+                  <img src={profile.icon_url} alt="icon" className="w-full h-full object-cover" />
+                ) : (
+                  <span className="text-[16px] font-bold text-[var(--text-muted)]">{profile.name.slice(0, 1).toUpperCase()}</span>
+                )}
+                {myLevel >= 3 && (
+                  <span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white text-[10px] font-semibold transition-opacity">
+                    {uploadingIcon ? '...' : (lang === 'zh' ? '更换' : 'Change')}
+                  </span>
+                )}
+              </button>
+              <input
+                ref={iconInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (f) handleUploadIcon(f)
+                  e.target.value = ''
+                }}
+              />
+            </div>
+          </div>
           <div className="flex items-center justify-between px-4 py-3 gap-4">
             <span className="text-[13px] text-[var(--text-muted)] shrink-0">{lang === 'zh' ? '名称' : 'Name'}</span>
             <input
