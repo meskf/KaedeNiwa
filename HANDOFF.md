@@ -1430,3 +1430,244 @@ KaedeNiwa 的所有密钥（频道消息 AES、DM、LiveKit 媒体 E2EE）都源
 - **合规前瞻**：NIST 已发布 ML-KEM (FIPS 203) 和 ML-DSA (FIPS 204) 标准，2026 年后各国合规要求将逐步向 PQC 迁移。早期布局能抢占先机。
 - **HNDL 防御**：Store-Now-Decrypt-Later 攻击是真实威胁。启用 PQ 后，即使今天被窃听的密文，未来也无法被量子计算机破解。
 
+
+
+第二十七部分 2026-10-28 会话：e2e 功能矩阵补全 + 真 bug 修复 + 事件捕获机制
+============================================================================
+
+## 1. 本次会话做了什么
+
+### 1.1 e2e 测试矩阵从 14 → 17 个（6 新增 + 2 修复）
+
+| ID | 名称 | 状态 | 覆盖维度 |
+|----|------|------|---------|
+| t22 | 好友流程 | PASS | sendRequest → 双方 direction 流转 → accept → openDm → sendDm → remove |
+| t23 | 分类/频道 CRUD | PASS | create/list/rename/delete 分类 + 频道 + 分类归属迁移 |
+| t24 | 搜索面板 | PASS | Ctrl+K → 输入 → <mark> 高亮 → 点击跳转 → 面板关闭 |
+| t25 | 附件 E2E | PASS | 上传 1KB 随机 → 消息 → 跨用户下载 → SHA256 + bytes 严格一致 |
+| t26 | Typing+Reaction+Presence | PASS | 3 个事件从 u0 直达 u1（公开频道 MLS broadcast 路径） |
+| t27 | 私密频道 | PASS | 错误密码 401 → 正确密码加入 → 消息 0x03 路径 → reaction 0x03 路径 |
+| t28 | 同 epoch 消息历史 | PASS | u0+u1 同 epoch 内发 10 条 → 双方 loadHistory 全部命中 |
+| t14 | DM 桥（严格化） | PASS | 判据从"桥能调"升级为"对端 history 真收到消息" |
+
+### 1.2 真 bug 修复：send_reaction 公开频道误入 0x03 路径
+
+**症状**：test-26 第一次跑，u1 收不到 ChannelReaction 事件。u0 侧无反应。
+服务端 Error: "public channels use MLS broadcast reactions"。
+
+**根因**：crates/kaede-client/src/room.rs 的 send_reaction 判断条件错误：
+
+    // 之前（BUG）
+    if self.conn.channel_has_group(channel_id) || self.is_private_channel(channel_id) {
+        // 走 0x03 channel-key seal 路径
+    }
+
+    // 之后（修复）
+    if self.is_private_channel(channel_id) {
+        // 走 0x03 channel-key seal 路径（仅私密频道）
+    }
+
+general 是公开频道但所有成员都在 channel group 里 → channel_has_group=true
+→ 误走私密路径 → 服务端 ChannelReaction handler 拒绝（只接受 is_private 频道）。
+
+**修复后的正确语义**：
+- 公开频道 reaction → MLS broadcast → 接收方收 AppMessageReceived（payload=ReactionPayload）
+- 私密频道 reaction → 0x03 channel-key seal → 接收方收 ChannelReaction
+
+### 1.3 wasm 桥新增 4 个方法
+
+crates/kaede-client-wasm/src/lib.rs：
+- sendTyping(channel_id) → room.send_typing（4s 客户端节流）
+- sendReaction(channel_id, target_ts, emoji, action) → room.send_reaction
+- setPresence(status) → room.set_presence
+- joinChannelWithPassword(channel_id, password) → room.join_channel（为私密频道 e2e 铺路）
+
+### 1.4 App.tsx __kaede_debug__ 扩展 6 个命名空间
+
+    window.__kaede_debug__ = {
+      // 既有
+      loadHistory, joinChannel, sendMessage, channelState, ping,
+      // DM / Friends / Channels / Categories / Attachments
+      dm:          { list, open, history, send, markRead },
+      friends:     { list, sendRequest, accept, remove },
+      channels:    { list, create, update, delete, joinWithPassword },
+      categories:  { list, create, update, delete },
+      attachments: { upload, download },
+      messages:    { sendWithAttachments },
+      // 本轮新增
+      typing:      { send(ch) },
+      reaction:    { send(ch, targetTs, emoji, action='add') },
+      presence:    { set(status) },
+      events:      { list(type?), raw(), clear() },  // 从 __kaede_events__ 读取
+    }
+
+### 1.5 [test-hook] 全局 ClientEvent 捕获机制（重要基础设施）
+
+App.tsx 在 initWasm() 之后、MainView mount 之前，patch JsClient 实例的 setOnEvent 方法：
+
+    const c0 = getClient()
+    if (c0 && !c0.__kdPatched) {
+      const orig = c0.setOnEvent.bind(c0)
+      c0.setOnEvent = (cb) => {
+        const wrapper = (raw) => {
+          (window).__kaede_events__.push(raw)  // 原始 JSON 推入
+          return cb(raw)                       // 原有回调照常走
+        }
+        return orig(wrapper)
+      }
+      c0.__kdPatched = true
+    }
+
+**设计要点**：
+- 不改 MainView，事件处理逻辑不受影响
+- 单实例 patch（__kdPatched 幂等标记），避免重复包装
+- 时机：initWasm() 之后，因为 ClientEvent 是 wasm 内部 emit 的，patch JS 侧包装就能捕获全部
+- 存储格式：原始 JSON 字符串（__kaede_events__），events.list() 里再做 JSON.parse
+- 清理：events.clear() 测试步骤间隔离
+
+**依赖此机制的测试**：t26（Typing/Reaction/Presence）、t27（私密频道消息 + reaction）
+
+## 2. 发现的产品决策点（需用户拍板）
+
+### 2.1 MLS 前向安全 vs 历史可读性（最早 HANDOFF 第九部分提及，本轮 e2e 实证）
+
+**测试现象**（t28 第一版 FAIL → 修复语义后 PASS）：
+- u0 先登录，epoch=1，发 10 条消息 → 密文用 epoch=1 的 channel key 加密
+- u1 后加入 → add_member 让 epoch 前进到 2
+- u1 用 epoch=2 的 key 解 epoch=1 的密文 → 全部失败 → loadHistory 返回空
+
+**结论**：这不是 bug，是 MLS 前向安全的正确行为。后加入的成员无法解密加入前的历史。
+
+**产品决策选项**：
+- A. 接受（现状）：新成员看不到加入前的历史，符合 MLS 语义
+- B. 引入 key 托管或历史密钥轮转：牺牲部分前向安全换取历史可读性
+- C. Discord 风格：加入后能看全部历史，但那意味着消息加密必须用长期密钥（非 MLS）
+
+测试 t28 语义改为「同 epoch 内跨用户历史」，符合现状。
+
+### 2.2 前端 typing 指示器 / reaction 徽章 UI 未接线
+
+**现状**：
+- Rust 层全就绪（send_typing / send_reaction / send_edit / send_delete / set_presence）
+- wasm 桥全暴露（本轮补齐）
+- 前端 UI 完全没接：RichTextInput 不发 typing，MainView 不显示 typing 指示器，消息上不显示 reaction 徽章
+
+**属于产品决策**（UI 位置 / 消失时间 / 显示用户名 / emoji 选择器等），本轮未做，留后续。
+
+### 2.3 Edit/Delete 只发不 fold
+
+**现状**：
+- room.rs 有 send_edit / send_delete（走 send_op_envelope → 频道/私密/DM 三条路径）
+- EditPayload / DeletePayload 定义完整
+- 接收方 loadHistory 没有 fold 逻辑：收到 EditPayload 后不会更新对应消息，收到 DeletePayload 不会删除
+
+**要做**：在 load_history 里按 ts 顺序 fold，把 target_ts 对应的消息替换/删除。工作量约 1-2h，本轮跳过。
+
+### 2.4 前端「加入私密频道」UI 缺失
+
+**现状**：
+- 创建私密频道 UI 完整（CreateChannelDialog 有 is_private + password）
+- 加入别人的私密频道没有 UI：用户点击私密频道时，如果没有 group，前端直接 try join（无密码），必然 401
+- wasm 桥 joinChannelWithPassword 本轮补齐，前端只要加个弹窗输入密码即可
+
+**要做**：MainView 频道点击 → try join → catch 401 → 弹密码框 → 重试。约 30 分钟。
+
+## 3. 测试基础设施改进
+
+### 3.1 run.cjs 注册表从 15 → 17 个
+
+分类：
+- crypto: pq
+- mls: t1, t2, t10, t28
+- network: t3, t11, t13
+- media: t4, t5, t6, t7, t8, t9, t20
+- session: t12
+- dm: t14
+- friends: t22
+- channels: t23, t27
+- attachments: t25
+- ui: t21, t24, t26
+
+快捷跑法：
+    node e2e/run.cjs --skip-media          # 17 个非媒体测试
+    node e2e/run.cjs --only=friends        # 好友相关
+    node e2e/run.cjs --only=t26            # 单个
+    node e2e/run.cjs --json                # 机器可读
+
+### 3.2 事件捕获机制对后续测试的价值
+
+任何涉及「客户端事件流」的测试都可以用：
+
+    await page.evaluate(() => window.__kaede_debug__.events.clear())
+    // ... 触发动作
+    const evs = await page.evaluate(() => window.__kaede_debug__.events.list())
+    const matched = evs.filter(e => e.SomeEventName)
+
+不需要改动 MainView、不需要 DOM 断言、不受 UI 迭代影响。这是本轮最值钱的基础设施。
+
+## 4. 已知限制清单（下一轮待办）
+
+按价值排序：
+
+| # | 项目 | 价值 | 工作量 |
+|---|------|------|--------|
+| 1 | 前端 typing 指示器（RichTextInput 2s debounce + MainView 显示 3s 消失） | 高（体验） | 30 min |
+| 2 | 前端 reaction 徽章（hover 出👍按钮 + 消息下显示已有 reaction） | 高（体验） | 1h |
+| 3 | 加入私密频道 UI 弹窗（点击频道 → 401 → 弹密码框） | 中 | 30 min |
+| 4 | Edit/Delete payload fold（接收方应用操作） | 中（功能缺失） | 1-2h |
+| 5 | 全量 media 回归（t4-t9, t20，约 30 分钟） | 高（回归） | 30 min（单跑） |
+| 6 | HANDOFF 里多处「14/14 e2e」过时引用更新 | 低 | 10 min |
+| 7 | 私密频道成员列表 UI（list_channel_members 桥已就绪，UI 无） | 低 | 1h |
+
+## 5. 本会话的教训
+
+### 5.1 从日志反推错误路径比读文档快
+
+test-26 第一次 FAIL 时，u1 收到 AppMessageReceived（一个合法事件）而不是预期的 ChannelMessage。如果只按文档推断「Reaction 应该走 ChannelMessage」，会一直在 room.rs 里找 bug。实际是：
+- 公开频道走 MLS broadcast → 服务端发 MlsAppMessage → 客户端解出 AppMessageReceived
+- 私密频道走 0x03 → 服务端发 ChannelMessage 密文 → 客户端解出 ChannelMessage
+
+真正的问题在 u0 侧：room.rs 判断条件让公开频道错误走了 0x03 路径，服务端拒绝。修复后 u1 收到 AppMessageReceived 才是对的。
+
+### 5.2 测试先跑，看 log 再断言，不要先猜
+
+t25 附件测试的「软断言：u1 历史未带附件元数据」一开始看起来像 bug，实际是 UI 走单独请求，不致命。如果先按「必须带元数据」写死断言，就会误报。
+
+做法：断言分层——硬断言测「必须为真」，软断言测「理论上应该，但可能因架构原因不同」，软失败只 warn。
+
+### 5.3 跨用户 e2e 的 epoch 时序必须显式等
+
+t26/t27/t28 都需要「双方 epoch 对齐」才能测跨用户事件。裸 waitForTimeout(2000) 不够，服务端 Welcome + Commit 有时需要 5-8 秒。测试里用 waitForTimeout(6000) + channelState.epoch 软断言。
+
+### 5.4 密码校验服务的限流是测试陷阱
+
+channels.rs join_channel 限流：0.5/s cap=3（per uid）+ 0.1/s cap=3（per uid+channel）+ 0.1/s cap=5（per ip+channel）。连续两次 join（错误密码 + 正确密码）会触发限流返回 429。
+
+做法：错误密码和正确密码之间 waitForTimeout(1500)。
+
+## 6. 给接手方的建议
+
+**如果继续做功能测试**：
+1. 先跑 node e2e/run.cjs --skip-media 确认 17/17 绿
+2. 用 __kaede_debug__.events 机制做事件级测试，不要碰 DOM
+3. 跨用户场景都要等 epoch 对齐（软断言不够用就硬断言）
+4. 密码类测试注意限流
+
+**如果做前端 UI**：
+1. typing 指示器：RichTextInput.onChange 里 2 秒 debounce 调 client.sendTyping(currentChannel)；MainView 监听 ev.Typing 存到 store，3 秒自动清除
+2. reaction 徽章：消息 hover 显示一个 👍 按钮 → client.sendReaction(currentChannel, msg.ts, '👍', 'add')；MainView 监听 ev.AppMessageReceived（公开频道）或 ev.ChannelReaction（私密频道），解出 ReactionPayload 后按 msg.ts 更新 UI
+3. 加入私密频道：频道列表点击 → try client.joinChannel(ch) → catch Http 401 → 弹密码框 → client.joinChannelWithPassword(ch, pw)
+
+**如果做 Edit/Delete fold**：
+1. room.rs::load_history 里改 decode_history_op 之后的流程：先按 ts 顺序排，再遍历，遇到 EditPayload 就替换 target_ts 对应的消息，遇到 DeletePayload 就标记删除
+2. 发送路径已经对，不需要改
+3. test-29-edit-delete.cjs：u0 发消息 → u0 edit → u1 loadHistory 看到新文本 → u0 delete → u1 loadHistory 看不到
+
+## 7. 本会话最终状态
+
+- HEAD: a0301ac (ui-rewrite) + 本次 commit
+- e2e 非媒体: 17/17 全绿
+- 新增测试: t22 / t23 / t24 / t25 / t26 / t27 / t28（7 个）
+- 真 bug 修复: 1 个（send_reaction 公开频道路径）
+- 基础设施: 事件捕获 + __kaede_debug__ 6 个新命名空间 + run.cjs 分类化
+- 待决策: MLS 前向安全（产品层）、前端 UI 接线（产品层）、Edit/Delete fold（功能层）

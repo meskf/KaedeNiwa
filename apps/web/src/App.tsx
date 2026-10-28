@@ -146,6 +146,8 @@ export default function App() {
         update: async (id: string, name?: string | null, category_id?: string | null) =>
                   parseRaw(await reqClient().updateChannel(id, name, category_id)),
         delete: async (id: string) => reqClient().deleteChannel(id),
+        joinWithPassword: async (id: string, password: string) =>
+                  reqClient().joinChannelWithPassword(id, password),
       },
 
       categories: {
@@ -222,3 +224,4 @@ export default function App() {
     </>
   )
 }
+
