@@ -21,13 +21,13 @@ function calcBitrate(width: number, height: number, fps: number): number {
 }
 
 export const VIDEO_PRESETS: VideoPreset[] = [
-  { id: '4k60',   label: '4K 60fps',      width: 3840, height: 2160, fps: 60, bitrate: calcBitrate(3840, 2160, 60) },
-  { id: '4k30',   label: '4K 30fps',      width: 3840, height: 2160, fps: 30, bitrate: calcBitrate(3840, 2160, 30) },
-  { id: '1440p60',label: '1440p 60fps',   width: 2560, height: 1440, fps: 60, bitrate: calcBitrate(2560, 1440, 60) },
-  { id: '1080p60',label: '1080p 60fps',   width: 1920, height: 1080, fps: 60, bitrate: calcBitrate(1920, 1080, 60) },
-  { id: '1080p30',label: '1080p 30fps',   width: 1920, height: 1080, fps: 30, bitrate: calcBitrate(1920, 1080, 30) },
-  { id: '720p30', label: '720p 30fps',    width: 1280, height: 720,  fps: 30, bitrate: calcBitrate(1280, 720, 30) },
-  { id: '480p30', label: '480p 30fps（弱网）', width: 854, height: 480, fps: 30, bitrate: calcBitrate(854, 480, 30) },
+  { id: '4k60',   label: '3840x2160 60fps',      width: 3840, height: 2160, fps: 60, bitrate: calcBitrate(3840, 2160, 60) },
+  { id: '4k30',   label: '3840x2160 30fps',      width: 3840, height: 2160, fps: 30, bitrate: calcBitrate(3840, 2160, 30) },
+  { id: '1440p60',label: '2560x1440 60fps',   width: 2560, height: 1440, fps: 60, bitrate: calcBitrate(2560, 1440, 60) },
+  { id: '1080p60',label: '1920x1080 60fps',   width: 1920, height: 1080, fps: 60, bitrate: calcBitrate(1920, 1080, 60) },
+  { id: '1080p30',label: '1920x1080 30fps',   width: 1920, height: 1080, fps: 30, bitrate: calcBitrate(1920, 1080, 30) },
+  { id: '720p30', label: '1280x720 30fps',    width: 1280, height: 720,  fps: 30, bitrate: calcBitrate(1280, 720, 30) },
+  { id: '480p30', label: '854x480 30fps', width: 854, height: 480, fps: 30, bitrate: calcBitrate(854, 480, 30) },
 ]
 
 export const DEFAULT_PRESET_ID = '1080p60'

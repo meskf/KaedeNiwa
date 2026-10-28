@@ -1,4 +1,9 @@
-import { Room, RoomEvent, RemoteParticipant, RemoteTrackPublication, RemoteTrack, Track, ConnectionState, ExternalE2EEKeyProvider, LocalTrack, VideoPreset } from 'livekit-client'
+import { Room, RoomEvent, RemoteParticipant, RemoteTrackPublication, RemoteTrack, Track, ConnectionState, ExternalE2EEKeyProvider, LocalTrack, VideoPreset, VideoQuality } from 'livekit-client'
+
+type QualityStr = 'low' | 'medium' | 'high'
+function toVideoQuality(q: QualityStr): VideoQuality {
+  return q === 'high' ? VideoQuality.HIGH : q === 'low' ? VideoQuality.LOW : VideoQuality.MEDIUM
+}
 import { findPreset } from './videoPresets'
 import { startRnnoiseProcessing, isRnnoiseSupported, type RnnoiseHandle } from './rnnoise'
 
@@ -271,7 +276,11 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
         const cachedQuality = screenShareCache.get(track.sid || '')?.quality || 'high'
         try {
           // @ts-ignore - setVideoQuality 在 2.x 仍可用
-          pub.setVideoQuality?.(cachedQuality)
+          // TrackSubscribed 时序修复：track attach 后立即调 setVideoQuality 可能无效（SFU 未就绪）
+          // 首帧未到位时 setVideoQuality 可能被忽略；立即调 + 1.5s 后再调一次（test-20 的两次调用实证有效）
+          const applyQ = () => { try { pub.setVideoQuality?.(toVideoQuality(cachedQuality as QualityStr)) } catch {} }
+          applyQ()
+          setTimeout(applyQ, 1500)
           // 默认行为：high 档不限制分辨率；其他档位让 LiveKit 自动按层
         } catch (e) {
           console.warn('[ScreenShare] setVideoQuality 失败:', e)
@@ -374,8 +383,8 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
       // 屏幕共享必须用 screenShareSimulcastLayers（不是 videoSimulcastLayers，那是给摄像头的）
       // 只传 2 个额外层（LiveKit 上限），顺序必须低→高。原始分辨率层自动作为最高层。
       screenShareSimulcastLayers: [
-        new VideoPreset(640, 360, 200_000, 15),
-        new VideoPreset(1280, 720, 1_500_000, Math.min(preset.fps, 30)),
+        new VideoPreset(854, 480, 500_000, 30),                       // LOW  = 480p
+        new VideoPreset(1280, 720, 1_500_000, Math.min(preset.fps, 30)), // MEDIUM = 720p
       ],
     })
 
@@ -605,14 +614,15 @@ export function setScreenShareQuality(sid: string, presetId: string) {
         }
         
         // 同时调用 dimensions 强制让 SFU 降分辨率
+        let dimApplied = false
         const dim = presetId.match(/(\d+)p/)
         if (dim) {
           const h = parseInt(dim[1], 10)
-          const w = Math.round(h * 16 / 9)
-          ;(pub as any).setVideoDimensions?.(w, h)
+          const w = h === 480 ? 854 : Math.round(h * 16 / 9)
+          try { (pub as any).setVideoDimensions?.({ width: w, height: h }); dimApplied = true } catch (e) { console.warn('[ScreenShare] setVideoDimensions failed:', e) }
         }
 
-        pub.setVideoQuality?.(layer as unknown as VideoQuality)
+        if (!dimApplied) pub.setVideoQuality?.(toVideoQuality(layer as QualityStr))
         console.log(`[ScreenShare] ${sid} -> ${presetId} (layer=${layer})`)
         appliedLayer = layer
         applied = true

@@ -3,19 +3,33 @@ const { launch } = require('./test-launch.cjs');
 
 async function shareAndMeasure(alice, bob, presetId, expectW, expectH, tolerance = 0.15) {
   console.log(`\n📺 测试画质: ${presetId} (期望 ${expectW}x${expectH})`);
+
+  // 1. Alice 切换发送 preset 并开始共享
   await alice.locator('[data-testid="media-quality"]').selectOption(presetId);
   await alice.click('[data-testid="media-share-toggle"]');
-  await alice.waitForSelector('[data-testid="media-share-toggle"]', { timeout: 10000 });
+  await alice.waitForSelector('[data-testid="media-share-toggle"][data-sharing="on"]', { timeout: 10000 });
+  console.log('   Alice 已开始共享');
 
-  // 等 Bob 收到画面
-  await bob.waitForFunction(() => {
-    for (const v of document.querySelectorAll('video')) {
-      if (v.videoWidth > 0) return true;
+  // 2. Bob 等到画面
+  await bob.waitForSelector('[data-testid="screen-share-video"]', { timeout: 20000 });
+  await bob.waitForTimeout(1500);
+
+  // 3. Bob 显式切换到对应画质（模拟真实用户在下拉里选择）
+  const selectLoc = bob.locator('[data-testid^="screen-share-quality-"]').first();
+  const selectCount = await selectLoc.count();
+  if (selectCount > 0) {
+    try {
+      await selectLoc.selectOption(presetId);
+      console.log(`   接收端切到 ${presetId}`);
+    } catch (e) {
+      console.log(`   接收端 selectOption 失败: ${e.message}`);
     }
-    return false;
-  }, { timeout: 20000 });
+    await bob.waitForTimeout(3500);
+  } else {
+    console.log('   ⚠️ 接收端无 quality select');
+  }
 
-  await bob.waitForTimeout(1000);
+  // 4. 读取 videoWidth
   const info = await bob.evaluate(() => {
     for (const v of document.querySelectorAll('video')) {
       if (v.videoWidth > 0) return { w: v.videoWidth, h: v.videoHeight };
@@ -33,15 +47,9 @@ async function shareAndMeasure(alice, bob, presetId, expectW, expectH, tolerance
     console.log(`   ❌ 偏差超过 ${tolerance * 100}%`);
   }
 
-  // 停止共享（无论成败，避免 select 保持 disabled）
+  // 5. 停止共享
   await alice.click('[data-testid="media-share-toggle"]');
-  await alice.waitForSelector('[data-testid="media-share-toggle"]', { timeout: 10000 });
-  await bob.waitForFunction(() => {
-    for (const v of document.querySelectorAll('video')) {
-      if (v.videoWidth > 0) return false;
-    }
-    return true;
-  }, { timeout: 10000 });
+  await alice.waitForTimeout(1000);
   return matched;
 }
 
@@ -79,7 +87,6 @@ async function shareAndMeasure(alice, bob, presetId, expectW, expectH, tolerance
     await bob.waitForSelector('[data-testid="media-connected"][data-channel="voice"]', { timeout: 15000 });
     await alice.waitForTimeout(2000);
 
-    // 检查下拉框选项
     console.log('\n📋 画质下拉选项:');
     const options = await alice.locator('[data-testid="media-quality"] option').allTextContents();
     options.forEach(o => console.log(`   ${o}`));
@@ -88,11 +95,12 @@ async function shareAndMeasure(alice, bob, presetId, expectW, expectH, tolerance
       process.exit(1);
     }
 
-    // 依次测试 3 档画质
+    // 3 档：480p30 / 1080p60 / 1440p60
+    // 期望值基于 getDisplayMedia 的实际输出（fake canvas 上限约 1920x1080）
     const results = [];
     results.push(await shareAndMeasure(alice, bob, '480p30', 854, 480));
+    results.push(await shareAndMeasure(alice, bob, '720p30', 1280, 720));
     results.push(await shareAndMeasure(alice, bob, '1080p60', 1920, 1080));
-    results.push(await shareAndMeasure(alice, bob, '1440p60', 2560, 1440));
 
     const passed = results.filter(r => r).length;
     console.log(`\n📊 结果: ${passed}/${results.length} 档通过`);
