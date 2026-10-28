@@ -433,7 +433,7 @@ async fn publish_keypackages(
     }
     for pkg in &req.packages {
         let bytes = base64_decode(pkg)?;
-        if bytes.len() > 8192 {
+        if bytes.len() > 32768 { // PQC: ML-DSA-44 KP 约 8.6KB，放宽至 32KB 防误杀
             return Err(ApiError::BadRequest("keypackage too large".into()));
         }
         // C8: 校验 KP 内部 credential 与 auth uid 一致。
