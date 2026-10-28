@@ -273,9 +273,6 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
           // @ts-ignore - setVideoQuality 在 2.x 仍可用
           pub.setVideoQuality?.(cachedQuality)
           // 默认行为：high 档不限制分辨率；其他档位让 LiveKit 自动按层
-          if (cachedQuality === 'high') {
-            ;(pub as any).setVideoDimensions?.(99999, 99999)
-          }
         } catch (e) {
           console.warn('[ScreenShare] setVideoQuality 失败:', e)
         }
@@ -374,14 +371,12 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
       source: Track.Source.ScreenShare,
       simulcast: true,
       screenShareEncoding: { maxBitrate: preset.bitrate, maxFramerate: preset.fps },
-      videoSimulcastLayers: [
-        new VideoPreset(3840, 2160, 15_000_000, preset.fps),
-        new VideoPreset(1920, 1080, 5_000_000, Math.min(preset.fps, 30)),
-        new VideoPreset(1280, 720, 1_500_000, Math.min(preset.fps, 30)),
-        new VideoPreset(854, 480, 500_000, 30),
+      // 屏幕共享必须用 screenShareSimulcastLayers（不是 videoSimulcastLayers，那是给摄像头的）
+      // 只传 2 个额外层（LiveKit 上限），顺序必须低→高。原始分辨率层自动作为最高层。
+      screenShareSimulcastLayers: [
         new VideoPreset(640, 360, 200_000, 15),
+        new VideoPreset(1280, 720, 1_500_000, Math.min(preset.fps, 30)),
       ],
-      degradationPreference: 'maintain-resolution',
     })
 
     // 系统/标签页音频（用户勾选"共享音频"时才有）—— 独立发布
@@ -617,7 +612,7 @@ export function setScreenShareQuality(sid: string, presetId: string) {
           ;(pub as any).setVideoDimensions?.(w, h)
         }
 
-        pub.setVideoQuality?.(layer as any)
+        pub.setVideoQuality?.(layer as unknown as VideoQuality)
         console.log(`[ScreenShare] ${sid} -> ${presetId} (layer=${layer})`)
         appliedLayer = layer
         applied = true
