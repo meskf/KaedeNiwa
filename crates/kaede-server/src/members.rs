@@ -164,6 +164,11 @@ async fn update_member(
         };
         let new_op_str = req.op.as_deref().unwrap_or("op2");
         let my_rank = rank(&my_op);
+
+        // S-8.1: 禁止 op5 降级自己（唯一服主自杀后只能靠 CLI promote 恢复）
+        if is_self && my_op == "op5" && new_op_str != "op5" {
+            return Err(ApiError::Unauthorized);
+        }
         if rank(new_op_str) > my_rank {
             return Err(ApiError::Unauthorized);
         }
