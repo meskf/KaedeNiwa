@@ -94,3 +94,5 @@ apps/web/test-pq-e2e-report-*.txt
 # Chaos test runtime reports
 apps/web/chaos-*-report-*.json
 apps/web/e2e/chaos-*-report-*.json
+
+apps/web/_chaos2-run.log

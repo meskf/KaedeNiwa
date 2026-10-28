@@ -561,7 +561,10 @@ async fn join_channel(
                     "join_channel: re-broadcast welcome request for {} to authority",
                     id
                 );
-                notify_authority(&state, &id, &uid, kp_b64, &others).await;
+                let online = notify_authority(&state, &id, &uid, kp_b64, &others).await;
+                if !online {
+                    return Err(ApiError::Conflict("solo channel: no online authority".into()));
+                }
             }
         }
         return Ok(StatusCode::NO_CONTENT);
@@ -625,7 +628,10 @@ async fn join_channel(
                 "solo channel: client must build own group".into(),
             ));
         }
-        notify_authority(&state, &id, &uid, &kp_b64, &members).await;
+        let online = notify_authority(&state, &id, &uid, &kp_b64, &members).await;
+        if !online {
+            return Err(ApiError::Conflict("solo channel: no online authority".into()));
+        }
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -640,7 +646,7 @@ async fn notify_authority(
     requester: &UserId,
     key_package_b64: &str,
     members: &[(String,)],
-) {
+) -> bool {
     for (member_id,) in members {
         let target = UserId::new(member_id);
         let sent = state.send_to(
@@ -658,7 +664,7 @@ async fn notify_authority(
                 requester,
                 channel_id
             );
-            return;
+            return true;
         }
     }
 
@@ -672,7 +678,7 @@ async fn notify_authority(
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("join_channel: encode pending authority request: {}", e);
-                return;
+                return false;
             }
         };
         if let Err(e) = crate::db::enqueue_envelope(
@@ -700,6 +706,7 @@ async fn notify_authority(
             requester
         );
     }
+    false
 }
 
 #[derive(Serialize)]
