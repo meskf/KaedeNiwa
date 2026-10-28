@@ -7,7 +7,7 @@ import { DynamicBackground } from './components/DynamicBackground'
 
 export default function App() {
 
-  
+
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
   const [dynamicBg, setDynamicBg] = useState(() => localStorage.getItem('kaede-dynamic-bg') === 'true')
 
@@ -85,34 +85,54 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    const parseRaw = (raw: any) => typeof raw === 'string' ? JSON.parse(raw) : raw
+    const reqClient = () => {
+      const c = getClient()
+      if (!c) throw new Error('client not ready')
+      return c as any
+    }
     ;(window as any).__kaede_debug__ = {
-      loadHistory: async (ch: string, limit = 50) => {
-        const c = getClient()
-        if (!c) throw new Error('client not ready')
-        const raw = await c.load_history(ch, limit)
-        const arr = typeof raw === 'string' ? JSON.parse(raw) : raw
-        return Array.isArray(arr) ? arr : { raw }
-      },
-      joinChannel: async (ch: string) => {
-        const c = getClient()
-        if (!c) throw new Error('client not ready')
-        return await c.join_channel(ch)
-      },
+      loadHistory: async (ch: string, limit = 50) => parseRaw(await reqClient().load_history(ch, limit)),
+      joinChannel: async (ch: string) => reqClient().join_channel(ch),
       channelState: async (ch: string) => {
         const c = getClient()
         if (!c) return { error: 'client not ready' }
-        try {
-          const s = (c as any).debug_channel_state(ch)
-          return typeof s === 'string' ? JSON.parse(s) : s
-        } catch (e) { return { error: String(e) } }
+        try { return parseRaw((c as any).debug_channel_state(ch)) } catch (e) { return { error: String(e) } }
       },
       ping: () => 'pong',
+
       dm: {
-        list: async () => { const c = getClient(); if (!c) throw new Error('no client'); return await (c as any).listDmConversations(); },
-        open: async (peer: string) => { const c = getClient(); if (!c) throw new Error('no client'); return await (c as any).openDm(peer); },
-        history: async (convId: string, limit = 50) => { const c = getClient(); if (!c) throw new Error('no client'); return await (c as any).dmLoadHistory(convId, limit); },
-        send: async (convId: string, text: string) => { const c = getClient(); if (!c) throw new Error('no client'); return await (c as any).sendDm(convId, text); },
+        list:     async () => parseRaw(await reqClient().listDmConversations()),
+        open:     async (peer: string) => parseRaw(await reqClient().openDm(peer)),
+        history:  async (convId: string, limit = 50) => parseRaw(await reqClient().dmLoadHistory(convId, limit)),
+        send:     async (convId: string, text: string) => reqClient().sendDm(convId, text),
+        markRead: async (convId: string, ts: number) => reqClient().markDmRead(convId, BigInt(ts)),
       },
+
+      friends: {
+        list:        async () => parseRaw(await reqClient().listFriends()),
+        sendRequest: async (peer: string) => reqClient().sendFriendRequest(peer),
+        accept:      async (peer: string) => reqClient().acceptFriend(peer),
+        remove:      async (peer: string) => reqClient().removeFriend(peer),
+      },
+
+      channels: {
+        list:   async () => parseRaw(await reqClient().listChannels()),
+        create: async (name: string, kind: string, category_id?: string | null, is_private?: boolean | null, password?: string | null) =>
+                  parseRaw(await reqClient().createChannel(name, kind, category_id, is_private, password)),
+        update: async (id: string, name?: string | null, category_id?: string | null) =>
+                  parseRaw(await reqClient().updateChannel(id, name, category_id)),
+        delete: async (id: string) => reqClient().deleteChannel(id),
+      },
+
+      categories: {
+        list:   async () => parseRaw(await reqClient().listCategories()),
+        create: async (name: string, position?: number | null) => parseRaw(await reqClient().createCategory(name, position)),
+        update: async (id: string, name?: string | null, position?: number | null) =>
+                  parseRaw(await reqClient().updateCategory(id, name, position)),
+        delete: async (id: string) => reqClient().deleteCategory(id),
+      },
+
       forceDisconnect: async () => {
         const c = getClient()
         if (!c) return { error: 'client not ready' }

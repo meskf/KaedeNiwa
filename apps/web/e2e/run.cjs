@@ -2,11 +2,11 @@
 // apps/web/e2e/run.cjs — 统一测试执行器
 //
 // 用法:
-//   node e2e/run.cjs               # 跑所有
-//   node e2e/run.cjs --skip-media  # 跳过 media (摄像头/麦克风)
-//   node e2e/run.cjs --only=pq     # 只跑 PQC
-//   node e2e/run.cjs --only=mls    # 只跑 MLS 分类
-//   node e2e/run.cjs --json        # 机器可读
+//   node e2e/run.cjs                    # 跑所有
+//   node e2e/run.cjs --skip-media       # 跳过 media (摄像头/麦克风)
+//   node e2e/run.cjs --only=friends     # 只跑 friends 分类
+//   node e2e/run.cjs --only=t22         # 只跑单测
+//   node e2e/run.cjs --json             # 机器可读
 //
 // 退出码: 0 = 全绿, 1 = 有失败
 
@@ -32,6 +32,11 @@ const TESTS = [
   { id: 't12', name: '多 tab',           file: 'test-12-multi-tab.cjs',        category: 'session' },
   { id: 't13', name: 'pending 队列',     file: 'test-13-pending-queue.cjs',    category: 'network' },
   { id: 't14', name: 'DM wasm 桥',       file: 'test-14-dm-wasm.cjs',          category: 'dm' },
+  { id: 't20', name: '接收端画质',       file: 'test-20-receiver-quality.cjs', category: 'media',   media: true },
+  { id: 't21', name: '头像/资料/图标',   file: 'test-21-avatar-ui.cjs',        category: 'ui' },
+  { id: 't22', name: '好友流程',         file: 'test-22-friends-flow.cjs',     category: 'friends' },
+  { id: 't23', name: '分类/频道 CRUD',   file: 'test-23-channel-crud.cjs',     category: 'channels' },
+  { id: 't24', name: '搜索面板',         file: 'test-24-search-palette.cjs',   category: 'ui' },
 ];
 
 const GREEN = '\x1b[32m', RED = '\x1b[31m', YELLOW = '\x1b[33m', GRAY = '\x1b[90m', RESET = '\x1b[0m';
