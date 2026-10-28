@@ -8,7 +8,12 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "build:wasm": "wasm-pack build ../../crates/kaede-client-wasm --target web --out-dir ../../apps/web/src/wasm/pkg"
+    "build:wasm": "wasm-pack build ../../crates/kaede-client-wasm --target web --out-dir ../../apps/web/src/wasm/pkg",
+    "test:e2e": "node e2e/run.cjs",
+    "test:e2e:fast": "node e2e/run.cjs --skip-media",
+    "test:e2e:pq": "node e2e/run.cjs --only=pq",
+    "test:e2e:mls": "node e2e/run.cjs --only=mls",
+    "test:e2e:network": "node e2e/run.cjs --only=network"
   },
   "dependencies": {
     "@lexical/code": "^0.52.0",
