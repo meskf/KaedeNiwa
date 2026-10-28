@@ -58,7 +58,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const setCategories = useChatStore(s => s.setCategories)
   const richInputRef = useRef<RichTextInputHandle | null>(null)
   const { theme, setTheme } = useTheme()
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const [showMembers, setShowMembers] = useState(true)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; uid: string; inVoice: boolean } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -66,6 +66,61 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const [searchOpen, setSearchOpen] = useState(false)
   const [createDialogCategory, setCreateDialogCategory] = useState<string | null | undefined>(undefined)
   const [settingsChannelId, setSettingsChannelId] = useState<string | null>(null)
+
+  // A: category management state
+  const [newCategoryPrompt, setNewCategoryPrompt] = useState(false)
+  const [newCategoryName, setNewCategoryName] = useState('')
+  const [manageCategory, setManageCategory] = useState<{ id: string; name: string } | null>(null)
+  const [manageCategoryName, setManageCategoryName] = useState('')
+
+  const handleManageCategory = (cat: { id: string; name: string }) => {
+    setManageCategory(cat)
+    setManageCategoryName(cat.name)
+  }
+
+  const handleCreateCategory = async () => {
+    const name = newCategoryName.trim()
+    if (!name) return
+    try {
+      const client = getClient()
+      if (!client) return
+      const raw = await client.createCategory(name, undefined)
+      const cat = typeof raw === 'string' ? JSON.parse(raw) : raw
+      setCategories([...categories, cat])
+      setNewCategoryPrompt(false)
+      setNewCategoryName('')
+    } catch (e) { console.error('[create category]', e) }
+  }
+
+  const handleRenameCategory = async () => {
+    if (!manageCategory) return
+    const name = manageCategoryName.trim()
+    if (!name || name === manageCategory.name) {
+      setManageCategory(null)
+      return
+    }
+    try {
+      const client = getClient()
+      if (!client) return
+      const raw = await client.updateCategory(manageCategory.id, name, undefined)
+      const cat = typeof raw === 'string' ? JSON.parse(raw) : raw
+      setCategories(categories.map(c => c.id === cat.id ? cat : c))
+      setManageCategory(null)
+    } catch (e) { console.error('[rename category]', e) }
+  }
+
+  const handleDeleteCategory = async () => {
+    if (!manageCategory) return
+    if (!window.confirm(lang === 'zh' ? '删除这个分区？分区内的频道会变成"未分类"。' : 'Delete this category? Channels inside become uncategorized.')) return
+    try {
+      const client = getClient()
+      if (!client) return
+      await client.deleteCategory(manageCategory.id)
+      setCategories(categories.filter(c => c.id !== manageCategory.id))
+      setChannelList(channelList.map(ch => ch.category_id === manageCategory.id ? { ...ch, category_id: null } : ch))
+      setManageCategory(null)
+    } catch (e) { console.error('[delete category]', e) }
+  }
   const addMemberQueueRef = useRef<Promise<void>>(Promise.resolve())
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -665,17 +720,24 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 <>
                   {sortedCategories.map((cat: any) => {
                     const inCat = channelList.filter(c => c.category_id === cat.id)
-                    if (inCat.length === 0) return null
                     return (
                       <div key={cat.id} className="mb-4 group/cat" data-testid={`category-${cat.id}`}>
                         <div className="mb-2 flex items-center justify-between text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase">
                           <span>{cat.name}</span>
-                          <button
-                            onClick={() => setCreateDialogCategory(cat.id)}
-                            className="opacity-0 group-hover/cat:opacity-100 text-[14px] leading-none hover:text-[var(--text-main)] transition-opacity"
-                            title={t('channel.addChannel')}
-                            data-testid={`category-add-${cat.id}`}
-                          >+</button>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleManageCategory(cat)}
+                              className="opacity-0 group-hover/cat:opacity-100 text-[12px] leading-none hover:text-[var(--text-main)] transition-opacity"
+                              title={lang === 'zh' ? '管理分区' : 'Manage category'}
+                              data-testid={`category-manage-${cat.id}`}
+                            >⚙</button>
+                            <button
+                              onClick={() => setCreateDialogCategory(cat.id)}
+                              className="opacity-0 group-hover/cat:opacity-100 text-[14px] leading-none hover:text-[var(--text-main)] transition-opacity"
+                              title={t('channel.addChannel')}
+                              data-testid={`category-add-${cat.id}`}
+                            >+</button>
+                          </div>
                         </div>
                         {inCat.map((ch: any) => (
                           <div key={ch.id} className="group/ch relative">
@@ -693,6 +755,16 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                       </div>
                     )
                   })}
+                  <div className="mb-4">
+                    <button
+                      onClick={() => setNewCategoryPrompt(true)}
+                      className="w-full text-left px-3 py-1.5 rounded-md text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition-colors flex items-center gap-1.5"
+                      data-testid="new-category-btn"
+                    >
+                      <span className="text-[14px] leading-none">+</span>
+                      <span>{lang === 'zh' ? '新建分区' : 'New Category'}</span>
+                    </button>
+                  </div>
                   {(() => {
                     const uncat = channelList.filter(c => !c.category_id)
                     if (uncat.length === 0) return null
@@ -915,6 +987,55 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           defaultCategoryId={createDialogCategory}
           onClose={() => setCreateDialogCategory(undefined)}
         />
+      )}
+
+      {newCategoryPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={() => setNewCategoryPrompt(false)}>
+          <div className="w-[320px] max-w-full rounded-lg bg-[var(--bg-app)] border border-[var(--bg-active)] shadow-xl p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="text-[14px] font-bold text-[var(--text-main)] mb-3">{lang === 'zh' ? '新建分区' : 'New Category'}</div>
+            <input
+              autoFocus
+              type="text"
+              value={newCategoryName}
+              onChange={(e) => setNewCategoryName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleCreateCategory(); if (e.key === 'Escape') setNewCategoryPrompt(false) }}
+              placeholder={lang === 'zh' ? '分区名称' : 'Category name'}
+              maxLength={64}
+              className="w-full bg-[var(--bg-hover)] rounded px-3 py-2 text-[13px] text-[var(--text-main)] outline-none focus:ring-1 focus:ring-[var(--text-muted)] mb-4"
+              data-testid="new-category-input"
+            />
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setNewCategoryPrompt(false)} className="px-3 py-1.5 rounded text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)]">{lang === 'zh' ? '取消' : 'Cancel'}</button>
+              <button onClick={handleCreateCategory} className="px-4 py-1.5 rounded bg-[var(--bg-active)] text-[12px] font-semibold text-[var(--text-main)] hover:opacity-80" data-testid="new-category-confirm">{lang === 'zh' ? '创建' : 'Create'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {manageCategory && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={() => setManageCategory(null)}>
+          <div className="w-[340px] max-w-full rounded-lg bg-[var(--bg-app)] border border-[var(--bg-active)] shadow-xl p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="text-[14px] font-bold text-[var(--text-main)] mb-3">{lang === 'zh' ? '管理分区' : 'Manage Category'}</div>
+            <input
+              autoFocus
+              type="text"
+              value={manageCategoryName}
+              onChange={(e) => setManageCategoryName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleRenameCategory(); if (e.key === 'Escape') setManageCategory(null) }}
+              placeholder={lang === 'zh' ? '分区名称' : 'Category name'}
+              maxLength={64}
+              className="w-full bg-[var(--bg-hover)] rounded px-3 py-2 text-[13px] text-[var(--text-main)] outline-none focus:ring-1 focus:ring-[var(--text-muted)] mb-4"
+              data-testid="manage-category-input"
+            />
+            <div className="flex justify-between items-center">
+              <button onClick={handleDeleteCategory} className="px-3 py-1.5 rounded text-[12px] text-red-500 hover:bg-red-500/5" data-testid="manage-category-delete">{lang === 'zh' ? '删除分区' : 'Delete'}</button>
+              <div className="flex gap-2">
+                <button onClick={() => setManageCategory(null)} className="px-3 py-1.5 rounded text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)]">{lang === 'zh' ? '取消' : 'Cancel'}</button>
+                <button onClick={handleRenameCategory} className="px-4 py-1.5 rounded bg-[var(--bg-active)] text-[12px] font-semibold text-[var(--text-main)] hover:opacity-80" data-testid="manage-category-save">{lang === 'zh' ? '保存' : 'Save'}</button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {settingsChannelId && (
