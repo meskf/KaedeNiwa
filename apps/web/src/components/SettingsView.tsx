@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAuthStore } from '../stores/auth'
+import { useMembersStore } from '../stores/members'
 import { useServerStore } from '../stores/server'
 import { useChatStore } from '../stores/chat'
 import { useI18n } from '../stores/i18n'
@@ -30,6 +31,35 @@ export function SettingsView() {
   }, [profile.name, profile.description])
 
   const dirty = profileName !== profile.name || profileDesc !== profile.description
+
+  // B: members 管理
+  const members = useMembersStore(s => s.members)
+  const membersLoading = useMembersStore(s => s.loading)
+  const fetchMembers = useMembersStore(s => s.fetch)
+  const updateOp = useMembersStore(s => s.updateOp)
+  const [savingOp, setSavingOp] = useState<string>('')
+  const [opError, setOpError] = useState<string>('')
+
+  useEffect(() => {
+    fetchMembers(token)
+  }, [token])
+
+  const myMember = members.find(m => m.login_id === loginId)
+  const myLevel = myMember ? parseInt(myMember.op.replace('op', ''), 10) : 0
+
+  const handleOpChange = async (targetId: string, newOp: string) => {
+    if (savingOp) return
+    setSavingOp(targetId)
+    setOpError('')
+    const r = await updateOp(token, targetId, newOp)
+    setSavingOp('')
+    if (!r.ok) {
+      setOpError(r.error === 'forbidden'
+        ? (lang === 'zh' ? '权限不足（需 op4+ 且只能改比自己级别低的人）' : 'Insufficient permission')
+        : (r.error || 'failed'))
+      setTimeout(() => setOpError(''), 4000)
+    }
+  }
 
   const handleSaveServer = async () => {
     if (!dirty || saving) return
@@ -135,6 +165,49 @@ export function SettingsView() {
               {saving ? (lang === 'zh' ? '保存中...' : 'Saving...') : (lang === 'zh' ? '保存' : 'Save')}
             </button>
           </div>
+        </div>
+      </section>
+
+      <section className="mb-8">
+        <h2 className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-3">{lang === 'zh' ? '成员' : 'Members'}</h2>
+        <div className="rounded-lg bg-[var(--bg-hover)] divide-y divide-[var(--bg-active)]">
+          {membersLoading && (
+            <div className="px-4 py-3 text-[12px] text-[var(--text-muted)]">{lang === 'zh' ? '加载中...' : 'Loading...'}</div>
+          )}
+          {!membersLoading && members.length === 0 && (
+            <div className="px-4 py-3 text-[12px] text-[var(--text-muted)]">{lang === 'zh' ? '暂无成员' : 'No members'}</div>
+          )}
+          {members.map(m => {
+            const isSelf = m.login_id === loginId
+            const targetLevel = parseInt(m.op.replace('op', ''), 10)
+            // 保护：op5 不可降级；不能改自己；只能改比自己级别低的；需 op4+
+            const canEdit = myLevel >= 4 && !isSelf && m.op !== 'op5' && myLevel > targetLevel
+            const isSaving = savingOp === m.login_id
+            return (
+              <div key={m.login_id} className="flex items-center justify-between px-4 py-3 gap-3" data-testid={`member-row-${m.login_id}`}>
+                <div className="flex flex-col min-w-0">
+                  <span className="text-[13px] font-semibold text-[var(--text-main)] truncate">{m.nickname || m.login_id}</span>
+                  <span className="text-[11px] text-[var(--text-muted)] truncate">{m.login_id}{isSelf ? (lang === 'zh' ? ' (你)' : ' (you)') : ''}</span>
+                </div>
+                <select
+                  value={m.op}
+                  disabled={!canEdit || isSaving}
+                  onChange={(e) => handleOpChange(m.login_id, e.target.value)}
+                  className="bg-[var(--bg-active)] rounded px-2 py-1 text-[12px] text-[var(--text-main)] outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                  data-testid={`member-op-${m.login_id}`}
+                >
+                  <option value="op1">{lang === 'zh' ? 'op1 访客' : 'op1 Guest'}</option>
+                  <option value="op2">{lang === 'zh' ? 'op2 成员' : 'op2 Member'}</option>
+                  <option value="op3">{lang === 'zh' ? 'op3 普管' : 'op3 Moderator'}</option>
+                  <option value="op4">{lang === 'zh' ? 'op4 超管' : 'op4 Admin'}</option>
+                  <option value="op5">{lang === 'zh' ? 'op5 服主' : 'op5 Owner'}</option>
+                </select>
+              </div>
+            )
+          })}
+          {opError && (
+            <div className="px-4 py-2 text-[12px] text-red-500" data-testid="member-op-error">{opError}</div>
+          )}
         </div>
       </section>
 
