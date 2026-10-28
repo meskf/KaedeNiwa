@@ -197,6 +197,7 @@ export function SettingsView() {
             </button>
             <input
               ref={avatarInputRef}
+              data-testid="settings-avatar-file"
               type="file"
               accept="image/*"
               className="hidden"
@@ -304,6 +305,7 @@ export function SettingsView() {
               </button>
               <input
                 ref={iconInputRef}
+                data-testid="settings-server-icon-file"
                 type="file"
                 accept="image/*"
                 className="hidden"
