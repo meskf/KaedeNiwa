@@ -80,3 +80,10 @@ apps/web/extract*.cjs
 /screenshots/
 /server-*.log
 apps/web/fix-r6.mjs
+
+# Ad-hoc e2e / probe outputs (not committed)
+apps/web/_baseline.cjs
+apps/web/_sm-verify.*
+apps/web/_pq-e2e*
+apps/web/_login-dump*
+apps/web/_probe*.json

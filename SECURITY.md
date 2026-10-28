@@ -290,11 +290,11 @@ snapshot → 拿到签名私钥**。
 KaedeNiwa's MLS layer uses the **hybrid post-quantum ciphersuite**:
 
 ```
-MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519
+MLS_128_MLKEM768X25519_CHACHA20POLY1305_SHA384_MLDSA44
   KEM  = X-Wing (ML-KEM-768 + X25519 hybrid, draft-ietf-mls-pq-ciphersuites)
-  AEAD = AES-128-GCM
-  Hash = SHA-256
-  Sig  = Ed25519
+  AEAD = ChaCha20-Poly1305
+  Hash = SHA-384
+  Sig  = ML-DSA-44 (NIST Level 2)
 ```
 
 **What this protects:**
@@ -302,7 +302,7 @@ MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519
 - All MLS-derived keys (channel/DM/SFrame/LiveKit E2EE) inherit PQ protection
 
 **What this does NOT (yet) protect:**
-- Identity signatures: Ed25519 (classical) → Phase 2 (ML-DSA-65)
+- Identity signatures: **ML-DSA-44** (PQ) — Phase 2 DONE
 - TLS 1.3 transport: classical → Phase 3 (X25519MLKEM768)
 - DTLS-SRTP: classical, but overlaid by MLS-derived E2EE
 
@@ -311,6 +311,6 @@ MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | MLS KEM → ML-KEM-768 + X25519 hybrid | Done |
-| 2 | MLS identity signatures → ML-DSA-65 | Planned |
+| 2 | MLS identity signatures → ML-DSA-44 | Done |
 | 3 | TLS 1.3 → X25519MLKEM768 | Planned |
 | 4 | Threat model doc + audit | Planned |

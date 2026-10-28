@@ -39,7 +39,7 @@ pub const SFRAME_EXPORT_LABEL: &str = "SFrame 10 MLS";
 
 /// SFrame 密钥长度。
 pub const DEFAULT_CIPHERSUITE: openmls::prelude::Ciphersuite =
-    openmls::prelude::Ciphersuite::MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519;
+    openmls::prelude::Ciphersuite::MLS_128_MLKEM768X25519_CHACHA20POLY1305_SHA384_MLDSA44;
 
 pub const SFRAME_KEY_LEN: usize = 32;
 
@@ -103,5 +103,21 @@ mod pq_size_probe {
             "PQ KeyPackage should be >1000 bytes, got {}",
             kp.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod phase2_probe {
+    use super::*;
+    #[test]
+    fn phase2_keypackage_size() {
+        let id = MlsIdentity::generate("alice").unwrap();
+        let provider = KaedeMlsProvider::new();
+        let kp = id.generate_key_package(&provider).unwrap();
+        println!("Phase2 KeyPackage size = {} bytes", kp.len());
+        println!("Phase2 signature scheme = {:?}", id.ciphersuite().signature_algorithm());
+        assert!(kp.len() > 3500, "ML-DSA-44 KP should be >3500 bytes, got {}", kp.len());
+        assert_eq!(id.ciphersuite().signature_algorithm(),
+            openmls_traits::types::SignatureScheme::MLDSA44);
     }
 }
