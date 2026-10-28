@@ -298,12 +298,15 @@ MLS_128_MLKEM768X25519_CHACHA20POLY1305_SHA384_MLDSA44
 ```
 
 **What this protects:**
+- **TLS 1.3 transport**: hybrid PQ key exchange `X25519MLKEM768` enabled at
+  the Caddy reverse-proxy layer (Caddy >= 2.10 defaults to this; explicitly
+  pinned in `deploy/Caddyfile` to guard against future default changes).
+  Verify with `deploy/verify-pq-tls.ps1`.
 - Hybrid PQ/classical group key establishment (HNDL-safe)
 - All MLS-derived keys (channel/DM/SFrame/LiveKit E2EE) inherit PQ protection
 
 **What this does NOT (yet) protect:**
 - Identity signatures: **ML-DSA-44** (PQ) — Phase 2 DONE
-- TLS 1.3 transport: classical → Phase 3 (X25519MLKEM768)
 - DTLS-SRTP: classical, but overlaid by MLS-derived E2EE
 
 ### Size / bandwidth impact
@@ -327,5 +330,5 @@ Implications:
 |---|---|---|
 | 1 | MLS KEM → ML-KEM-768 + X25519 hybrid | Done |
 | 2 | MLS identity signatures → ML-DSA-44 | Done |
-| 3 | TLS 1.3 → X25519MLKEM768 | Planned |
+| 3 | TLS 1.3 → X25519MLKEM768 | Done |
 | 4 | Threat model doc + audit | Planned |
