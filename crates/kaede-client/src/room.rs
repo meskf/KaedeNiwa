@@ -670,6 +670,18 @@ impl RoomSession {
         peer: &UserId,
     ) -> Result<(), ClientError> {
         let _op_guard = self.mls_op_lock.lock().await;
+
+        // 【事件时序竞态修复】收到 ChannelMemberJoined 事件时，本地可能还没建 group
+        // （自己刚拿到 409 响应但还没处理完）。先自建 group 再 add，否则永远 add 失败。
+        if !self.conn.channel_has_group(channel_id) {
+            tracing::warn!(
+                "[channel_add_peer] {} local group missing (peer={}), self-creating before add",
+                channel_id,
+                peer
+            );
+            self.conn.channel_ensure_group(channel_id)?;
+        }
+
         // 检查成员是否已经在当前频道群组里
         let current_members = self.conn.mls_member_uids();
         if current_members.iter().any(|u| u == peer.as_str()) {
@@ -1533,13 +1545,32 @@ impl RoomSession {
             Ok(Ok(Err(e))) => Err(ClientError::Protocol(format!("welcome failed: {}", e))),
             Ok(Err(_)) => Err(ClientError::Protocol("welcome channel closed".into())),
             Err(_timeout) => {
-                // 超时说明当前无在线权威，直接降级为自建 group 成为新权威
-                tracing::warn!(
-                    "[room] join_channel {} timeout waiting welcome; attempting local rebuild as new authority",
-                    channel_id
-                );
-                self.conn.channel_ensure_group(channel_id)?;
-                Ok(())
+                // 【并发安全】超时后先查成员数：只有确实只有自己时才自建。
+                // 否则 10 人并发 join 时每人 10s 超时都会无脑自建 → 10 个 solo group
+                // → 群组彻底分裂（chaos-1 暴露的问题）。
+                let members = self
+                    .list_channel_members(channel_id)
+                    .await
+                    .unwrap_or_default();
+                if members.len() <= 1 {
+                    tracing::warn!(
+                        "[room] join_channel {} timeout; channel solo ({} members), self-creating group",
+                        channel_id,
+                        members.len()
+                    );
+                    self.conn.channel_ensure_group(channel_id)?;
+                    Ok(())
+                } else {
+                    tracing::error!(
+                        "[room] join_channel {} timeout; channel has {} members, refusing to self-create",
+                        channel_id,
+                        members.len()
+                    );
+                    Err(ClientError::Protocol(format!(
+                        "join timeout: {} other members in channel, cannot self-create group",
+                        members.len()
+                    )))
+                }
             }
         }
     }

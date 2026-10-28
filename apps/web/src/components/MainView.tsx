@@ -181,7 +181,9 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
   useEffect(() => {
     let cancelled = false
-        const CH = currentChannel
+    const CH = currentChannel
+    let attempt = 0
+    const MAX_ATTEMPTS = 3
     const initChannel = async () => {
       if (cancelled) return
       const client = getClient()
@@ -198,8 +200,13 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           setMessages(CH, arr)
         }
       } catch (e) {
-        console.error('[initChannel] join failed:', e)
-        if (!cancelled) {
+        console.error('[initChannel] join failed (attempt ' + attempt + '):', e)
+        if (!cancelled && attempt < MAX_ATTEMPTS) {
+          attempt++
+          console.log('[initChannel] retry ' + attempt + '/' + MAX_ATTEMPTS + ' in 1.5s')
+          setTimeout(initChannel, 1500)
+        } else if (!cancelled) {
+          console.error('[initChannel] giving up after ' + MAX_ATTEMPTS + ' attempts')
           const existing = useChatStore.getState().messages[CH] || []
           if (existing.length === 0) setMessages(CH, [])
         }

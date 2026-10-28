@@ -592,20 +592,28 @@ async fn join_channel(
     .execute(&mut *tx)
     .await?;
 
+    // H18 修复：SELECT others 必须在 INSERT 的**同一事务内**。
+    // 否则 PQC 时代 INSERT→COMMIT→SELECT 的时间窗内，并发者还没提交，
+    // 每个请求都看到 members.is_empty() → 全部返回 409 → 全部自建 group → 群组分裂。
+    //
+    // 注：SQLite WAL 下即使同事务也无法完全消除并发者"同时 BEGIN"的情况，
+    // 但能把时间窗从"COMMIT→新连接 SELECT"缩小到"BEGIN→INSERT→SELECT"（同一毫秒级），
+    // 并发命中率从 ~100% 降到 ~0%。
+    let members: Vec<(String,)> = sqlx::query_as(
+        "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ? \
+         ORDER BY joined_at ASC",
+    )
+    .bind(&id)
+    .bind(uid.as_str())
+    .fetch_all(&mut *tx)
+    .await?;
+
     tx.commit().await?;
 
     // B2：只通知权威成员（最早加入者）执行 add + Welcome（事务外）。
     // 发给所有成员会触发多次独立 add → epoch 分叉。
     if let Some(kp_bytes) = &kp_blob {
         let kp_b64 = crate::db::base64_url(kp_bytes);
-        let members: Vec<(String,)> = sqlx::query_as(
-            "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ? \
-             ORDER BY joined_at ASC",
-        )
-        .bind(&id)
-        .bind(uid.as_str())
-        .fetch_all(&state.pool)
-        .await?;
         if members.is_empty() {
             // Solo：第一个加入者 —— 告知 client 自建 group（409 语义复用）
             tracing::info!(

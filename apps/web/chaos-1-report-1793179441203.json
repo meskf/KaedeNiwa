@@ -1,0 +1,17 @@
+{
+  "ts": 1793179441203,
+  "n_users": 10,
+  "users_registered": 10,
+  "channelstate_calls_ok": 100,
+  "channelstate_calls_total": 100,
+  "epoch_converged": true,
+  "unique_epochs": [
+    9
+  ],
+  "messages_total": 100,
+  "messages_missing": 0,
+  "users_with_gaps": 0,
+  "js_errors": 1,
+  "http_5xx": 0,
+  "pass": false
+}
