@@ -151,48 +151,43 @@ export async function startRnnoiseProcessing(inputTrack: MediaStreamTrack): Prom
             for (let i = 0; i < frames; i++) {
               inp.buf[inp.fill++] = inPlane[i]
               if (inp.fill === frameSize) {
-                // 计算输入 RMS（float 范围 [-1, 1]）
+                // 计算输入 RMS（float 范围 [-1, 1]，仅用于诊断日志）
                 let inRms = 0
                 for (let k = 0; k < frameSize; k++) inRms += inp.buf[k] * inp.buf[k]
                 inRms = Math.sqrt(inRms / frameSize)
 
-                // 兼容处理：直接传归一化浮点数。某些版本期望 int16，但传归一化不会有爆音
-                const procIn = new Float32Array(frameSize)
-                const procOut = new Float32Array(frameSize)
-                for (let k = 0; k < frameSize; k++) procIn[k] = inp.buf[k]
+                // 关键修复：RNNoise 假设输入是 int16-range float（±32768），不是归一化 float（±1）。
+                // 见 @shiguredo/rnnoise-wasm 的 DenoiseState.processFrame 文档：
+                //   "RNNoise は入力音声フレームが 16ビットPCM であると仮定している"
+                // 传归一化值会让 RNNoise 看到极安静的信号，输出被错误衰减。
+                const buf = new Float32Array(frameSize)
+                for (let k = 0; k < frameSize; k++) buf[k] = inp.buf[k] * 32768
 
-                // processFrame(in, out)：返回值是 VAD 概率 (0~1)
+                // processFrame：单参数（就地修改 buf），返回 VAD 概率（0~1）
                 let vad = 0
+                let rnnoiseOk = false
                 try {
-                  vad = state.processFrame(procIn, procOut)
+                  vad = state.processFrame(buf)
+                  rnnoiseOk = true
                 } catch (err: any) {
-                  // 兼容旧版本 API（不传 out 时直接原地修改 in）
-                  const fallback = new Float32Array(procIn)
-                  state.processFrame(fallback)
-                  procOut.set(fallback)
-                  vad = 0.5
+                  console.warn('[rnnoise] processFrame failed:', err)
                 }
 
-                // 动态判断输出幅度：如果 > 2，说明库返回的是 int16 范围，需要缩放
-                let maxOut = 0
-                for (let k = 0; k < frameSize; k++) {
-                  const a = Math.abs(procOut[k])
-                  if (a > maxOut) maxOut = a
-                }
-                const scale = maxOut > 2 ? 32768 : 1
-
+                // 转回 float [-1, 1] + clamp + NaN 兜底
+                const procOut = new Float32Array(frameSize)
                 let outRms = 0
                 for (let k = 0; k < frameSize; k++) {
-                  let v = procOut[k] / scale
-                  if (v > 1) v = 1
+                  let v = rnnoiseOk ? buf[k] / 32768 : inp.buf[k]
+                  if (!Number.isFinite(v)) v = 0
+                  else if (v > 1) v = 1
                   else if (v < -1) v = -1
                   procOut[k] = v
                   outRms += v * v
                 }
                 outRms = Math.sqrt(outRms / frameSize)
 
-                // 【安全兜底】如果降噪后声音比输入小 10 倍以上，强行透传原声，防止死寂
-                if ((inRms > 0.01 && outRms < inRms * 0.1) || (inRms > 0.001 && outRms < 1e-5)) {
+                // 窄兜底：仅在 RNNoise 完全失败（输出全零）且输入有明显信号时透传
+                if (inRms > 0.01 && outRms === 0) {
                   for (let k = 0; k < frameSize; k++) procOut[k] = inp.buf[k]
                   outRms = inRms
                 }
