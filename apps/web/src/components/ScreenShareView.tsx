@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMediaState } from '../hooks/useLiveKitRoom'
 import { setScreenShareQuality } from '../lib/livekit'
+import { VIDEO_PRESETS } from '../lib/videoPresets'
 
 function VideoPane({ share, multi }: { share: any; multi: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -85,9 +86,9 @@ function VideoPane({ share, multi }: { share: any; multi: boolean }) {
             className="p-1.5 text-xs bg-black/60 hover:bg-black/90 text-white rounded-md backdrop-blur-sm outline-none cursor-pointer"
             title="接收画质"
           >
-            <option value="low">360p</option>
-            <option value="medium">720p</option>
-            <option value="high">最高</option>
+            {VIDEO_PRESETS.map(preset => (
+              <option key={preset.id} value={preset.id}>{preset.label}</option>
+            ))}
           </select>
         </div>
       )}

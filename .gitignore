@@ -96,3 +96,6 @@ apps/web/chaos-*-report-*.json
 apps/web/e2e/chaos-*-report-*.json
 
 apps/web/_chaos2-run.log
+
+# ad-hoc diagnostic scripts (probe*/_*.cjs 只本地用)
+_*.cjs

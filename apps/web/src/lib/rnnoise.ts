@@ -156,43 +156,57 @@ export async function startRnnoiseProcessing(inputTrack: MediaStreamTrack): Prom
                 for (let k = 0; k < frameSize; k++) inRms += inp.buf[k] * inp.buf[k]
                 inRms = Math.sqrt(inRms / frameSize)
 
-                // 关键：@shiguredo/rnnoise-wasm 期望 int16 幅度（±32768），不是 normalized float
-                const proc = new Float32Array(frameSize)
-                for (let k = 0; k < frameSize; k++) proc[k] = inp.buf[k] * 32768
+                // 兼容处理：直接传归一化浮点数。某些版本期望 int16，但传归一化不会有爆音
+                const procIn = new Float32Array(frameSize)
+                const procOut = new Float32Array(frameSize)
+                for (let k = 0; k < frameSize; k++) procIn[k] = inp.buf[k]
 
-                state.processFrame(proc)  // 原地修改，返回值是 VAD (忽略)
+                // processFrame(in, out)：返回值是 VAD 概率 (0~1)
+                let vad = 0
+                try {
+                  vad = state.processFrame(procIn, procOut)
+                } catch (err: any) {
+                  // 兼容旧版本 API（不传 out 时直接原地修改 in）
+                  const fallback = new Float32Array(procIn)
+                  state.processFrame(fallback)
+                  procOut.set(fallback)
+                  vad = 0.5
+                }
 
-                // 缩回 float [-1, 1] + clip 保护
+                // 动态判断输出幅度：如果 > 2，说明库返回的是 int16 范围，需要缩放
+                let maxOut = 0
+                for (let k = 0; k < frameSize; k++) {
+                  const a = Math.abs(procOut[k])
+                  if (a > maxOut) maxOut = a
+                }
+                const scale = maxOut > 2 ? 32768 : 1
+
                 let outRms = 0
                 for (let k = 0; k < frameSize; k++) {
-                  let v = proc[k] / 32768
+                  let v = procOut[k] / scale
                   if (v > 1) v = 1
                   else if (v < -1) v = -1
-                  proc[k] = v
+                  procOut[k] = v
                   outRms += v * v
                 }
                 outRms = Math.sqrt(outRms / frameSize)
 
-                // 静音抑制：输入极低时清零（避免 RNNoise 静音段嘶嘶声）
-                if (inRms < 0.003) {
-                  for (let k = 0; k < frameSize; k++) proc[k] = 0
-                  outRms = 0
-                } else if (inRms > 0.01 && outRms < inRms * 0.01) {
-                  // RMS 保护：输入有信号但被压到极小 → pass through 原始 float
-                  for (let k = 0; k < frameSize; k++) proc[k] = inp.buf[k]
+                // 【安全兜底】如果降噪后声音比输入小 10 倍以上，强行透传原声，防止死寂
+                if ((inRms > 0.01 && outRms < inRms * 0.1) || (inRms > 0.001 && outRms < 1e-5)) {
+                  for (let k = 0; k < frameSize; k++) procOut[k] = inp.buf[k]
                   outRms = inRms
                 }
 
-                outq.buf.push(proc)
+                outq.buf.push(procOut)
                 inp.fill = 0
                 processedFrames++
 
                 if (!firstFrameLogged) {
                   firstFrameLogged = true
-                  console.log('[rnnoise] first frame: format=' + format + ' sampleRate=' + sampleRate + ' frames=' + frames + ' channels=' + channels + ' inRms=' + inRms.toFixed(4) + ' outRms=' + outRms.toFixed(4) + ' ratio=' + (inRms > 0 ? (outRms / inRms).toFixed(2) : 'inf'))
+                  console.log('[rnnoise] first frame: format=' + format + ' sampleRate=' + sampleRate + ' frames=' + frames + ' channels=' + channels + ' inRms=' + inRms.toFixed(4) + ' outRms=' + outRms.toFixed(4) + ' vad=' + (typeof vad !== 'undefined' ? vad.toFixed(2) : '?') + ' ratio=' + (inRms > 0 ? (outRms / inRms).toFixed(2) : 'inf'))
                 }
                 if (processedFrames % 50 === 0) {
-                  console.log('[rnnoise] processed=' + processedFrames + ' inRms=' + inRms.toFixed(4) + ' outRms=' + outRms.toFixed(4) + ' ratio=' + (inRms > 0 ? (outRms / inRms).toFixed(2) : 'inf'))
+                  console.log('[rnnoise] processed=' + processedFrames + ' inRms=' + inRms.toFixed(4) + ' outRms=' + outRms.toFixed(4) + ' vad=' + (typeof vad !== 'undefined' ? vad.toFixed(2) : '?') + ' ratio=' + (inRms > 0 ? (outRms / inRms).toFixed(2) : 'inf'))
                 }
               }
             }

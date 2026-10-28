@@ -1,4 +1,4 @@
-import { Room, RoomEvent, RemoteParticipant, RemoteTrackPublication, RemoteTrack, Track, ConnectionState, ExternalE2EEKeyProvider, LocalTrack } from 'livekit-client'
+import { Room, RoomEvent, RemoteParticipant, RemoteTrackPublication, RemoteTrack, Track, ConnectionState, ExternalE2EEKeyProvider, LocalTrack, VideoPreset } from 'livekit-client'
 import { findPreset } from './videoPresets'
 import { startRnnoiseProcessing, isRnnoiseSupported, type RnnoiseHandle } from './rnnoise'
 
@@ -366,11 +366,20 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
     const videoTrack = stream.getVideoTracks()[0]
     if (!videoTrack) throw new Error('无视频轨道')
     
-    // 用 publishTrack 手动控制 simulcast
+    // 开启 simulcast，让接收端能切到不同分辨率层（高/中/低）
+    // 注意：屏幕共享单层的话，接收端调画质会导致 SFU 强制降码率 → 画面糊。
+    // 必须发 simulcast 层，SVC/Simulcast 切层才能做到真正的"分辨率"变化。
     const videoPub = await currentRoom.localParticipant.publishTrack(videoTrack, {
       source: Track.Source.ScreenShare,
-      simulcast: false,
+      simulcast: true,
       screenShareEncoding: { maxBitrate: preset.bitrate, maxFramerate: preset.fps },
+      videoSimulcastLayers: [
+        new VideoPreset(3840, 2160, 15_000_000, preset.fps),
+        new VideoPreset(1920, 1080, 5_000_000, Math.min(preset.fps, 30)),
+        new VideoPreset(1280, 720, 1_500_000, Math.min(preset.fps, 30)),
+        new VideoPreset(854, 480, 500_000, 30),
+        new VideoPreset(640, 360, 200_000, 15),
+      ],
       degradationPreference: 'maintain-resolution',
     })
 
@@ -572,7 +581,7 @@ export async function updateE2EEKey(newKeyB64: string): Promise<void> {
  * - 仅远端共享生效；本地预览（LOCAL-SHARE-）直接 no-op
  * - 依赖 LiveKit simulcast：发布端 startScreenShare 已开启 simulcast
  */
-export function setScreenShareQuality(sid: string, quality: 'low' | 'medium' | 'high') {
+export function setScreenShareQuality(sid: string, presetId: string) {
   if (!currentRoom) return
   if (sid.startsWith('LOCAL-SHARE-')) {
     console.log('[ScreenShare] 本地预览不调 setVideoQuality:', sid)
@@ -588,9 +597,26 @@ export function setScreenShareQuality(sid: string, quality: 'low' | 'medium' | '
     const pub = participant.getTrackPublicationBySid(sid)
     if (pub && pub.source === Track.Source.ScreenShare) {
       try {
-        // @ts-ignore - setVideoQuality 在 2.x 仍可用
-        pub.setVideoQuality?.(quality)
-        console.log(`[ScreenShare] ${sid} -> ${quality}`)
+        // 动态选择层级：LiveKit 只支持 high/medium/low
+        let layer: any = 'high'
+        if (presetId.includes('4k') || presetId.includes('1440p') || presetId.includes('1080p')) {
+          layer = 'high'
+        } else if (presetId.includes('720p')) {
+          layer = 'medium'
+        } else if (presetId.includes('480p') || presetId.includes('360p')) {
+          layer = 'low'
+        }
+        
+        // 同时调用 dimensions 强制让 SFU 降分辨率
+        const dim = presetId.match(/(\d+)p/)
+        if (dim) {
+          const h = parseInt(dim[1], 10)
+          const w = Math.round(h * 16 / 9)
+          ;(pub as any).setVideoDimensions?.(w, h)
+        }
+
+        pub.setVideoQuality?.(layer)
+        console.log(`[ScreenShare] ${sid} -> ${presetId} (layer=${layer})`)
         applied = true
       } catch (e) {
         console.warn('[ScreenShare] setVideoQuality failed:', e)
@@ -601,7 +627,9 @@ export function setScreenShareQuality(sid: string, quality: 'low' | 'medium' | '
   if (!applied) {
     console.warn('[ScreenShare] setScreenShareQuality: publication not found for', sid)
   }
-  screenShareCache.set(sid, { ...info, quality })
+  
+  // 记住用户选择（供下次初始订阅使用）
+  screenShareCache.set(sid, { ...info, quality: presetId as any })
   emit()
 }
 

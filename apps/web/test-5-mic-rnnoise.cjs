@@ -55,7 +55,7 @@ const { launch } = require('./test-launch.cjs');
 
     // 检查 RNNoise 是否加载（console 里应该有）
     await alice.waitForTimeout(2000);
-    const rnnoiseLoaded = aliceLogs.some(l => l.includes('RNNoise] 降噪已启用') || l.includes('RNNoise] ready'));
+    const rnnoiseLoaded = aliceLogs.some(l => l.includes('RNNoise 已启用') || l.includes('RNNoise] ready'));
     if (rnnoiseLoaded) {
       console.log('✅ RNNoise 降噪已加载');
     } else {

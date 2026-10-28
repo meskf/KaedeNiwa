@@ -174,25 +174,34 @@ export function MediaBar({ channelId, compact = false }: Props) {
             >
               <IconSettings className="w-3 h-3" /> 音频设置
             </button>
-            <span className="font-mono">{presetId}</span>
+            <select
+              data-testid="media-quality"
+              value={presetId}
+              onChange={(e) => setPresetId(e.target.value)}
+              disabled={sharing}
+              className="font-mono bg-transparent text-[var(--text-muted)] hover:text-[var(--text-main)] outline-none cursor-pointer text-[10px]"
+            >
+              {VIDEO_PRESETS.map((p: any) => (
+                <option key={p.id} value={p.id}>{p.id}</option>
+              ))}
+            </select>
           </div>
 
-          {/* 底部操作按钮区 */}
-          <div className="flex items-center gap-1.5">
-            {/* 屏幕共享大按钮 */}
+          {/* 底部操作按钮区：5 个等宽 w-8 h-8 图标按钮，均匀分布 */}
+          <div className="flex items-center justify-between gap-1 w-full">
+            {/* 屏幕共享（图标按钮，tooltip 提示） */}
             <button
               data-testid="media-share-toggle"
               data-sharing={sharing ? 'on' : 'off'}
               onClick={handleToggleShare}
-              className={`flex-1 h-8 rounded-md flex items-center justify-center gap-1.5 transition-all text-[11px] font-medium ${
-                sharing 
-                  ? 'bg-red-500 text-white hover:bg-red-600' 
+              className={`w-8 h-8 rounded-md flex items-center justify-center transition-all shrink-0 ${
+                sharing
+                  ? 'bg-red-500 text-white hover:bg-red-600'
                   : 'bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--bg-app)]'
               }`}
               title={sharing ? '停止共享' : '屏幕共享'}
             >
-              <IconMonitor className='w-3.5 h-3.5' />
-              {sharing ? '停止共享' : '屏幕共享'}
+              <IconMonitor className='w-4 h-4' />
             </button>
 
             {/* 麦克风 */}
@@ -208,25 +217,24 @@ export function MediaBar({ channelId, compact = false }: Props) {
               {micOn ? <IconMic className='w-4 h-4'/> : <IconMicOff className='w-4 h-4'/>}
             </button>
 
-            {/* compact-noise-toggle: 降噪（RNNoise），仅麦克风开启时显示 */}
-            {micOn && (
-              <button
-                data-testid="media-noise-toggle"
-                data-noise={noiseOn ? 'on' : 'off'}
-                data-mode={media.noiseMode}
-                onClick={handleToggleNoise}
-                className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors shrink-0 text-[10px] font-bold ${
-                  noiseOn ? 'bg-[var(--text-main)] text-[var(--bg-app)]' : 'bg-[var(--bg-active)] text-[var(--text-muted)] hover:text-[var(--text-main)]'
-                }`}
-                title={
-                  media.noiseMode === 'unsupported'
-                    ? 'RNNoise 需要 Chrome 94+ / Edge / Safari 15.4+'
-                    : noiseOn ? 'RNNoise ON' : 'RNNoise OFF'
-                }
-              >
-                NS
-              </button>
-            )}
+            {/* compact-noise-toggle: 降噪（RNNoise），始终显示；未开麦时禁用 */}
+            <button
+              data-testid="media-noise-toggle"
+              data-noise={noiseOn ? 'on' : 'off'}
+              data-mode={media.noiseMode}
+              onClick={handleToggleNoise}
+              disabled={!micOn}
+              className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors shrink-0 text-[10px] font-bold ${
+                noiseOn ? 'bg-[var(--text-main)] text-[var(--bg-app)]' : 'bg-[var(--bg-active)] text-[var(--text-muted)] hover:text-[var(--text-main)]'
+              } ${!micOn ? 'opacity-40 cursor-not-allowed' : ''}`}
+              title={
+                media.noiseMode === 'unsupported'
+                  ? 'RNNoise 需要 Chrome 94+ / Edge / Safari 15.4+'
+                  : !micOn ? '请先开启麦克风' : noiseOn ? 'RNNoise ON' : 'RNNoise OFF'
+              }
+            >
+              NS
+            </button>
 
             {/* 拒听 */}
             <button
