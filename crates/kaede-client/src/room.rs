@@ -1404,8 +1404,9 @@ impl RoomSession {
     // 频道 / 成员 API（HTTP 代理）
     // ---------------------------------------------------------------------
 
-    /// 列出频道。
-    pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, ClientError> {
+
+
+pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, ClientError> {
         let list = self.http.list_channels().await?;
         {
             let mut map = self

@@ -515,6 +515,7 @@ async fn deliver_pending(state: &AppState, uid: &UserId, tx: &mpsc::Sender<Serve
                 }
                 let ts = i64::from_be_bytes(payload[..8].try_into().expect("8-byte ts prefix"));
                 ServerMessage::ChannelMessage {
+                    id: 0, // pending envelope 旧格式无 id；客户端降级用 ts 去重
                     channel_id: channel_id.unwrap_or_default(),
                     from: UserId::new(from),
                     ts,

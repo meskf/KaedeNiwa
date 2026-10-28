@@ -197,7 +197,18 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         const arr = Array.isArray(parsedHist) ? parsedHist : []
         const existing = useChatStore.getState().messages[CH] || []
         if (existing.length === 0 && arr.length > 0) {
+          // 首次加载（或刷新）：直接覆盖
           setMessages(CH, arr)
+        } else if (arr.length > 0) {
+          // 断连重连场景：合并历史（按 ts 去重），补齐断连期间的消息
+          // 之前只在 existing 为空时覆盖，导致断连用户重连后缺断连期间的消息
+          const existingTs = new Set(existing.map((m: any) => String(m.ts)))
+          const newMsgs = arr.filter((m: any) => !existingTs.has(String(m.ts)))
+          if (newMsgs.length > 0) {
+            console.log('[initChannel] merging ' + newMsgs.length + ' messages after reconnect')
+            const merged = [...existing, ...newMsgs].sort((a: any, b: any) => Number(a.ts) - Number(b.ts))
+            setMessages(CH, merged)
+          }
         }
       } catch (e) {
         console.error('[initChannel] join failed (attempt ' + attempt + '):', e)
@@ -245,6 +256,33 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         if (ev.Joined) {
           const peers = ev.Joined.peers || []
           setServerMembers([loginId, ...peers])
+
+          // 【断连重连修复】currentChannel 没变 → useEffect 不重跑 → initChannel 不跑
+          // → 断连期间别人发的消息永远补不到。这里在每次 WS (re)join 成功后主动拉一次 history
+          // 并按 ts 去重合并。500ms 给 MLS group 建好留时间（PQC Welcome 慢一点）。
+                    const doMerge = (tag: string) => {
+            const curCH = useChatStore.getState().currentChannel
+            if (!curCH) return
+            const c = getClient()
+            if (!c) return
+            c.load_history(curCH, 50).then((hist: any) => {
+              const arr = typeof hist === 'string' ? JSON.parse(hist) : hist
+              if (!Array.isArray(arr) || arr.length === 0) return
+              const existing = useChatStore.getState().messages[curCH] || []
+              const existingTs = new Set(existing.map((m: any) => String(m.ts)))
+              const newMsgs = arr.filter((m: any) => !existingTs.has(String(m.ts)))
+              if (newMsgs.length > 0) {
+                console.log('[reconnect:' + tag + '] merging ' + newMsgs.length + ' messages')
+                const merged = [...existing, ...newMsgs].sort((a: any, b: any) => Number(a.ts) - Number(b.ts))
+                useChatStore.getState().setMessages(curCH, merged)
+              }
+            }).catch((e: any) => {
+              console.warn('[reconnect:' + tag + '] deferred:', String(e).slice(0, 100))
+            })
+          }
+          setTimeout(() => doMerge('t500'), 500)
+          setTimeout(() => doMerge('t2000'), 2000)
+          setTimeout(() => doMerge('t5000'), 5000)
           if (peers.length === 0) {
             try {
               const created = client.ensure_channel(ch)

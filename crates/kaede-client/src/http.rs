@@ -647,7 +647,44 @@ impl HttpApi {
     // 频道
     // -----------------------------------------------------------------
 
-    pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, ClientError> {
+        /// v8：增量拉取 —— 返回 id > since_id 的消息。
+    ///
+    /// 与 load_messages 的区别：
+    ///   - load_messages: before_ts 倒序取历史（滚动加载）
+    ///   - load_messages_since: since_id 正序取增量（断连重连补齐）
+    pub async fn load_messages_since(
+        &self,
+        channel_id: &str,
+        since_id: i64,
+    ) -> Result<Vec<MessageRecord>, ClientError> {
+        let url = format!(
+            "{}/api/messages/{}/since/{}",
+            self.base_url, channel_id, since_id
+        );
+        let token = self.token.lock().unwrap().clone().unwrap_or_default();
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| ClientError::Http {
+                status: 0,
+                message: e.to_string(),
+            })?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let message = resp.text().await.unwrap_or_default();
+            return Err(ClientError::Http { status, message });
+        }
+        let body: MessagesResp = resp.json().await.map_err(|e| ClientError::Http {
+            status: 0,
+            message: e.to_string(),
+        })?;
+        Ok(body.messages)
+    }
+
+pub async fn list_channels(&self) -> Result<Vec<kaede_protocol::Channel>, ClientError> {
         let resp = self
             .http
             .get(format!("{}/api/channels", self.base_url))

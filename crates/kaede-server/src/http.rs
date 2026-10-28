@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/keypackages/{login_id}", get(fetch_keypackage))
         .route("/api/messages", post(post_message))
         .route("/api/messages/{channel_id}", get(get_messages))
+        .route("/api/messages/{channel_id}/since/{since_id}", get(get_messages_since))
         // B2: 消息密文上限 4 MiB（附件在 attachments router 里单独 32 MiB）
         .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
         .with_state(state)
@@ -846,6 +847,7 @@ struct PostMessageReq {
 
 #[derive(Serialize)]
 struct MessageRecord {
+    id: i64,
     ts: i64,
     sender: String,
     ciphertext: String,
@@ -858,6 +860,7 @@ struct MessagesResp {
 
 #[derive(Serialize)]
 struct PostMessageResp {
+    id: i64,
     ts: i64,
 }
 
@@ -948,11 +951,11 @@ async fn post_message(
         )));
     }
 
-    let (ts,): (i64,) = sqlx::query_as(
+    let (ts, id): (i64, i64) = sqlx::query_as(
         "INSERT INTO messages (channel_id, ts, sender, ciphertext) \
          SELECT ?, CASE WHEN ? > COALESCE(MAX(ts), 0) THEN ? ELSE COALESCE(MAX(ts), 0) + 1 END, ?, ? \
          FROM messages WHERE channel_id = ? \
-         RETURNING ts",
+         RETURNING ts, id",
     )
     .bind(&req.channel_id)
     .bind(now)
@@ -1004,7 +1007,7 @@ async fn post_message(
                 ct.len(),
                 recipients.len()
             );
-            return Ok(Json(PostMessageResp { ts }));
+            return Ok(Json(PostMessageResp { id, ts }));
         }
 
         for member in recipients {
@@ -1012,6 +1015,7 @@ async fn post_message(
             let delivered = state.send_to(
                 &target,
                 ServerMessage::ChannelMessage {
+                    id,
                     channel_id: req.channel_id.clone(),
                     from: uid.clone(),
                     ts,
@@ -1040,7 +1044,7 @@ async fn post_message(
 
     // 返回服务器权威 ts：客户端用它落本地“自己发出的消息”，
     // 否则重载时本地客户端 ts 与服务端 ts 不一致会产生重复消息。
-    Ok(Json(PostMessageResp { ts }))
+    Ok(Json(PostMessageResp { id, ts }))
 }
 
 async fn get_messages(
@@ -1084,18 +1088,18 @@ async fn get_messages(
     // 私密频道隐藏“历史遗留”的主群密文（非 0x03 前缀）：
     // 那是旧版本 bug 造成的，所有主群成员都能解；虽然服务端无法重新加密，
     // 至少不再继续下发。
-    let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
+    let rows: Vec<(i64, i64, String, Vec<u8>)> = sqlx::query_as(
         "WITH recent AS ( \
-           SELECT ts, sender, ciphertext, \
+           SELECT id, ts, sender, ciphertext, \
                   SUM(LENGTH(ciphertext)) OVER (ORDER BY ts DESC) AS run_bytes \
            FROM ( \
-             SELECT ts, sender, ciphertext FROM messages \
+             SELECT id, ts, sender, ciphertext FROM messages \
              WHERE channel_id = ? AND ts < ? \
                AND (? = 0 OR substr(ciphertext, 1, 1) = X'03') \
              ORDER BY ts DESC LIMIT ? \
            ) \
          ) \
-         SELECT ts, sender, ciphertext FROM recent \
+         SELECT id, ts, sender, ciphertext FROM recent \
          WHERE run_bytes <= ? ORDER BY ts ASC",
     )
     .bind(&channel_id)
@@ -1109,12 +1113,87 @@ async fn get_messages(
     // SQL 已按时间升序返回
     let out: Vec<MessageRecord> = rows
         .into_iter()
-        .map(|(ts, sender, ct)| MessageRecord {
+        .map(|(id, ts, sender, ct)| MessageRecord {
+            id,
             ts,
             sender,
             ciphertext: base64_url(&ct),
         })
         .collect();
+
+    Ok(Json(MessagesResp { messages: out }))
+}
+
+/// v8：增量拉取 —— 返回 id > since_id 的所有消息（正序）。
+///
+/// 用途：客户端断连重连后，用本地保存的 last_id 调用此接口补齐断连期间
+/// 漏收的消息。与 `get_messages` 的区别：
+///   - get_messages: before_ts 倒序取历史（供滚动加载）
+///   - get_messages_since: since_id 正序取增量（供重连补齐）
+async fn get_messages_since(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((channel_id, since_id)): Path<(String, i64)>,
+) -> Result<Json<MessagesResp>, ApiError> {
+    let uid = authenticate(&state, &headers).await?;
+
+    if !state.check_rate_scoped(&uid, "history_read", 2.0, 10.0) {
+        state.metrics.rate_limited();
+        return Err(ApiError::TooManyRequests(
+            "history read rate limited".into(),
+        ));
+    }
+
+    // 频道必须存在 + 权限检查（与 get_messages 一致）
+    let row: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+        .bind(&channel_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let (is_private_raw,) =
+        row.ok_or_else(|| ApiError::NotFound(format!("channel: {}", channel_id)))?;
+    if is_private_raw != 0 {
+        let member: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM channel_members WHERE channel_id = ? AND login_id = ?")
+                .bind(&channel_id)
+                .bind(uid.as_str())
+                .fetch_optional(&state.pool)
+                .await?;
+        if member.is_none() {
+            return Err(ApiError::Unauthorized);
+        }
+    }
+
+    // 增量拉取上限：单次最多 500 条，防止断连太久时一次拉爆内存
+    const MAX_INCREMENTAL: i64 = 500;
+    let rows: Vec<(i64, i64, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, ts, sender, ciphertext FROM messages \
+         WHERE channel_id = ? AND id > ? \
+           AND (? = 0 OR substr(ciphertext, 1, 1) = X'03') \
+         ORDER BY id ASC LIMIT ?",
+    )
+    .bind(&channel_id)
+    .bind(since_id)
+    .bind(is_private_raw)
+    .bind(MAX_INCREMENTAL)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let out: Vec<MessageRecord> = rows
+        .into_iter()
+        .map(|(id, ts, sender, ct)| MessageRecord {
+            id,
+            ts,
+            sender,
+            ciphertext: base64_url(&ct),
+        })
+        .collect();
+
+    tracing::info!(
+        "[get_messages_since] channel={} since_id={} -> {} messages",
+        channel_id,
+        since_id,
+        out.len()
+    );
 
     Ok(Json(MessagesResp { messages: out }))
 }

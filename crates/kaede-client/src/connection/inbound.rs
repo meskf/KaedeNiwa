@@ -742,6 +742,7 @@ impl ServerConnection {
             }
 
             ServerMessage::ChannelMessage {
+                id: _id,
                 channel_id,
                 from,
                 ts,

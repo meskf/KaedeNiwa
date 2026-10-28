@@ -1,0 +1,32 @@
+[chaos-2] Stage 1: 8 users registering...
+........
+  registered: 8/8
+
+[chaos-2] Stage 2: wait 3s for group convergence...
+
+[chaos-2] Stage 3: 5 rounds of disconnect chaos...
+  cycle 1: disconnecting U0 for 1232ms
+  cycle 2: disconnecting U1 for 2095ms
+  cycle 3: disconnecting U2 for 1947ms
+  cycle 4: disconnecting U3 for 1899ms
+  cycle 5: disconnecting U4 for 1112ms
+  sent 275 messages total
+
+[chaos-2] Stage 4: wait 8s for final fan-out...
+
+[chaos-2] Stage 5: verifying delivery...
+
+鈺愨晲鈺?CHAOS-2 REPORT 鈺愨晲鈺?  users:                8/8
+  disconnect cycles:    5
+  messages sent:        275
+  messages delivered:   2198/2200
+  users with gaps:      1/8
+  epoch converged:      true (7)
+  total duration:       59.5s
+  JS errors (real):     0
+  5xx responses:        0
+
+  users with missing msgs:
+    U3: 2 missing, e.g. chaos2-299991212-u6-m176, chaos2-299991212-u1-m177
+
+  PASS: false

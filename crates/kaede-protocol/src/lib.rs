@@ -97,7 +97,8 @@ where
 /// v5：新增 `ServerMessage::FriendsChanged`；移除 SDP/ICE/SfuToken 遗留变体。
 /// v6：新增私密频道表情反应（`ChannelReaction` 双向变体）。
 /// v7：新增 `Typing` 双向变体（输入中指示）。
-pub const PROTOCOL_VERSION: u16 = 7;
+    /// v8：ChannelMessage 新增 id 字段（用于增量拉取）。
+pub const PROTOCOL_VERSION: u16 = 8;
 
 /// 服务器接受的最低协议版本。
 ///
@@ -493,6 +494,10 @@ pub enum ServerMessage {
     /// 客户端把 `0x03 || AES-GCM 密文` 写入 `POST /api/messages` 后，
     /// 服务器用本消息实时推送除发送者外的频道成员。离线成员靠历史补齐。
     ChannelMessage {
+        /// 消息在服务端的自增 id（v8）。
+        /// 用于客户端增量拉取；pending 旧格式投递时置 0。
+        #[serde(default)]
+        id: i64,
         channel_id: String,
         from: UserId,
         /// 服务器权威时间戳。
