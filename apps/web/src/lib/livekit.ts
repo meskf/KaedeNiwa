@@ -46,6 +46,7 @@ export interface ScreenShareInfo {
   hasAudio: boolean
   /** 接收端画质偏好（仅远端共享生效；本地预览忽略） */
   quality?: 'low' | 'medium' | 'high'
+  presetId?: string
 }
 
 interface ConnectOptions {
@@ -593,12 +594,13 @@ export function setScreenShareQuality(sid: string, presetId: string) {
     return
   }
   let applied = false
+  let appliedLayer: 'low' | 'medium' | 'high' = 'high'
   for (const participant of currentRoom.remoteParticipants.values()) {
     const pub = participant.getTrackPublicationBySid(sid)
     if (pub && pub.source === Track.Source.ScreenShare) {
       try {
         // 动态选择层级：LiveKit 只支持 high/medium/low
-        let layer: any = 'high'
+        let layer: 'low' | 'medium' | 'high' = 'high'
         if (presetId.includes('4k') || presetId.includes('1440p') || presetId.includes('1080p')) {
           layer = 'high'
         } else if (presetId.includes('720p')) {
@@ -615,8 +617,9 @@ export function setScreenShareQuality(sid: string, presetId: string) {
           ;(pub as any).setVideoDimensions?.(w, h)
         }
 
-        pub.setVideoQuality?.(layer)
+        pub.setVideoQuality?.(layer as any)
         console.log(`[ScreenShare] ${sid} -> ${presetId} (layer=${layer})`)
+        appliedLayer = layer
         applied = true
       } catch (e) {
         console.warn('[ScreenShare] setVideoQuality failed:', e)
@@ -629,7 +632,7 @@ export function setScreenShareQuality(sid: string, presetId: string) {
   }
   
   // 记住用户选择（供下次初始订阅使用）
-  screenShareCache.set(sid, { ...info, quality: presetId as any })
+  screenShareCache.set(sid, { ...info, quality: appliedLayer, presetId })
   emit()
 }
 
