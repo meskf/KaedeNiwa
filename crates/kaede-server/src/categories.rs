@@ -159,6 +159,16 @@ async fn delete_category(
     let uid = authenticate(&state, &headers).await?;
     check_write_perm(&state, uid.as_str()).await?;
 
+    // 系统分类 (cat_text / cat_voice) 是不可删除的兜底结构：
+    // 一旦删除，前端 categories.length === 0 的 fallback 分支会
+    // 接管渲染，永久丢失 Text / Voice 分组语义。允许改名
+    // (update_category)，但不允许删除。
+    if id == "cat_text" || id == "cat_voice" {
+        return Err(ApiError::BadRequest(
+            "system categories (cat_text/cat_voice) cannot be deleted".into(),
+        ));
+    }
+
     let mut tx = state.pool.begin().await?;
     // Detach channels first so they fall into the uncategorized bucket.
     sqlx::query("UPDATE channels SET category_id = NULL WHERE category_id = ?")

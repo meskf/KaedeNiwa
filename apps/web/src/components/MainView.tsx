@@ -111,6 +111,11 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
   const handleDeleteCategory = async () => {
     if (!manageCategory) return
+    // 双保险：即使按钮被绕过（键盘等），系统分类也不允许删除
+    if (manageCategory.id === 'cat_text' || manageCategory.id === 'cat_voice') {
+      window.alert(lang === 'zh' ? '系统分类不可删除' : 'System categories cannot be deleted')
+      return
+    }
     if (!window.confirm(lang === 'zh' ? '删除这个分区？分区内的频道会变成"未分类"。' : 'Delete this category? Channels inside become uncategorized.')) return
     try {
       const client = getClient()
@@ -1028,7 +1033,13 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               data-testid="manage-category-input"
             />
             <div className="flex justify-between items-center">
-              <button onClick={handleDeleteCategory} className="px-3 py-1.5 rounded text-[12px] text-red-500 hover:bg-red-500/5" data-testid="manage-category-delete">{lang === 'zh' ? '删除分区' : 'Delete'}</button>
+              <button
+                onClick={handleDeleteCategory}
+                disabled={manageCategory.id === 'cat_text' || manageCategory.id === 'cat_voice'}
+                title={(manageCategory.id === 'cat_text' || manageCategory.id === 'cat_voice') ? (lang === 'zh' ? '系统分类不可删除' : 'System category, cannot delete') : ''}
+                className="px-3 py-1.5 rounded text-[12px] text-red-500 hover:bg-red-500/5 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                data-testid="manage-category-delete"
+              >{lang === 'zh' ? '删除分区' : 'Delete'}</button>
               <div className="flex gap-2">
                 <button onClick={() => setManageCategory(null)} className="px-3 py-1.5 rounded text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)]">{lang === 'zh' ? '取消' : 'Cancel'}</button>
                 <button onClick={handleRenameCategory} className="px-4 py-1.5 rounded bg-[var(--bg-active)] text-[12px] font-semibold text-[var(--text-main)] hover:opacity-80" data-testid="manage-category-save">{lang === 'zh' ? '保存' : 'Save'}</button>
