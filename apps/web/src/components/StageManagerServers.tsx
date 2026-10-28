@@ -1,15 +1,11 @@
 import { useState, useEffect } from 'react'
+import { useServerStore } from '../stores/server'
 
-const MOCK_SERVERS = [
-  { id: '1', type: 'server', name: 'Name' },
-  { id: '2', type: 'server', name: 'Name' },
-  { id: '3', type: 'server', name: 'Name' },
-  { id: '4', type: 'server', name: 'Name' },
-  { id: 'add', type: 'action', name: 'Name', symbol: '+' },
-  { id: 'more', type: 'action', name: 'Name', symbol: '...' },
-]
+// 单服务器模式：由真实数据驱动
 
 export function StageManagerServers() {
+  const profile = useServerStore(s => s.profile)
+
   const [mode, setMode] = useState(() => localStorage.getItem('kaede-stage-manager-mode') || 'auto')
   const [activeId, setActiveId] = useState('1')
   const [hoveredId, setHoveredId] = useState<string | null>(null)
@@ -42,7 +38,11 @@ export function StageManagerServers() {
           transformStyle: 'preserve-3d',
         }}
       >
-        {MOCK_SERVERS.map(s => {
+        {[
+    { id: 'active', type: 'server', name: profile.name },
+    { id: 'add', type: 'action', name: '+', symbol: '+' },
+    { id: 'more', type: 'action', name: '...', symbol: '...' },
+  ].map(s => {
           const isActive = activeId === s.id
           const isHovered = hoveredId === s.id
           
