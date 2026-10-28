@@ -4,7 +4,8 @@
 #   .\run-all-tests.ps1 -FreshEachMediaTest  # 稳定（每个 media 测试前清库重启后端）
 
 param(
-    [switch]$FreshEachMediaTest
+    [switch]$FreshEachMediaTest,
+    [switch]$ForceWasmRebuild
 )
 
 $ErrorActionPreference = 'Continue'
@@ -64,16 +65,29 @@ $env:LIVEKIT_API_SECRET = 'secret'
 $env:LIVEKIT_WS_URL = 'ws://127.0.0.1:7880'
 $env:RUST_LOG = 'info,kaede_server=debug'
 
-    Write-Host "   重建 wasm（客户端 Rust 改动）..." -ForegroundColor Cyan
-    Push-Location (Join-Path $PSScriptRoot "apps\web")
-    npm run build:wasm 2>&1 | Out-Null
-    $wasmExit = $LASTEXITCODE
-    Pop-Location
-    if ($wasmExit -ne 0) {
-        Write-Host "   wasm build failed (exit $wasmExit)" -ForegroundColor Red
-        exit 1
+    # 只在 Rust 源比 wasm 新时重建（-ForceWasmRebuild 强制）
+    $wasmPath = Join-Path $PSScriptRoot "apps\web\src\wasm\pkg\kaede_client_wasm_bg.wasm"
+    $needWasm = $true
+    if ((Test-Path $wasmPath) -and -not $ForceWasmRebuild) {
+        $wasmTime = (Get-Item $wasmPath).LastWriteTime
+        $newer = Get-ChildItem (Join-Path $PSScriptRoot "crates") -Recurse -Filter *.rs -ErrorAction SilentlyContinue |
+                 Where-Object { $_.LastWriteTime -gt $wasmTime } | Select-Object -First 1
+        if (-not $newer) { $needWasm = $false }
     }
-    Write-Host "   OK wasm" -ForegroundColor Green
+    if ($needWasm) {
+        Write-Host "   重建 wasm（Rust 源有更新）..." -ForegroundColor Cyan
+        Push-Location (Join-Path $PSScriptRoot "apps\web")
+        npm run build:wasm 2>&1 | Out-Null
+        $wasmExit = $LASTEXITCODE
+        Pop-Location
+        if ($wasmExit -ne 0) {
+            Write-Host "   wasm build failed (exit $wasmExit)" -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "   OK wasm" -ForegroundColor Green
+    } else {
+        Write-Host "   wasm 已最新，跳过 rebuild（-ForceWasmRebuild 强制）" -ForegroundColor DarkGray
+    }
 Write-Host "   预编译后端..." -ForegroundColor DarkGray
 Push-Location $root
 try { cargo build -p kaede-server --features dev-mode 2>&1 | Out-Null } finally { Pop-Location }
@@ -131,7 +145,8 @@ $tests = @(
     @{ name = 'test-11 断线重连'; file = 'test-11-reconnect-offline.cjs'; media = $true },
     @{ name = 'test-12 多 tab/设备'; file = 'test-12-multi-tab.cjs'; media = $false },
     @{ name = 'test-13 pending 队列'; file = 'test-13-pending-queue.cjs'; media = $false },
-    @{ name = 'test-14 DM wasm 桥'; file = 'test-14-dm-wasm.cjs'; media = $false }
+    @{ name = 'test-14 DM wasm 桥'; file = 'test-14-dm-wasm.cjs'; media = $false },
+    @{ name = 'test-20 接收端画质'; file = 'test-20-receiver-quality.cjs'; media = $true }
 )
 
 $results = @()
