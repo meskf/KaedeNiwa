@@ -17,7 +17,7 @@ kaede-storage  = { workspace = true }
 thiserror      = { workspace = true }
 zeroize        = { workspace = true }
 
-openmls = { workspace = true }
+openmls = { workspace = true, features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_rust_crypto    = { workspace = true }
 openmls_traits         = { workspace = true }
 openmls_memory_storage = { version = "0.6", optional = true }
@@ -27,6 +27,7 @@ tls_codec              = "0.5"
 
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-openmls = { workspace = true }
+openmls = { workspace = true, features = ["draft-ietf-mls-pq-ciphersuites"] }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
 

@@ -39,7 +39,7 @@ pub const SFRAME_EXPORT_LABEL: &str = "SFrame 10 MLS";
 
 /// SFrame 密钥长度。
 pub const DEFAULT_CIPHERSUITE: openmls::prelude::Ciphersuite =
-    openmls::prelude::Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+    openmls::prelude::Ciphersuite::MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519;
 
 pub const SFRAME_KEY_LEN: usize = 32;
 
@@ -68,3 +68,40 @@ mod tests {
 /// 重导出 `OpenMlsRustCrypto`，让上层 crate 不需要直接依赖
 /// `openmls_rust_crypto`。
 pub use openmls_rust_crypto::OpenMlsRustCrypto;
+
+
+#[cfg(test)]
+mod pq_probe {
+    use super::*;
+    #[test]
+    fn pq_probe_ciphersuite() {
+        let cs = DEFAULT_CIPHERSUITE;
+        println!("CIPHERSUITE = {:?}", cs);
+        println!("KEM        = {:?}", cs.hpke_kem_algorithm());
+        println!("AEAD       = {:?}", cs.aead_algorithm());
+        println!("HASH       = {:?}", cs.hash_algorithm());
+        println!("SIG        = {:?}", cs.signature_algorithm());
+        assert_eq!(
+            cs,
+            openmls::prelude::Ciphersuite::MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519,
+            "DEFAULT_CIPHERSUITE must be the PQ hybrid suite"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pq_size_probe {
+    use super::*;
+    #[test]
+    fn pq_keypackage_size() {
+        let id = MlsIdentity::generate("alice").unwrap();
+        let provider = KaedeMlsProvider::new();
+        let kp = id.generate_key_package(&provider).unwrap();
+        println!("PQ KeyPackage size = {} bytes", kp.len());
+        assert!(
+            kp.len() > 1000,
+            "PQ KeyPackage should be >1000 bytes, got {}",
+            kp.len()
+        );
+    }
+}

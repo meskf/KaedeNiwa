@@ -216,11 +216,12 @@ async fn register(
     } else {
         "(SELECT CASE WHEN COUNT(*) = 0 THEN 'op5' ELSE 'op2' END FROM members)"
     };
-    sqlx::query(&format!(
+    // sqlx 0.9: op_subquery 来自 cfg! 分支的 &'static str，不涉及用户输入
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "INSERT INTO members (login_id, nickname, op, bio, title, avatar_url, joined_at, updated_at) \
          VALUES (?, ?, {}, '', '', '', ?, ?)",
         op_subquery
-    ))
+    )))
     .bind(&req.login_id)
     .bind(&nickname)
     .bind(now)
@@ -1163,3 +1164,4 @@ mod proxy_tests {
         );
     }
 }
+

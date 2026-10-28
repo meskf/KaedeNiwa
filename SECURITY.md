@@ -213,7 +213,7 @@ snapshot → 拿到签名私钥**。
 
 - **本机被完全攻陷**（恶意进程、rootkit、管理员权限）：任何客户端都无法防御
 - **服务器与客户端被同时攻陷**：MLS 半信任模型的边界
-- **量子计算**：当前 ciphersuite 是 X25519，未走 PQ hybrid。MLS 规范有 PQ 扩展，当前未启用
+- **量子计算**：MLS 层已启用 hybrid PQ ciphersuite（ML-KEM-768 + X25519），密钥交换具备 HNDL 抗性；但**签名仍为 Ed25519**，量子攻击者可伪造身份签名实施 MITM（Phase 2 换 ML-DSA-65）。详见下方 PQC Status 章节
 - **侧信道**（时序、功耗）：未做抗侧信道设计
 - **供应链攻击**（依赖被投毒）：Cargo.lock 存在但无签名验证
 - **Server DoS**：有 rate limit，但没有完整的抗 DDoS（需要反向代理层）
@@ -281,3 +281,36 @@ snapshot → 拿到签名私钥**。
   允许 RTP 抖动造成的窗口内乱序，重复帧与窗口外旧帧仍被拒绝。
 
 
+
+
+## Post-Quantum Cryptography (PQC) Status
+
+### Implemented (Phase 1, 2026-10-28)
+
+KaedeNiwa's MLS layer uses the **hybrid post-quantum ciphersuite**:
+
+```
+MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519
+  KEM  = X-Wing (ML-KEM-768 + X25519 hybrid, draft-ietf-mls-pq-ciphersuites)
+  AEAD = AES-128-GCM
+  Hash = SHA-256
+  Sig  = Ed25519
+```
+
+**What this protects:**
+- Hybrid PQ/classical group key establishment (HNDL-safe)
+- All MLS-derived keys (channel/DM/SFrame/LiveKit E2EE) inherit PQ protection
+
+**What this does NOT (yet) protect:**
+- Identity signatures: Ed25519 (classical) → Phase 2 (ML-DSA-65)
+- TLS 1.3 transport: classical → Phase 3 (X25519MLKEM768)
+- DTLS-SRTP: classical, but overlaid by MLS-derived E2EE
+
+### Roadmap
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | MLS KEM → ML-KEM-768 + X25519 hybrid | Done |
+| 2 | MLS identity signatures → ML-DSA-65 | Planned |
+| 3 | TLS 1.3 → X25519MLKEM768 | Planned |
+| 4 | Threat model doc + audit | Planned |

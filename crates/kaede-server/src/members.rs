@@ -226,7 +226,7 @@ async fn update_member(
     sets.push("updated_at = ?");
     let sql = format!("UPDATE members SET {} WHERE login_id = ?", sets.join(", "));
 
-    let mut q = sqlx::query(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     if let Some(n) = &req.nickname {
         q = q.bind(n);
     }
@@ -433,3 +433,4 @@ async fn get_op(state: &AppState, uid: &str) -> Result<String, ApiError> {
         .await?;
     Ok(row.map(|(o,)| o).unwrap_or_else(|| "op2".into()))
 }
+

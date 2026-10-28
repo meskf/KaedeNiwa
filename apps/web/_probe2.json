@@ -1,0 +1,231 @@
+{
+  "user": "u14601144",
+  "movers": [
+    {
+      "tag": "div",
+      "cls": "fixed left-4 top-1/2 -translate-y-1/2 z-[100] flex flex-col justify-center py-4 transition-transform duration-500 ease-out pointer-events-auto\n        -translate-x-[80px]",
+      "pos": [
+        -64,
+        197,
+        48,
+        506
+      ],
+      "transform": "none",
+      "translate": "-80px -50%",
+      "pointerEvents": "auto"
+    },
+    {
+      "tag": "svg",
+      "cls": "",
+      "pos": [
+        512,
+        60,
+        16,
+        16
+      ],
+      "transform": "none",
+      "translate": "none",
+      "pointerEvents": "auto"
+    },
+    {
+      "tag": "aside",
+      "cls": "absolute left-0 top-0 bottom-0 w-[200px] flex-col z-10 flex",
+      "pos": [
+        64,
+        128,
+        200,
+        684
+      ],
+      "transform": "none",
+      "translate": "none",
+      "pointerEvents": "auto"
+    },
+    {
+      "tag": "button",
+      "cls": "absolute right-2 top-[7px] opacity-0 group-hover/ch:opacity-100 text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all p-1 flex items-center justify-center rounded hover:bg-[var(--bg-ac",
+      "pos": [
+        234,
+        223,
+        22,
+        22
+      ],
+      "transform": "none",
+      "translate": "none",
+      "pointerEvents": "auto"
+    },
+    {
+      "tag": "button",
+      "cls": "absolute right-2 top-[7px] opacity-0 group-hover/ch:opacity-100 text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all p-1 flex items-center justify-center rounded hover:bg-[var(--bg-ac",
+      "pos": [
+        234,
+        264,
+        22,
+        22
+      ],
+      "transform": "none",
+      "translate": "none",
+      "pointerEvents": "auto"
+    },
+    {
+      "tag": "button",
+      "cls": "absolute right-2 top-[7px] opacity-0 group-hover/ch:opacity-100 text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all p-1 flex items-center justify-center rounded hover:bg-[var(--bg-ac",
+      "pos": [
+        234,
+        305,
+        22,
+        22
+      ],
+      "transform": "none",
+      "translate": "none",
+      "pointerEvents": "auto"
+    },
+    {
+      "tag": "button",
+      "cls": "absolute right-2 top-[7px] opacity-0 group-hover/ch:opacity-100 text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all p-1 flex items-center justify-center rounded hover:bg-[var(--bg-ac",
+      "pos": [
+        234,
+        383,
+        22,
+        22
+      ],
+      "transform": "none",
+      "translate": "none",
+      "pointerEvents": "auto"
+    },
+    {
+      "tag": "aside",
+      "cls": "absolute right-0 top-0 bottom-0 w-[200px] flex-col z-10 flex",
+      "pos": [
+        1176,
+        128,
+        200,
+        684
+      ],
+      "transform": "none",
+      "translate": "none",
+      "pointerEvents": "auto"
+    },
+    {
+      "tag": "div",
+      "cls": "absolute top-0.5 left-0 text-[14px] text-[var(--text-muted)] pointer-events-none select-none leading-6",
+      "pos": [
+        296,
+        762,
+        112,
+        24
+      ],
+      "transform": "none",
+      "translate": "none",
+      "pointerEvents": "none"
+    },
+    {
+      "tag": "div",
+      "cls": "absolute left-1/2 -translate-x-1/2 flex items-center gap-8 text-[13px] font-medium text-[var(--text-muted)]",
+      "pos": [
+        591,
+        854,
+        258,
+        19
+      ],
+      "transform": "none",
+      "translate": "-50%",
+      "pointerEvents": "auto"
+    }
+  ],
+  "leftStrip": [
+    {
+      "tag": "div",
+      "cls": "",
+      "pos": [
+        0,
+        0,
+        1440,
+        900
+      ],
+      "pointerEvents": "auto",
+      "opacity": "1",
+      "bg": "rgba(0, 0, 0, 0)",
+      "z": "auto"
+    },
+    {
+      "tag": "div",
+      "cls": "h-full w-full relative z-10 bg-[var(--bg-app)]",
+      "pos": [
+        0,
+        0,
+        1440,
+        900
+      ],
+      "pointerEvents": "auto",
+      "opacity": "1",
+      "bg": "rgb(255, 255, 255)",
+      "z": "10"
+    },
+    {
+      "tag": "div",
+      "cls": "h-screen w-screen flex flex-col text-[var(--text-main)] overflow-hidden font-sans bg-[var(--bg-app)]",
+      "pos": [
+        0,
+        0,
+        1440,
+        900
+      ],
+      "pointerEvents": "auto",
+      "opacity": "1",
+      "bg": "rgb(255, 255, 255)",
+      "z": "auto"
+    },
+    {
+      "tag": "div",
+      "cls": "flex-1 flex flex-col min-h-0 px-16 pt-12 pb-4",
+      "pos": [
+        0,
+        0,
+        1440,
+        828
+      ],
+      "pointerEvents": "auto",
+      "opacity": "1",
+      "bg": "rgba(0, 0, 0, 0)",
+      "z": "auto"
+    }
+  ],
+  "railProbe": [],
+  "contrastResults": [
+    {
+      "label": "message-input",
+      "color": "rgb(9, 9, 11)",
+      "effectiveBg": "rgb(244, 244, 245)",
+      "fontSize": "14px",
+      "fontWeight": "400",
+      "ratio": 18.1
+    },
+    {
+      "label": "main",
+      "color": "rgb(9, 9, 11)",
+      "effectiveBg": "rgb(255, 255, 255)",
+      "fontSize": "16px",
+      "fontWeight": "400",
+      "ratio": 19.9
+    },
+    {
+      "label": "body",
+      "color": "rgb(9, 9, 11)",
+      "effectiveBg": "rgba(0, 0, 0, 0)",
+      "fontSize": "16px",
+      "fontWeight": "400",
+      "ratio": 1.06
+    }
+  ],
+  "inputContainer": {
+    "depth": 4,
+    "tag": "div",
+    "cls": "w-full flex items-end gap-2 bg-[var(--bg-hover)] rounded-md px-3 py-2",
+    "pos": [
+      284,
+      752,
+      872,
+      44
+    ]
+  }
+}

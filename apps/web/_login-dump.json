@@ -1,0 +1,97 @@
+{
+  "lang": "zh-CN",
+  "title": "KaedeNiwa",
+  "bodyText": "欢迎回来\n\n输入凭据以访问你的工作区。\n\n服务器地址\n账号\n密码\n登录\n还没有账号？立即注册",
+  "inputs": [
+    {
+      "tag": "input",
+      "type": "text",
+      "placeholder": null,
+      "name": null,
+      "text": "",
+      "ariaLabel": null,
+      "testid": null,
+      "visible": true,
+      "rect": [
+        562,
+        351,
+        316,
+        43
+      ]
+    },
+    {
+      "tag": "input",
+      "type": "text",
+      "placeholder": "例如 admin",
+      "name": null,
+      "text": "",
+      "ariaLabel": null,
+      "testid": "login-id",
+      "visible": true,
+      "rect": [
+        562,
+        433,
+        316,
+        41
+      ]
+    },
+    {
+      "tag": "input",
+      "type": "password",
+      "placeholder": "••••••••",
+      "name": null,
+      "text": "",
+      "ariaLabel": null,
+      "testid": "login-password",
+      "visible": true,
+      "rect": [
+        562,
+        512,
+        316,
+        41
+      ]
+    }
+  ],
+  "buttons": [
+    {
+      "tag": "button",
+      "type": "submit",
+      "placeholder": null,
+      "name": null,
+      "text": "登录",
+      "ariaLabel": null,
+      "testid": "login-submit",
+      "visible": true,
+      "rect": [
+        562,
+        577,
+        316,
+        41
+      ]
+    },
+    {
+      "tag": "button",
+      "type": "button",
+      "placeholder": null,
+      "name": null,
+      "text": "还没有账号？立即注册",
+      "ariaLabel": null,
+      "testid": "login-toggle-register",
+      "visible": true,
+      "rect": [
+        655,
+        653,
+        130,
+        19
+      ]
+    }
+  ],
+  "links": [],
+  "storage": {
+    "kaede-theme": "light",
+    "kaede-active-tab": "2umwhubvm7lmvrqazwa"
+  },
+  "failed": [
+    "[console] Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ]
+}

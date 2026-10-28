@@ -1,0 +1,68 @@
+{
+  "user": "u48410424",
+  "failedRequests": [],
+  "stageManager": {
+    "before": {
+      "x": -64,
+      "y": 197,
+      "w": 48,
+      "h": 506,
+      "right": -16,
+      "cls": "fixed left-4 top-1/2 -translate-y-1/2 z-[100] flex flex-col justify-center py-4 transition-transform duration-500 ease-out pointer-events-auto\n        -translat"
+    },
+    "after": {
+      "x": -64,
+      "y": 197,
+      "w": 48,
+      "h": 506,
+      "right": -16
+    }
+  },
+  "geom": {
+    "viewport": {
+      "w": 1440,
+      "h": 900
+    },
+    "scroll": {
+      "sw": 1440,
+      "sh": 900,
+      "cw": 1440,
+      "ch": 900
+    },
+    "theme": "light",
+    "messageInput": {
+      "x": 296,
+      "y": 762,
+      "w": 788,
+      "h": 24,
+      "right": 1084,
+      "bottom": 786
+    },
+    "rail": null,
+    "memberPanel": {
+      "x": 1176,
+      "y": 128,
+      "w": 200,
+      "h": 684,
+      "cls": "absolute right-0 top-0 bottom-0 w-[200px] flex-col z-10 flex"
+    },
+    "mainEl": {
+      "x": 64,
+      "y": 128,
+      "w": 1312,
+      "h": 684,
+      "right": 1376,
+      "bottom": 812
+    }
+  },
+  "styles": {
+    "msgInput": {
+      "color": "rgb(9, 9, 11)",
+      "bg": "rgba(0, 0, 0, 0)"
+    },
+    "bodyText": {
+      "color": "rgb(9, 9, 11)",
+      "bg": "rgba(0, 0, 0, 0)"
+    }
+  }
+}
