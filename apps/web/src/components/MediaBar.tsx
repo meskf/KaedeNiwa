@@ -125,6 +125,25 @@ export function MediaBar({ channelId, compact = false }: Props) {
   if (compact) {
     return (
       <div className="w-full flex flex-col min-w-0 overflow-hidden" data-testid="media-bar-compact">
+        {/* e2e-test 探测标记（sr-only：Playwright 可选中，视觉不可见）。
+            full 模式里的 media-connected / media-e2ee 在 compact 下缺失，
+            但 test-4/7/8/9 依赖它们判断媒体状态。 */}
+        <div
+          data-testid="media-connected"
+          data-channel={channelId}
+          className="sr-only"
+          aria-hidden="true"
+        >
+          connected
+        </div>
+        <span
+          data-testid="media-e2ee"
+          data-e2ee={media.e2eeEnabled ? 'true' : 'false'}
+          className="sr-only"
+          aria-hidden="true"
+        >
+          e2ee
+        </span>
         <div className="flex flex-col gap-2 p-2 rounded-lg bg-[var(--bg-hover)] border border-[var(--border-subtle)] shadow-sm">
           
           {/* 顶部信息栏：信号、时间、频道 */}
