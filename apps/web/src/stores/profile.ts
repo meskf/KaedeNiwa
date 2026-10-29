@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { bumpAvatarVersion } from '../lib/avatarCache'
 
 export interface MyProfile {
   loginId: string
@@ -85,6 +86,7 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
       if (res.status === 204) {
         const me = await fetchMeRaw(token)
         if (me) set({ me })
+        bumpAvatarVersion()
         return { ok: true }
       }
       if (res.status === 401) return { ok: false, error: 'unauthorized' }
@@ -102,6 +104,7 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
       })
       if (res.status === 204) {
         set((s) => ({ me: { ...s.me, avatarUrl: '' } }))
+        bumpAvatarVersion()
         return { ok: true }
       }
       return { ok: false, error: `HTTP ${res.status}` }

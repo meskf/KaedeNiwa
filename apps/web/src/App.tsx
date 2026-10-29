@@ -76,6 +76,12 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    // Tab lock 只在 dev 环境启用：
+    // - 生产：用户开两个标签看不同服务器是合法需求，不该被强制登出
+    // - iOS WKWebView 后台回收后，localStorage 里的 active-tab 指向已死标签，
+    //   回来时被误判为"第二个标签"→ 直接登出（真实 bug）
+    // - dev/e2e：需要防止多实例串号，保留
+    if (import.meta.env.VITE_FORCE_TAB_LOCK !== '1') return
     const TAB_KEY = 'kaede-active-tab'
     const TAB_ID_KEY = 'kaede-tab-id'
     let tabId = sessionStorage.getItem(TAB_ID_KEY)

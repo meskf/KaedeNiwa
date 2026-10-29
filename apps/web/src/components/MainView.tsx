@@ -9,7 +9,7 @@ import { useMediaState } from '../hooks/useLiveKitRoom'
 import { MediaBar } from './MediaBar'
 import { ScreenShareView } from './ScreenShareView'
 import { StageManagerServers } from './StageManagerServers'
-import { IconSun, IconMoon, IconSearch, IconUsers } from './icons'
+import { IconSun, IconMoon, IconSearch, IconUsers, IconHash, IconSettings } from './icons'
 import { useTheme } from '../lib/useTheme'
 import { useI18n } from '../stores/i18n'
 import { SettingsView } from './SettingsView'
@@ -25,30 +25,20 @@ import { ChannelTree } from './ChannelTree'
 import { NodeContextMenu } from './NodeContextMenu'
 import { RichTextInput, type RichTextInputHandle } from './RichTextInput'
 import { MessageText } from './MessageText'
+import { MessageContextMenu } from './MessageContextMenu'
 import { extractMessage } from '../lib/messageUtils'
+import { useAvatarVersion } from '../lib/avatarCache'
+import { useMediaQuery, BP } from '../hooks/useMediaQuery'
 
 
 
 
 export function MainView({ onLogout }: { onLogout: () => void }) {
   const [ctxNode, setCtxNode] = useState<{ x: number, y: number, node: any } | null>(null)
+  const [msgMenu, setMsgMenu] = useState<{ x: number, y: number, text: string } | null>(null)
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const setNodes = useChatStore(s => s.setNodes)
 
-  useEffect(() => {
-    const loginId = useAuthStore.getState().loginId
-    if (!loginId) return
-    let cancelled = false
-    ;(async () => {
-      const c = getClient()
-      if (!c) return
-      try {
-        const res = await (c as any).listNodes()
-        const parsed = res.map((r: any) => JSON.parse(r))
-        if (!cancelled) setNodes(parsed)
-      } catch (e) { console.error('load nodes err:', e) }
-    })()
-    return () => { cancelled = true }
-  }, [setNodes])
 
   const [dynamicBg, setDynamicBg] = useState(() => localStorage.getItem('kaede-dynamic-bg') === 'true')
   useEffect(() => {
@@ -125,9 +115,21 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const richInputRef = useRef<RichTextInputHandle | null>(null)
   const { theme, setTheme } = useTheme()
   const { t, lang } = useI18n()
-  const [showMembers, setShowMembers] = useState(true)
+  const isMd = useMediaQuery(BP.md)
+  const [showMembers, setShowMembers] = useState(isMd)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; uid: string; inVoice: boolean } | null>(null)
-  const [sidebarOpen, setSidebarOpen] = useState(typeof window !== "undefined" ? window.innerWidth >= 768 : true)
+  // 断点驱动的侧栏状态。
+  // 旧实现只在 mount 时读一次 innerWidth —— 旋转屏幕 / 拖窗口不重算。
+  // 跨断点时重置为默认（手机收起、桌面展开）；同一断点内由用户完全掌控。
+  const [sidebarOpen, setSidebarOpen] = useState(isMd)
+  const prevIsMdRef = useRef(isMd)
+  useEffect(() => {
+    if (prevIsMdRef.current !== isMd) {
+      prevIsMdRef.current = isMd
+      setSidebarOpen(isMd)
+    }
+  }, [isMd])
+  const avatarVer = useAvatarVersion()
 
   const [searchOpen, setSearchOpen] = useState(false)
   const [createDialogCategory, setCreateDialogCategory] = useState<string | null | undefined>(undefined)
@@ -210,36 +212,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const currentPending = pendingMessages.filter(p => p.channelId === currentChannel)
   const inVoice = media.connected && media.channelId === currentChannel
 
-  useEffect(() => {
-    let cancelled = false
-    const loadChannels = async () => {
-      const client = getClient()
-      if (!client) { setTimeout(loadChannels, 200); return }
-      try {
-        const raw = await client.listChannels()
-        const arr = typeof raw === 'string' ? JSON.parse(raw) : raw
-        if (cancelled) return
-        const mapped = (arr || []).map((c: any) => ({
-          id: c.id,
-          name: c.name,
-          kind: c.kind,
-          position: Number(c.position),
-          is_private: !!c.is_private,
-          category_id: c.category_id ?? null,
-        }))
-        setChannelList(mapped)
-        try {
-          const rawCats = await client.listCategories()
-          const catArr = typeof rawCats === 'string' ? JSON.parse(rawCats) : rawCats
-          if (Array.isArray(catArr)) setCategories(catArr)
-        } catch (e) { console.warn('[categories] list failed (fallback to kind split):', e) }
-      } catch (e) {
-        console.error('[channels] list:', e)
-      }
-    }
-    loadChannels()
-    return () => { cancelled = true }
-  }, [setChannelList])
+  // 已废弃的 loadChannels/listCategories effect 已移除，统一使用 nodes 树
 
   useEffect(() => {
     let cancelled = false
@@ -313,13 +286,6 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         }
         if (ev.Disconnected) { scheduleReconnect(); return }
 
-        const eventDiv = document.createElement('div')
-        eventDiv.setAttribute('data-testid', 'raw-event')
-        eventDiv.innerText = 'EVENT: ' + JSON.stringify(ev)
-        eventDiv.style.display = 'none'
-        document.body.appendChild(eventDiv)
-        const all = document.querySelectorAll('[data-testid="raw-event"]')
-        if (all.length > 500) all[0].remove()
 
         const st = useChatStore.getState()
         const ch = st.currentChannel
@@ -588,11 +554,41 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [currentMessages.length, currentPending.length])
 
+  // 键盘弹起（visualViewport 缩小）时自动滚到底部，避免输入框遮挡消息
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.visualViewport) return
+    const vv = window.visualViewport
+    const handleResize = () => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+    vv.addEventListener('resize', handleResize)
+    return () => vv.removeEventListener('resize', handleResize)
+  }, [])
+
   // 1s 间隔清理过期的 typing 条目
   useEffect(() => {
     const iv = setInterval(() => pruneTyping(), 1000)
     return () => clearInterval(iv)
   }, [pruneTyping])
+
+  // 键盘弹起处理：iOS/Android 软键盘不改变 100dvh，但 visualViewport.height 会缩小。
+  // 监听 visualViewport 并同步到 CSS 变量 --app-height，主容器随之变矮，
+  // 让底部输入框不会被键盘挡住。桌面浏览器 visualViewport 基本不变，无副作用。
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.visualViewport) return
+    const vv = window.visualViewport
+    const update = () => {
+      document.documentElement.style.setProperty('--app-height', `${vv.height}px`)
+    }
+    update()
+    vv.addEventListener('resize', update)
+    vv.addEventListener('scroll', update)
+    return () => {
+      vv.removeEventListener('resize', update)
+      vv.removeEventListener('scroll', update)
+      document.documentElement.style.removeProperty('--app-height')
+    }
+  }, [])
 
 
   const friends = useChatStore(s => s.friends)
@@ -738,13 +734,13 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const isVoiceChannel = currentChannelInfo ? currentChannelInfo.kind === 'voice' : false
 
   return (
-    <div className={`h-[100dvh] w-screen flex flex-col text-[var(--text-main)] overflow-hidden pt-[env(safe-area-inset-top)] font-sans ${dynamicBg ? 'bg-transparent' : 'bg-[var(--bg-app)]'}`}>
+    <div className={`w-screen flex flex-col text-[var(--text-main)] overflow-hidden pt-[env(safe-area-inset-top)] font-sans ${dynamicBg ? 'bg-transparent' : 'bg-[var(--bg-app)]'}`} style={{ height: 'var(--app-height, 100dvh)' }}>
 
       <StageManagerServers />
 
       
       {/* 上半部分：适度留白包裹 */}
-      <div className="flex-1 flex flex-col min-h-0 px-4 pt-4 pb-0 md:px-16 md:pt-12 md:pb-4">
+      <div className="flex-1 flex flex-col min-h-0 px-4 pt-4 pb-0 md:px-8 lg:px-16 md:pt-12 md:pb-4 overflow-x-hidden">
         
         {/* 顶栏 */}
         <header className="relative z-0 h-[40px] shrink-0 flex items-center gap-4 mb-4 md:mb-10">
@@ -766,26 +762,26 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => setSidebarOpen(v => !v)}
-              className={`flex w-8 h-8 items-center justify-center rounded-md transition-colors ${sidebarOpen ? 'text-[var(--text-main)] bg-[var(--bg-hover)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'}`}
+              className={`flex w-10 h-10 md:w-8 md:h-8 items-center justify-center rounded-md transition-colors ${sidebarOpen ? 'text-[var(--text-main)] bg-[var(--bg-hover)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'}`}
               title="Toggle sidebar"
               data-testid="sidebar-toggle-desktop"
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 md:w-4 md:h-4">
                 <path d="M4 6h16M4 12h16M4 18h16" strokeLinecap="round" />
               </svg>
             </button>
             <button
               onClick={() => setShowMembers(!showMembers)}
-              className={`w-8 h-8 flex items-center justify-center rounded-md transition-colors ${showMembers ? 'text-[var(--text-main)] bg-[var(--bg-hover)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'}`}
+              className={`w-10 h-10 md:w-8 md:h-8 flex items-center justify-center rounded-md transition-colors ${showMembers ? 'text-[var(--text-main)] bg-[var(--bg-hover)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'}`}
               title="Toggle Members"
             >
-              <IconUsers className="w-4 h-4" />
+              <IconUsers className="w-5 h-5 md:w-4 md:h-4" />
             </button>
             <button data-testid="theme-toggle" aria-label="Toggle theme"
               onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
-              className="w-8 h-8 flex items-center justify-center rounded-md text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition-colors"
+              className="w-10 h-10 md:w-8 md:h-8 flex items-center justify-center rounded-md text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition-colors"
             >
-              {theme === 'dark' ? <IconSun className="w-4 h-4" /> : <IconMoon className="w-4 h-4" />}
+              {theme === 'dark' ? <IconSun className="w-5 h-5 md:w-4 md:h-4" /> : <IconMoon className="w-5 h-5 md:w-4 md:h-4" />}
             </button>
           </div>
         </header>
@@ -801,11 +797,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             />
           )}
           <aside className={`
-            fixed md:absolute inset-y-0 left-0 z-30 
-            w-[80%] max-w-[280px] md:w-[200px] 
-            bg-[var(--bg-app)] md:bg-transparent shadow-xl md:shadow-none 
+            fixed top-8 bottom-8 left-4 w-[calc(100%-2rem)] max-w-[280px] z-30 rounded-2xl p-4
+            bg-[var(--bg-app)] shadow-xl
             flex flex-col transition-transform duration-300 ease-in-out
-            ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+            md:absolute md:inset-y-0 md:left-0 md:rounded-none md:p-0
+            md:w-[180px] lg:w-[200px] md:bg-transparent md:shadow-none
+            ${sidebarOpen ? 'translate-x-0' : '-translate-x-[calc(100%+6rem)]'}
           `}>
             <div className="h-[40px] flex items-center gap-3 mb-6">
               <div className="w-8 h-8 rounded-md bg-[var(--bg-hover)] flex items-center justify-center text-[var(--text-main)] font-bold text-sm shrink-0 overflow-hidden">
@@ -822,18 +819,39 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             </div>
 
             <div className="flex-1 overflow-y-auto pb-2">
-                <ChannelTree onContextMenu={(e, n) => setCtxNode({ x: e.clientX, y: e.clientY, node: n })} />
+                <ChannelTree
+                  onContextMenu={(e, n) => setCtxNode({ x: e.clientX, y: e.clientY, node: n })}
+                  onChannelSelect={() => { if (!isMd) setSidebarOpen(false) }}
+                />
               </div>
             {media.connected && media.channelId && (
-              <div className="shrink-0 w-full pb-4 mt-auto">
+              <div className="shrink-0 w-full pb-[calc(env(safe-area-inset-bottom)+1rem)] mt-auto">
                 <MediaBar channelId={media.channelId} compact={true} />
               </div>
             )}
           </aside>
 
-          {/* 右侧成员列表 */}
-          {showMembers && activeView === 'chat' && (
-            <aside className="absolute right-0 top-0 bottom-0 w-[200px] flex-col z-10 hidden md:flex overflow-hidden">
+          {/* 右侧成员列表：桌面常驻侧栏 / 手机抽屉 */}
+          {showMembers && activeView === 'chat' && !isMd && (
+            <div
+              className="fixed inset-0 bg-black/40 z-20"
+              onClick={() => setShowMembers(false)}
+            />
+          )}
+          {activeView === 'chat' && (
+            <aside
+              className={`${
+                isMd
+                  ? 'absolute right-0 top-0 bottom-0 w-[180px] lg:w-[200px] flex-col z-10 flex overflow-hidden'
+                  : 'fixed right-4 top-8 bottom-8 w-[calc(100%-2rem)] max-w-[280px] p-4 flex-col z-30 flex bg-[var(--bg-app)] shadow-xl rounded-2xl overflow-hidden'
+              } transition-transform duration-300 ease-in-out ${
+                showMembers
+                  ? 'translate-x-0'
+                  : isMd
+                    ? 'translate-x-[calc(100%+6rem)]'
+                    : 'translate-x-[calc(100%+6rem)]'
+              }`}
+            >
               <div className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-4 mt-0">
                 Members
               </div>
@@ -849,7 +867,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                       <div className="w-7 h-7 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[11px] font-bold text-[var(--text-main)] overflow-hidden relative">
     <span>{getInitial(uid)}</span>
     <img
-      src={`/api/avatars/${uid}?t=${Date.now()}`}
+      src={`/api/avatars/${uid}?v=${avatarVer}`}
       className="absolute inset-0 w-full h-full object-cover z-10"
       onError={(e) => { e.currentTarget.style.display = 'none'; }}
     />
@@ -863,7 +881,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           )}
 
           {/* 主区域 (绝对居中，留出左右安全距离) */}
-          <main className={`flex-1 flex flex-col min-w-0 overflow-hidden transition-all ${sidebarOpen ? 'md:pl-[220px]' : 'md:pl-6'} pl-0 ${(showMembers && activeView === 'chat') ? 'md:pr-[220px] pr-0' : 'pr-0 md:pr-6'}`}>
+          <main className={`flex-1 flex flex-col min-w-0 overflow-hidden transition-all ${sidebarOpen ? 'md:pl-[200px] lg:pl-[220px]' : 'md:pl-6'} pl-0 ${(showMembers && activeView === 'chat') ? 'md:pr-[200px] lg:pr-[220px] pr-0' : 'pr-0 md:pr-6'}`}>
             {activeView === 'chat' ? (
               <div className="flex-1 flex flex-col w-full max-w-[900px] mx-auto min-h-0">
 
@@ -916,11 +934,30 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             
             <div className="">
                     {currentMessages.map((msg, idx) => (
-                      <div key={(msg as any).id || `${msg.ts}-${msg.sender}-${idx}`} className="group flex gap-3 hover:bg-[var(--bg-hover)] -mx-3 px-3 py-2 rounded-md transition-colors">
+                      <div
+                        key={(msg as any).id || `${msg.ts}-${msg.sender}-${idx}`}
+                        className="group flex gap-3 hover:bg-[var(--bg-hover)] -mx-3 px-3 py-2 rounded-md transition-colors"
+                        onContextMenu={(e) => {
+                          e.preventDefault()
+                          setMsgMenu({ x: e.clientX, y: e.clientY, text: (msg as any).plaintext || '' })
+                        }}
+                        onPointerDown={(e) => {
+                          if (e.pointerType === 'mouse') return
+                          longPressTimer.current = setTimeout(() => {
+                            setMsgMenu({ x: e.clientX, y: e.clientY, text: (msg as any).plaintext || '' })
+                          }, 500)
+                        }}
+                        onPointerUp={() => {
+                          if (longPressTimer.current) clearTimeout(longPressTimer.current)
+                        }}
+                        onPointerLeave={() => {
+                          if (longPressTimer.current) clearTimeout(longPressTimer.current)
+                        }}
+                      >
                         <div className="w-9 h-9 rounded-full flex items-center justify-center text-[13px] font-medium shrink-0 bg-[var(--bg-active)] text-[var(--text-main)] mt-0.5 overflow-hidden relative">
     <span>{getInitial(msg.sender)}</span>
     <img
-      src={`/api/avatars/${msg.sender}?t=${Date.now()}`}
+      src={`/api/avatars/${msg.sender}?v=${avatarVer}`}
       className="absolute inset-0 w-full h-full object-cover z-10"
       onError={(e) => { e.currentTarget.style.display = 'none'; }}
     />
@@ -945,7 +982,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                         <div className="w-8 h-8 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[13px] font-bold text-[var(--text-main)] overflow-hidden relative">
     <span>{getInitial(loginId)}</span>
     <img
-      src={`/api/avatars/${loginId}?t=${Date.now()}`}
+      src={`/api/avatars/${loginId}?v=${avatarVer}`}
       className="absolute inset-0 w-full h-full object-cover z-10"
       onError={(e) => { e.currentTarget.style.display = 'none'; }}
     />
@@ -986,7 +1023,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                   )
                 })()}
 
-                <div className="w-full pb-6 md:pb-4 pt-2 shrink-0">
+                <div className="w-full pb-[calc(env(safe-area-inset-bottom)+1.5rem)] md:pb-4 pt-2 shrink-0">
                   <div className="w-full flex items-end gap-2 bg-[var(--bg-hover)] rounded-md px-3 py-2">
                     <RichTextInput
                       handleRef={richInputRef}
@@ -1030,7 +1067,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             <div className="w-7 h-7 rounded-md bg-[var(--bg-active)] flex items-center justify-center text-[11px] text-[var(--text-main)] font-bold overflow-hidden relative">
               <span>{getInitial(loginId)}</span>
               <img
-                src={`/api/avatars/${loginId}?t=${Date.now()}`}
+                src={`/api/avatars/${loginId}?v=${avatarVer}`}
                 className="absolute inset-0 w-full h-full object-cover z-10"
                 onError={(e) => { e.currentTarget.style.display = 'none'; }}
               />
@@ -1043,12 +1080,43 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             </div>
           </div>
 
-          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 md:gap-8 text-[13px] font-medium text-[var(--text-muted)] whitespace-nowrap">
-            <span onClick={() => setActiveView('chat')} data-testid="nav-chat" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'chat' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.groups')}</span>
-            <span onClick={() => setActiveView('dms')} data-testid="nav-dms" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'dms' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.dms')}</span>
-            <span onClick={() => setActiveView('friends')} data-testid="nav-friends" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'friends' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.friends')}</span>
-            <span onClick={() => setActiveView('settings')} data-testid="nav-settings" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'settings' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.settings')}</span>
-            <span onClick={() => setActiveView('more')} data-testid="nav-more" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'more' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.more')}</span>
+          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-1 md:gap-3 whitespace-nowrap">
+            {(() => {
+              const navCls = (active: boolean) =>
+                `flex flex-col items-center justify-center gap-0.5 w-14 h-11 rounded-md transition-colors ${active
+                  ? 'text-[var(--text-main)] bg-[var(--bg-hover)]'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'}`
+              return (
+                <>
+                  <button onClick={() => setActiveView('chat')} data-testid="nav-chat" className={navCls(activeView === 'chat')} aria-label={t('nav.groups')}>
+                    <IconHash className="w-5 h-5" />
+                    <span className="text-[10px] font-medium leading-tight">{t('nav.groups')}</span>
+                  </button>
+                  <button onClick={() => setActiveView('dms')} data-testid="nav-dms" className={navCls(activeView === 'dms')} aria-label={t('nav.dms')}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                    </svg>
+                    <span className="text-[10px] font-medium leading-tight">{t('nav.dms')}</span>
+                  </button>
+                  <button onClick={() => setActiveView('friends')} data-testid="nav-friends" className={navCls(activeView === 'friends')} aria-label={t('nav.friends')}>
+                    <IconUsers className="w-5 h-5" />
+                    <span className="text-[10px] font-medium leading-tight">{t('nav.friends')}</span>
+                  </button>
+                  <button onClick={() => setActiveView('settings')} data-testid="nav-settings" className={navCls(activeView === 'settings')} aria-label={t('nav.settings')}>
+                    <IconSettings className="w-5 h-5" />
+                    <span className="text-[10px] font-medium leading-tight">{t('nav.settings')}</span>
+                  </button>
+                  <button onClick={() => setActiveView('more')} data-testid="nav-more" className={navCls(activeView === 'more')} aria-label={t('nav.more')}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+                      <circle cx="12" cy="12" r="1" />
+                      <circle cx="19" cy="12" r="1" />
+                      <circle cx="5" cy="12" r="1" />
+                    </svg>
+                    <span className="text-[10px] font-medium leading-tight">{t('nav.more')}</span>
+                  </button>
+                </>
+              )
+            })()}
           </div>
 
           <div className="hidden md:block ml-auto w-[200px] text-right text-[11px] text-[var(--text-muted)] font-mono">
@@ -1132,6 +1200,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         onSelect={(channelId) => {
           setChannel(channelId)
           setActiveView('chat')
+          if (!isMd) setSidebarOpen(false)
         }}
       />
 
@@ -1149,6 +1218,16 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         />
       )}
     
+
+      {msgMenu && (
+        <MessageContextMenu
+          x={msgMenu.x}
+          y={msgMenu.y}
+          text={msgMenu.text}
+          onClose={() => setMsgMenu(null)}
+        />
+      )}
+
       {ctxNode && (
         <NodeContextMenu 
           x={ctxNode.x} 

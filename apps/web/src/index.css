@@ -67,3 +67,17 @@
   html[data-prism="true"] .border-\[var\(--bg-active\)\] {
     border-color: var(--border-subtle) !important;
   }
+
+
+/* ---------- 触屏设备 hover 粘滞修复 ---------- */
+/* 移动端浏览器在触摸后会把 :hover 状态一直保留，
+   导致按过的按钮看起来"卡住"变灰。用 (hover: none) 精准屏蔽，
+   不影响桌面端鼠标悬停效果。 */
+@media (hover: none) {
+  .hover\:bg-\[var\(--bg-hover\)\]:hover { background-color: transparent !important; }
+  .hover\:bg-\[var\(--bg-active\)\]:hover { background-color: transparent !important; }
+  .hover\:text-\[var\(--text-main\)\]:hover { color: inherit !important; }
+  .hover\:opacity-100:hover { opacity: inherit !important; }
+  .hover\:opacity-90:hover { opacity: inherit !important; }
+  .hover\:opacity-80:hover { opacity: inherit !important; }
+}

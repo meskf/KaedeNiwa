@@ -4,6 +4,7 @@ import { useAuthStore } from '../stores/auth'
 import { useMembersStore } from '../stores/members'
 import { useServerStore } from '../stores/server'
 import { useProfileStore } from '../stores/profile'
+import { useAvatarVersion } from '../lib/avatarCache'
 import { useChatStore } from '../stores/chat'
 import { useI18n } from '../stores/i18n'
 import { useTheme } from '../lib/useTheme'
@@ -102,6 +103,7 @@ export function SettingsView() {
   const [savingProfile, setSavingProfile] = useState(false)
   const [profileSaveStatus, setProfileSaveStatus] = useState<'ok' | 'error' | ''>('')
   const [uploadingAvatar, setUploadingAvatar] = useState(false)
+  const avatarVer = useAvatarVersion()
   const avatarInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -227,7 +229,7 @@ export function SettingsView() {
             >
               <span className="text-[24px] font-bold text-[var(--text-muted)]">{(me.nickname || me.loginId || '?').slice(0, 1).toUpperCase()}</span>
                 <img
-                  src={`/api/avatars/${me.loginId}?t=${Date.now()}`}
+                  src={`/api/avatars/${me.loginId}?v=${avatarVer}`}
                   alt="avatar"
                   className="absolute inset-0 w-full h-full object-cover z-10"
                   onError={(e) => { e.currentTarget.style.display = 'none' }}

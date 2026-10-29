@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useChatStore } from '../stores/chat'
 import { IconHash, IconFolder, IconFolderOpen, IconVolume } from './icons'
 
@@ -14,18 +14,19 @@ export interface NodeItem {
 
 interface TreeNodeProps {
   node: NodeItem
-  allNodes: NodeItem[]
+  byParent: Map<string, NodeItem[]>
   depth: number
   onContextMenu: (e: React.MouseEvent, node: NodeItem) => void
+  onChannelSelect?: () => void
 }
 
-function TreeNode({ node, allNodes, depth, onContextMenu }: TreeNodeProps) {
+function TreeNode({ node, byParent, depth, onContextMenu, onChannelSelect }: TreeNodeProps) {
   const [expanded, setExpanded] = useState(true)
   const currentChannel = useChatStore(s => s.currentChannel)
   const setChannel = useChatStore(s => s.setChannel)
   const setActiveView = useChatStore(s => s.setActiveView)
 
-  const children = allNodes.filter(n => n.parent_id === node.id).sort((a, b) => a.position - b.position)
+  const children = byParent.get(node.id) ?? []
   const isFolder = node.kind === 'folder'
   const isActive = currentChannel === node.id
 
@@ -35,6 +36,7 @@ function TreeNode({ node, allNodes, depth, onContextMenu }: TreeNodeProps) {
     } else {
       setChannel(node.id)
       setActiveView('chat')
+      onChannelSelect?.()
     }
   }
 
@@ -63,9 +65,10 @@ function TreeNode({ node, allNodes, depth, onContextMenu }: TreeNodeProps) {
             <TreeNode
               key={child.id}
               node={child}
-              allNodes={allNodes}
+              byParent={byParent}
               depth={depth + 1}
               onContextMenu={onContextMenu}
+              onChannelSelect={onChannelSelect}
             />
           ))}
         </div>
@@ -74,16 +77,30 @@ function TreeNode({ node, allNodes, depth, onContextMenu }: TreeNodeProps) {
   )
 }
 
-export function ChannelTree({ onContextMenu }: { onContextMenu: (e: React.MouseEvent, node: NodeItem | null) => void }) {
+export function ChannelTree({ onContextMenu, onChannelSelect }: {
+  onContextMenu: (e: React.MouseEvent, node: NodeItem | null) => void
+  onChannelSelect?: () => void
+}) {
   const nodes = useChatStore(s => s.nodes)
   
   // 渲染根节点（parent_id 为 null）
-  const rootNodes = nodes.filter(n => !n.parent_id).sort((a, b) => a.position - b.position)
+  const byParent = useMemo(() => {
+    const m = new Map<string, NodeItem[]>()
+    for (const n of nodes) {
+      const k = n.parent_id ?? '__root__'
+      let arr = m.get(k)
+      if (!arr) { arr = []; m.set(k, arr) }
+      arr.push(n)
+    }
+    for (const arr of m.values()) arr.sort((a, b) => a.position - b.position)
+    return m
+  }, [nodes])
+  const rootNodes = byParent.get('__root__') ?? []
 
   return (
     <div className="flex flex-col w-full gap-0.5 min-h-[200px]" onContextMenu={(e) => { e.preventDefault(); onContextMenu(e, null) }}>
       {rootNodes.map(node => (
-        <TreeNode key={node.id} node={node} allNodes={nodes} depth={0} onContextMenu={onContextMenu} />
+        <TreeNode key={node.id} node={node} byParent={byParent} depth={0} onContextMenu={onContextMenu} onChannelSelect={onChannelSelect} />
       ))}
       
     </div>

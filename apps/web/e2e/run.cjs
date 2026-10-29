@@ -29,7 +29,10 @@ const TESTS = [
   { id: 't9',  name: 'Authority 退出',   file: 'test-9-authority-leave.cjs',   category: 'media',   media: true },
   { id: 't10', name: 'Commit 补发',      file: 'test-10-commit-replay.cjs',    category: 'mls' },
   { id: 't11', name: '断线重连(离线)',   file: 'test-11-reconnect-offline.cjs',category: 'network' },
-  { id: 't12', name: '多 tab',           file: 'test-12-multi-tab.cjs',        category: 'session' },
+  // t12 已退役：tab lock 在 Phase 2 改为默认关闭（VITE_FORCE_TAB_LOCK=1 才启用），
+  // 因为 iOS WKWebView 后台回收会误判为多 tab 导致用户被无故登出。
+  // 原测试验证的是旧行为（第二个 tab 踢第一个），产品决策变更后失去意义。
+  { id: 't12', name: '多 tab（退役）',   file: 'test-12-multi-tab.cjs',        category: 'session', disabled: true },
   { id: 't13', name: 'pending 队列',     file: 'test-13-pending-queue.cjs',    category: 'network' },
   { id: 't14', name: 'DM wasm 桥',       file: 'test-14-dm-wasm.cjs',          category: 'dm' },
   { id: 't20', name: '接收端画质',       file: 'test-20-receiver-quality.cjs', category: 'media',   media: true },
@@ -83,6 +86,7 @@ function runOne(t, opts) {
   let tests = TESTS;
   if (opts.only) tests = tests.filter(t => t.id === opts.only || t.category === opts.only);
   if (opts.skipMedia) tests = tests.filter(t => !t.media);
+  tests = tests.filter(t => !t.disabled);
 
   if (tests.length === 0) {
     console.error('No tests matched filters');

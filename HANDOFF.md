@@ -1716,3 +1716,111 @@ channels.rs join_channel 限流：0.5/s cap=3（per uid）+ 0.1/s cap=3（per ui
 
 ## 4. 给接手方的建议
 - 如果要加拖拽，主要修改 `ChannelTree.tsx`，监听 drop 事件后调用 `client.updateNode(id, null, newParentId, newPosition)` 并刷新树。
+
+第二十九部分 2026-10-29 会话：channels -> nodes 双表归一 + 前端刷新死锁清理
+============================================================================
+
+## 1. 本次会话做了什么
+
+### 1.1 彻底完成 channels -> nodes 表结构归一（重构遗留收尾）
+上一轮（第二十八部分）做了无限目录树重构，但只动了前端和 nodes.rs，后端 30+ 处
+SQL 仍在查已废弃的 channels 表，导致：
+- 新建语音频道 join 404（HANDOFF 3.1 遗留）
+- 附件上传/下载权限查不到新节点
+- 已读回执、Typing、Reaction 全部 404 静默丢弃
+- LiveKit token 只对旧的 general/voice 生效
+
+本次收尾动作：
+- 批量把 crates/kaede-server/src 下所有 (FROM|INTO|UPDATE|DELETE FROM) channels 
+  统一替换为 nodes
+- channels.rs 里 category_id 列在 SQL 层用 parent_id AS category_id 别名保持 Rust 
+  结构体兼容（暂不改协议字段）
+- categories.rs 的 UPDATE channels SET category_id = NULL 改为 UPDATE nodes SET parent_id = NULL
+- db.rs::init_nodes_table 末尾追加幂等迁移：
+  INSERT OR IGNORE INTO nodes (id,name,parent_id,kind,...) 
+  SELECT id,name,category_id,kind,... FROM channels
+  兼容存量数据（general/voice）平滑进入节点树
+
+### 1.2 清理前端历史遗留的 window.location.reload 死锁
+SettingsView.tsx 里 handleUploadAvatar / handleUploadIcon 都有：
+  setTimeout(() => window.location.reload(), 300);
+  setTimeout(() => window.location.reload(), 500);
+
+后果：
+- 上传头像/图标后页面强制重载，Zustand 状态被重置
+- e2e 测试等待期间页面已 reload，DOM 元素全部消失
+- 表现为 test-21 永远拿不到 <img>
+
+修复：
+- 删除所有强制 reload
+- 头像/图标改为"无条件渲染 <img> + onError 隐藏"（HANDOFF 第二十八部分 1.3 
+  描述的方案在 SettingsView 里漏改了，本次补齐）
+- 保留 Zustand setState 平滑触发 React 渲染
+
+## 2. 踩坑记录（必读）
+
+### 2.1 dev-mode 特性未开导致 401
+清库后测试账号默认 op2（普通成员），create_category/create_channel 会 401。
+原因是 cargo build 没带 --features dev-mode。
+→ 所有测试前置必须：cargo build -p kaede-server --features dev-mode
+
+### 2.2 Rust ICE（内部编译器错误）
+批量正则替换时把 Rust 结构体字段 category_id 也一起改了，触发了 rustc 1.99 的
+增量编译 ICE（verify_ich panic）。
+→ 教训：批量 SQL 替换后必须 cargo clean -p kaede-server 再编译；正则只在 SQL 
+字符串内替换，不要碰 Rust 标识符。
+
+### 2.3 旧进程锁住 exe 导致 cargo build 静默失败
+cargo build 报 os error 5（拒绝访问）时，说明旧的 kaede-server.exe 没被彻底杀死。
+→ 用 taskkill /F /IM kaede-server.exe 而不是 Stop-Process。
+→ 如果仍然锁住，检查是否有 Start-Process 起的子进程未退出。
+
+### 2.4 INSERT 语句列名与结构体字段不一致
+channels.rs 的 INSERT INTO nodes 里列名写 parent_id，但 .bind 传的是 
+req.category_id，曾一度错位。
+→ 统一约定：SQL 层用 parent_id，Rust 层（Category 协议）保留 category_id，
+   仅在 SELECT 时用 parent_id AS category_id 别名。
+
+## 3. 当前状态
+
+- HEAD: bdd6696（+ 本次 MainView 字体 commit）
+- e2e 非媒体: 17/17 全绿（pq, t1-t3, t10-t14, t21-t28）
+- 数据库结构: nodes 表为唯一频道来源，channels 表保留但不写入（靠 db.rs 迁移读入）
+- 测试分类: run.cjs 17 个非媒体 + 7 个 media 未在本轮跑
+
+## 4. 下一步待办（按价值排序）
+
+| # | 项目 | 价值 | 工作量 |
+|---|------|------|--------|
+| 1 | 全量 media 回归 (t4-t9, t20) | 高（回归） | 30 min |
+| 2 | 加入私密频道密码弹窗 UI（HANDOFF 2.4 遗留） | 中（体验） | 30 min |
+| 3 | 前端 typing 指示器接线（HANDOFF 2.2 遗留） | 高（体验） | 30 min |
+| 4 | 前端 reaction 徽章（HANDOFF 2.2 遗留） | 高（体验） | 1h |
+| 5 | Edit/Delete payload fold（HANDOFF 2.3 遗留） | 中（功能） | 1-2h |
+| 6 | 拖拽排序 @dnd-kit（第二十八部分 3.2） | 中 | 1-2h |
+| 7 | 清理 channels 表与旧 channels.rs 死代码 | 低（技术债） | 1h |
+
+## 5. 启动/测试速查
+
+    # 首次或大改后
+    taskkill /F /IM kaede-server.exe / IM livekit-server.exe / IM node.exe
+    Remove-Item kaede.db*
+    cargo build -p kaede-server --features dev-mode
+    Start-Process tools\livekit\livekit-server.exe -ArgumentList '--dev'
+    (设 LIVEKIT_* env) Start-Process target\debug\kaede-server.exe
+    Start-Process pwsh -ArgumentList '-NoExit','-Command',"cd apps\web; npm run dev"
+
+    # 只跑测试
+    cd apps\web
+    node e2e/run.cjs --skip-media       # 17 个非媒体
+    node e2e/run.cjs --only=t21         # 单个
+    node e2e/run.cjs --json             # 机器可读
+
+## 6. 给接手方的话
+
+本次最大的收获是确认了 nodes 表作为单一频道来源的可行性。所有消息路由、MLS 
+group、附件权限、LiveKit token 全部能无缝切到 nodes。channels 表现在是纯历史
+包袱，下个会话可以放心删掉 channels.rs 里剩余的 list_channels/create_channel 等
+旧接口（前端早已不调用）。
+
+另外强烈建议：SettingsView 里任何 window.location.reload 都视为反模式，看到就删。
