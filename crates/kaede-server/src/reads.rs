@@ -46,7 +46,7 @@ async fn mark_read(
     match (&req.channel_id, &req.conv_id) {
         (Some(channel_id), _) => {
             let meta: Option<(i64,)> =
-                sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+                sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
                     .bind(channel_id)
                     .fetch_optional(&state.pool)
                     .await?;
@@ -143,7 +143,7 @@ async fn unread(
            AND m.ts > COALESCE(r.last_read_ts, 0) \
            AND m.channel_id NOT LIKE 'dm:%' \
            AND m.channel_id IN ( \
-               SELECT id FROM channels \
+               SELECT id FROM nodes \
                WHERE is_private = 0 \
                   OR id IN (SELECT channel_id FROM channel_members WHERE login_id = ?)) \
          GROUP BY m.channel_id",

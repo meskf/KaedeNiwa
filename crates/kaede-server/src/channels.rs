@@ -83,8 +83,8 @@ async fn list_channels(
     // 私密频道只对已加入的成员可见。
     type ChannelRow = (String, String, String, i64, i64, i64, Option<String>, Option<String>);
     let rows: Vec<ChannelRow> = sqlx::query_as(
-        "SELECT id, name, kind, position, created_at, is_private, hash_tier, category_id \
-         FROM channels \
+        "SELECT id, name, kind, position, created_at, is_private, hash_tier, parent_id AS category_id \
+         FROM nodes \
          WHERE is_private = 0 \
             OR id IN (SELECT channel_id FROM channel_members WHERE login_id = ?) \
          ORDER BY position, id",
@@ -166,7 +166,7 @@ async fn create_channel(
 
     // 计算新 position
     let max_pos: Option<(i64,)> =
-        sqlx::query_as("SELECT COALESCE(MAX(position), -1) FROM channels")
+        sqlx::query_as("SELECT COALESCE(MAX(position), -1) FROM nodes")
             .fetch_optional(&state.pool)
             .await?;
     let position = max_pos.map(|(p,)| p + 1).unwrap_or(0);
@@ -174,7 +174,7 @@ async fn create_channel(
     // 事务：INSERT channel + 创建者自动加入 channel_members
     let mut tx = state.pool.begin().await?;
     sqlx::query(
-        "INSERT INTO channels (id, name, kind, position, created_at, is_private, password_hash, hash_tier, category_id) \
+        "INSERT INTO nodes (id, name, kind, position, created_at, is_private, password_hash, hash_tier, parent_id) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
@@ -236,7 +236,7 @@ async fn update_channel(
     check_write_perm(&state, uid.as_str()).await?;
 
     let row: Option<(String, String, i64, i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT name, kind, position, created_at, is_private, hash_tier, category_id FROM channels WHERE id = ?",
+        "SELECT name, kind, position, created_at, is_private, hash_tier, parent_id AS category_id FROM nodes WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.pool)
@@ -271,7 +271,7 @@ async fn update_channel(
             return Err(ApiError::BadRequest("channel name 1..=64".into()));
         }
         name = n;
-        sqlx::query("UPDATE channels SET name = ? WHERE id = ?")
+        sqlx::query("UPDATE nodes SET name = ? WHERE id = ?")
             .bind(&name)
             .bind(&id)
             .execute(&state.pool)
@@ -284,7 +284,7 @@ async fn update_channel(
             return Err(ApiError::BadRequest("position must be 0..=i32::MAX".into()));
         }
         position = p;
-        sqlx::query("UPDATE channels SET position = ? WHERE id = ?")
+        sqlx::query("UPDATE nodes SET position = ? WHERE id = ?")
             .bind(position)
             .bind(&id)
             .execute(&state.pool)
@@ -294,7 +294,7 @@ async fn update_channel(
     if req.category_id.is_some() {
         // Treat empty string as null (uncategorize).
         let new_cat = req.category_id.clone().filter(|s| !s.is_empty());
-        sqlx::query("UPDATE channels SET category_id = ? WHERE id = ?")
+        sqlx::query("UPDATE nodes SET parent_id = ? WHERE id = ?")
             .bind(new_cat.as_deref())
             .bind(&id)
             .execute(&state.pool)
@@ -334,7 +334,7 @@ async fn delete_channel(
 
     // 私密频道：非成员即使是 op3/op4 也不能删（防通过广播泄露的 id 越权删除）。
     // op5（服主）保留兜底删除能力。
-    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.pool)
         .await?;
@@ -371,7 +371,7 @@ async fn delete_channel(
     // P1-O：事务包裹，防"删 channel 成功但删 messages 崩溃"留孤儿
     let mut tx = state.pool.begin().await?;
 
-    let affected = sqlx::query("DELETE FROM channels WHERE id = ?")
+    let affected = sqlx::query("DELETE FROM nodes WHERE id = ?")
         .bind(&id)
         .execute(&mut *tx)
         .await?
@@ -506,7 +506,7 @@ async fn join_channel(
     }
 
     let row: Option<(i64, Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT is_private, password_hash, hash_tier FROM channels WHERE id = ?")
+        sqlx::query_as("SELECT is_private, password_hash, hash_tier FROM nodes WHERE id = ?")
             .bind(&id)
             .fetch_optional(&state.pool)
             .await?;
@@ -735,7 +735,7 @@ async fn list_channel_members(
 ) -> Result<Json<ChannelMembersResp>, ApiError> {
     let uid = authenticate(&state, &headers).await?;
 
-    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.pool)
         .await?;
@@ -795,7 +795,7 @@ async fn remove_channel_member(
         return Err(ApiError::Forbidden("only op5 can remove members".into()));
     }
 
-    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.pool)
         .await?;
@@ -911,7 +911,7 @@ async fn leave_channel(
 ) -> Result<StatusCode, ApiError> {
     let uid = authenticate(&state, &headers).await?;
 
-    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.pool)
         .await?;

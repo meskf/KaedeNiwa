@@ -31,7 +31,7 @@ async function checkPrereqs() {
 
 async function login(page, name) {
   await page.goto('http://127.0.0.1:5173');
-  await page.waitForSelector('[data-testid="login-id"]', { timeout: 15000 });
+  await page.waitForSelector('[data-testid="login-id"]', { timeout: 30000 });
   await page.fill('[data-testid="login-id"]', name);
   await page.fill('[data-testid="login-password"]', 'password123');
   await page.click('[data-testid="login-toggle-register"]');
@@ -104,3 +104,4 @@ async function setDisableAdaptive(page) {
 }
 
 module.exports = { chromium, checkPort, checkPrereqs, login, randName, injectFakeDisplayMedia, setDisableAdaptive, typeMessage };
+

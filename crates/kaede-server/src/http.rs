@@ -975,7 +975,7 @@ async fn post_message(
     // C2：channel_id 必须存在（DM 走 dm.rs，不进这里）。
     // 私密频道：仅 channel_members 成员可发送。
     let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT id, is_private FROM channels WHERE id = ?")
+        sqlx::query_as("SELECT id, is_private FROM nodes WHERE id = ?")
             .bind(&req.channel_id)
             .fetch_optional(&state.pool)
             .await?;
@@ -1130,7 +1130,7 @@ async fn get_messages(
         ));
     }
     // 频道必须存在（防信息泄露：区分"频道不存在"和"无权限"）
-    let row: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+    let row: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
         .bind(&channel_id)
         .fetch_optional(&state.pool)
         .await?;
@@ -1212,7 +1212,7 @@ async fn get_messages_since(
     }
 
     // 频道必须存在 + 权限检查（与 get_messages 一致）
-    let row: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+    let row: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
         .bind(&channel_id)
         .fetch_optional(&state.pool)
         .await?;

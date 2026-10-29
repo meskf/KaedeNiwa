@@ -442,7 +442,7 @@ async fn authorize_target(state: &AppState, uid: &str, target: &str) -> Result<(
         return Ok(());
     }
 
-    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
         .bind(target)
         .fetch_optional(&state.pool)
         .await?;

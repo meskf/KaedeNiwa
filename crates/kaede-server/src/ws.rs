@@ -837,7 +837,7 @@ async fn handle_message(
             }
 
             let meta: Option<(i64,)> =
-                sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+                sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
                     .bind(&channel_id)
                     .fetch_optional(&state.pool)
                     .await?;
@@ -1383,7 +1383,7 @@ async fn handle_message(
             }
 
             let meta: Option<(i64,)> =
-                sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+                sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
                     .bind(&channel_id)
                     .fetch_optional(&state.pool)
                     .await?;
@@ -1686,7 +1686,7 @@ mod typing_tests {
     async fn typing_non_member_private_channel_dropped() {
         let state = mk_state().await;
         sqlx::query(
-            "INSERT INTO channels (id, name, kind, created_at, is_private) \
+            "INSERT INTO nodes (id, name, kind, created_at, is_private) \
              VALUES ('ch1', 'secret', 'text', 0, 1)",
         )
         .execute(&state.pool)

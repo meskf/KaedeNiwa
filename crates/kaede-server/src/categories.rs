@@ -171,7 +171,7 @@ async fn delete_category(
 
     let mut tx = state.pool.begin().await?;
     // Detach channels first so they fall into the uncategorized bucket.
-    sqlx::query("UPDATE channels SET category_id = NULL WHERE category_id = ?")
+    sqlx::query("UPDATE nodes SET parent_id = NULL WHERE parent_id = ?")
         .bind(&id)
         .execute(&mut *tx)
         .await?;
@@ -199,3 +199,4 @@ async fn check_write_perm(state: &AppState, uid: &str) -> Result<(), ApiError> {
     }
     Ok(())
 }
+

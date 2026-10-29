@@ -558,7 +558,7 @@ async fn check_channel_access(
         }
         return Ok(());
     }
-    let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM channels WHERE id = ?")
+    let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE id = ?")
         .bind(channel_id)
         .fetch_optional(&state.pool)
         .await
@@ -568,7 +568,7 @@ async fn check_channel_access(
     }
 
     // B2 Phase 1：私密频道媒体 token 必须校验 membership
-    let is_private: (i64,) = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+    let is_private: (i64,) = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
         .bind(channel_id)
         .fetch_one(&state.pool)
         .await

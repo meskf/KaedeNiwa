@@ -94,12 +94,12 @@ pub async fn spawn_test_server() -> std::io::Result<std::net::SocketAddr> {
 ///   逗号分隔配置，`*` 表示允许任意来源。
 pub async fn ensure_default_channels(pool: &sqlx::SqlitePool) {
     // 修复历史乱码：早期 seed 的 "语音" 因 GBK->UTF-8 错误落成 PUA 字符
-    let _ = sqlx::query("UPDATE channels SET name = ?1 WHERE id = 'voice' AND name != ?1")
+    let _ = sqlx::query("UPDATE nodes SET name = ?1 WHERE id = 'voice' AND name != ?1")
         .bind("\u{8BED}\u{97F3}")
         .execute(pool)
         .await;
 
-    let (count,): (i64,) = match sqlx::query_as("SELECT COUNT(*) FROM channels")
+    let (count,): (i64,) = match sqlx::query_as("SELECT COUNT(*) FROM nodes")
         .fetch_one(pool)
         .await
     {
@@ -111,7 +111,7 @@ pub async fn ensure_default_channels(pool: &sqlx::SqlitePool) {
     }
     let now = db::now_ms();
     let _ = sqlx::query(
-        "INSERT INTO channels (id, name, kind, position, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO nodes (id, name, kind, position, created_at) VALUES (?, ?, ?, ?, ?)",
     )
     .bind("general")
     .bind("general")
@@ -122,7 +122,7 @@ pub async fn ensure_default_channels(pool: &sqlx::SqlitePool) {
     .await;
 
     let _ = sqlx::query(
-        "INSERT INTO channels (id, name, kind, position, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO nodes (id, name, kind, position, created_at) VALUES (?, ?, ?, ?, ?)",
     )
     .bind("voice")
     .bind("语音")
@@ -150,7 +150,7 @@ mod default_channel_tests {
         ensure_default_channels(&pool).await;
 
         let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT id, kind FROM channels ORDER BY id")
+            sqlx::query_as("SELECT id, kind FROM nodes ORDER BY id")
                 .fetch_all(&pool)
                 .await
                 .unwrap();

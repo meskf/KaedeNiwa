@@ -264,7 +264,7 @@ pub async fn cleanup_expired(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "DELETE FROM attachments \
          WHERE created_at < ? \
            AND target_id IS NOT NULL \
-           AND target_id NOT IN (SELECT id FROM channels) \
+           AND target_id NOT IN (SELECT id FROM nodes) \
            AND target_id NOT LIKE 'dm:%'",
     )
     .bind(now - 7 * 24 * 3600 * 1000)
@@ -328,5 +328,12 @@ pub async fn init_nodes_table(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error
             created_at INTEGER NOT NULL
         );"
     ).execute(pool).await?;
+    
+    // 【平滑迁移】把旧 channels 表的数据同步到 nodes 表（幂等）
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO nodes (id, name, parent_id, kind, position, is_private, password_hash, hash_tier, created_at)
+         SELECT id, name, category_id, kind, position, is_private, password_hash, hash_tier, created_at FROM channels"
+    ).execute(pool).await;
+
     Ok(())
 }

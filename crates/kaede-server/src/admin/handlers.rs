@@ -51,7 +51,7 @@ pub async fn dashboard(
 ) -> Result<Json<Dashboard>, ApiError> {
     let uptime = state.started_at.elapsed().as_secs();
     let users_online = state.peer_uids().len();
-    let (channels,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM channels")
+    let (channels,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM nodes")
         .fetch_one(&state.pool)
         .await?;
     let (messages,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages")
@@ -319,7 +319,7 @@ pub async fn list_channels(
     let rows = sqlx::query(
         "SELECT c.id, c.name, c.is_private, \
                 (SELECT COUNT(*) FROM channel_members cm WHERE cm.channel_id = c.id) AS members \
-         FROM channels c ORDER BY c.id",
+         FROM nodes c ORDER BY c.id",
     )
     .fetch_all(&state.pool)
     .await?;
@@ -349,7 +349,7 @@ pub async fn delete_channel(
         ));
     }
 
-    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM channels WHERE id = ?")
+    let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.pool)
         .await?;
@@ -364,7 +364,7 @@ pub async fn delete_channel(
             .await?;
 
     let mut tx = state.pool.begin().await?;
-    let affected = sqlx::query("DELETE FROM channels WHERE id = ?")
+    let affected = sqlx::query("DELETE FROM nodes WHERE id = ?")
         .bind(&id)
         .execute(&mut *tx)
         .await?

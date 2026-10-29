@@ -148,15 +148,8 @@ export function SettingsView() {
         useProfileStore.setState(s => ({ me: { ...s.me } })) // 强制触发 React 渲染
       })
     }
-    if (r.ok) {
-      const newMe = useProfileStore.getState().me
-      useProfileStore.setState({ me: { ...newMe, avatarUrl: newMe.avatarUrl + '?t=' + Date.now() } }) // 强制变化触发渲染
-    }
     if (!r.ok) {
       alert(r.error || 'avatar upload failed')
-    } else {
-      // 强制刷新全局状态
-      useProfileStore.getState().fetchMe(token); setTimeout(() => window.location.reload(), 300); setTimeout(() => window.location.reload(), 500)
     }
   }
 
@@ -181,9 +174,6 @@ export function SettingsView() {
     }
     if (!r.ok) {
       alert(r.error || 'icon upload failed')
-    } else {
-      // 强制刷新全局状态
-      useServerStore.getState().fetch(token); setTimeout(() => window.location.reload(), 300); setTimeout(() => window.location.reload(), 500)
     }
   }
 
@@ -235,11 +225,13 @@ export function SettingsView() {
               data-testid="settings-avatar-button"
               title={lang === 'zh' ? '点击更换头像' : 'Click to change avatar'}
             >
-              {me.avatarUrl ? (
-                <img src={`/api/avatars/${me.loginId}?t=${Date.now()}`} alt="avatar" className="w-full h-full object-cover" />
-              ) : (
-                <span className="text-[24px] font-bold text-[var(--text-muted)]">{(me.nickname || me.loginId || '?').slice(0, 1).toUpperCase()}</span>
-              )}
+              <span className="text-[24px] font-bold text-[var(--text-muted)]">{(me.nickname || me.loginId || '?').slice(0, 1).toUpperCase()}</span>
+                <img
+                  src={`/api/avatars/${me.loginId}?t=${Date.now()}`}
+                  alt="avatar"
+                  className="absolute inset-0 w-full h-full object-cover z-10"
+                  onError={(e) => { e.currentTarget.style.display = 'none' }}
+                />
               <span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white text-[11px] font-semibold transition-opacity">
                 {uploadingAvatar ? '...' : (lang === 'zh' ? '更换' : 'Change')}
               </span>
@@ -341,11 +333,13 @@ export function SettingsView() {
                 data-testid="settings-server-icon-button"
                 title={myLevel < 3 ? (lang === 'zh' ? '需要管理员权限' : 'Requires admin') : (lang === 'zh' ? '点击更换图标' : 'Click to change')}
               >
-                {profile.icon_url ? (
-                  <img src={`${profile.icon_url}?t=${Date.now()}`} alt="icon" className="w-full h-full object-cover" />
-                ) : (
-                  <span className="text-[16px] font-bold text-[var(--text-muted)]">{profile.name.slice(0, 1).toUpperCase()}</span>
-                )}
+                <span className="text-[16px] font-bold text-[var(--text-muted)]">{profile.name.slice(0, 1).toUpperCase()}</span>
+                <img
+                  src={`${profile.icon_url}?t=${Date.now()}`}
+                  alt="icon"
+                  className="absolute inset-0 w-full h-full object-cover z-10"
+                  onError={(e) => { e.currentTarget.style.display = 'none' }}
+                />
                 {myLevel >= 3 && (
                   <span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white text-[10px] font-semibold transition-opacity">
                     {uploadingIcon ? '...' : (lang === 'zh' ? '更换' : 'Change')}
@@ -550,3 +544,4 @@ export function SettingsView() {
     </div>
   )
 }
+
