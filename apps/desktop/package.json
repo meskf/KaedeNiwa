@@ -1,0 +1,17 @@
+{
+  "name": "kaede-desktop",
+  "private": true,
+  "version": "0.0.5",
+  "description": "KaedeNiwa Electron shell",
+  "main": "src/main.cjs",
+  "scripts": {
+    "dev": "electron . --dev",
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^34.0.0"
+  },
+  "allowScripts": {
+    "electron@34.5.8": true
+  }
+}

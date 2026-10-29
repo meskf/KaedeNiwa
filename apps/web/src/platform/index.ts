@@ -1,5 +1,6 @@
 import type { IPlatform } from './types'
 import { webPlatform } from './web'
+import { electronPlatform } from './electron'
 
 export type {
   IPlatform,
@@ -27,10 +28,12 @@ function resolvePlatform(): IPlatform {
     const w = window as any
 
     // 未来：if (w.Capacitor?.isNativePlatform?.()) return capacitorPlatform
-    // 未来：if (w.electronAPI) return electronPlatform
 
-    // 现在：Web 兜底
-    void w
+    // Electron：preload 通过 contextBridge 注入了 window.electronAPI
+    if (w.electronAPI && w.electronAPI.platform === 'electron') {
+      console.log('[platform] electron detected, using electronPlatform')
+      return electronPlatform
+    }
   }
   return webPlatform
 }
@@ -40,3 +43,4 @@ export const platform: IPlatform = resolvePlatform()
 export const isWeb = platform.kind === 'web'
 export const isElectron = platform.kind === 'electron'
 export const isCapacitor = platform.kind === 'capacitor'
+

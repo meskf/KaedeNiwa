@@ -99,3 +99,10 @@ apps/web/_chaos2-run.log
 
 # ad-hoc diagnostic scripts (probe*/_*.cjs 只本地用)
 _*.cjs
+
+# ---- Electron desktop shell (PART 32) ----
+apps/desktop/node_modules/
+apps/desktop/out/
+apps/desktop/dist/
+apps/desktop/release/
+apps/desktop/*.log
