@@ -1948,3 +1948,24 @@ apps/web/test-private-channel-prompt.cjs，17th active test：
    同时打开 edit/delete/reply 的大门。
 4. **Capacitor 壳子** —— iOS Info.plist UIBackgroundModes:audio +
    @capacitor/push-notifications + @capacitor/filesystem。
+## 第十三部分（PART 33：2026-10-29 自绘 titlebar）
+
+视觉：无边框直角 + 右上角 − □ × 三按钮（46×32，与 MainView 顶栏 48px 对齐）
+
+三层：
+- main.cjs: frame:false, roundedCorners:false, titleBarStyle:'hidden', hasShadow:true, thickFrame:false, autoHideMenuBar:true
+- preload.cjs: window.windowControls (minimize/toggleMaximize/close/isMaximized/onMaximizeChange)
+- WindowControls.tsx + TitleBarDragStrip.tsx + App.tsx 挂载
+
+Windows frameless 三坑：
+1. thickFrame:true + frame:false 破坏 unmaximize → 改 thickFrame:false
+2. unmaximize event 有时不触发 → 乐观更新 + 300ms w.isMaximized() 校验
+3. Playwright 立即读 isMaximized 拿旧值 → waitForFunction + 500ms 后断言
+
+应急：Ctrl+Shift+Q 强制退出（无边框窗口保险丝）
+
+验证：viewport 1360×860 → 2048×1104 → 1360×860，data-maximized 双确认
+
+Follow-ups:
+- CSP warning (unsafe-eval in dev mode)
+- 边缘 resize 热区可能丢失（thickFrame:false 副作用）
