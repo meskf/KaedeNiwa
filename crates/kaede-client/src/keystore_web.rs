@@ -30,19 +30,29 @@ pub async fn init_web_keystore() -> Result<(), String> {
         .await
         .map_err(|e| format!("rexie open: {:?}", e))?;
 
-    // 1. 尝试取 KEK
-    let tx = rexie
-        .transaction(&["keys"], TransactionMode::ReadWrite)
-        .map_err(|e| format!("tx: {:?}", e))?;
-    let store = tx.store("keys").map_err(|e| format!("store: {:?}", e))?;
-    let kek_key = JsValue::from_str("kek");
-    let kek_req: Option<JsValue> = store
-        .get(kek_key.clone())
-        .await
-        .map_err(|e| format!("get kek: {:?}", e))?;
+    let kek_key_str = "kek";
+    let dek_key_str = "dek";
+
+    // 1. 尝试取 KEK（单独事务，操作完立刻提交）
+    let kek_req: Option<JsValue> = {
+        let tx = rexie
+            .transaction(&["keys"], TransactionMode::ReadOnly)
+            .map_err(|e| format!("tx: {:?}", e))?;
+        let store = tx.store("keys").map_err(|e| format!("store: {:?}", e))?;
+        let req = store
+            .get(JsValue::from_str(kek_key_str))
+            .await
+            .map_err(|e| format!("get kek: {:?}", e))?;
+        tx.done().await.map_err(|e| format!("tx done: {:?}", e))?;
+        req
+    };
 
     let kek: CryptoKey = match kek_req {
+        Some(v) => v
+            .dyn_into()
+            .map_err(|_| "stored kek not CryptoKey".to_string())?,
         None => {
+            // 没找到，生成 KEK
             let algo = Object::new();
             Reflect::set(&algo, &"name".into(), &"AES-GCM".into()).unwrap();
             Reflect::set(&algo, &"length".into(), &JsValue::from_f64(256.0)).unwrap();
@@ -61,28 +71,34 @@ pub async fn init_web_keystore() -> Result<(), String> {
                 .dyn_into()
                 .map_err(|_| "kek not CryptoKey".to_string())?;
 
+            // 存入 KEK（开新事务！）
+            let tx = rexie
+                .transaction(&["keys"], TransactionMode::ReadWrite)
+                .map_err(|e| format!("tx: {:?}", e))?;
+            let store = tx.store("keys").map_err(|e| format!("store: {:?}", e))?;
             store
-                .put(&new_kek, Some(&kek_key))
+                .put(&new_kek, Some(&JsValue::from_str(kek_key_str)))
                 .await
                 .map_err(|e| format!("put kek: {:?}", e))?;
+            tx.done().await.map_err(|e| format!("tx done: {:?}", e))?;
+            
             new_kek
         }
-        Some(v) => v
-            .dyn_into()
-            .map_err(|_| "stored kek not CryptoKey".to_string())?,
     };
-    tx.done().await.map_err(|e| format!("tx done: {:?}", e))?;
 
-    // 2. 尝试取 DEK 密文
-    let tx = rexie
-        .transaction(&["keys"], TransactionMode::ReadOnly)
-        .map_err(|e| format!("tx: {:?}", e))?;
-    let store = tx.store("keys").map_err(|e| format!("store: {:?}", e))?;
-    let dek_key = JsValue::from_str("dek");
-    let dek_req: Option<JsValue> = store
-        .get(dek_key.clone())
-        .await
-        .map_err(|e| format!("get dek: {:?}", e))?;
+    // 2. 尝试取 DEK 密文（单独事务，操作完立刻提交）
+    let dek_req: Option<JsValue> = {
+        let tx = rexie
+            .transaction(&["keys"], TransactionMode::ReadOnly)
+            .map_err(|e| format!("tx: {:?}", e))?;
+        let store = tx.store("keys").map_err(|e| format!("store: {:?}", e))?;
+        let req = store
+            .get(JsValue::from_str(dek_key_str))
+            .await
+            .map_err(|e| format!("get dek: {:?}", e))?;
+        tx.done().await.map_err(|e| format!("tx done: {:?}", e))?;
+        req
+    };
 
     if let Some(dek_val) = dek_req {
         let dek_obj: js_sys::Object = dek_val
@@ -136,12 +152,13 @@ pub async fn init_web_keystore() -> Result<(), String> {
     Reflect::set(&obj, &"iv".into(), &iv_js).unwrap();
     Reflect::set(&obj, &"ct".into(), &ciphertext).unwrap();
 
+    // 存入 DEK（开新事务！）
     let tx = rexie
         .transaction(&["keys"], TransactionMode::ReadWrite)
         .map_err(|e| format!("tx: {:?}", e))?;
     let store = tx.store("keys").map_err(|e| format!("store: {:?}", e))?;
     store
-        .put(&obj, Some(&dek_key))
+        .put(&obj, Some(&JsValue::from_str(dek_key_str)))
         .await
         .map_err(|e| format!("put dek: {:?}", e))?;
     tx.done().await.map_err(|e| format!("tx done: {:?}", e))?;

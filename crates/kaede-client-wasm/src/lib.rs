@@ -9,6 +9,15 @@ pub fn start() {
     console_error_panic_hook::set_once();
 }
 
+/// Init WebCrypto keystore (DEK).
+/// Idempotent: internal IndexedDB KEK protects the DEK across reloads.
+#[wasm_bindgen(js_name = initKeystore)]
+pub async fn init_keystore() -> Result<(), JsValue> {
+    kaede_client::keystore_web::init_web_keystore()
+        .await
+        .map_err(|e| JsValue::from_str(&format!("keystore init failed: {}", e)))
+}
+
 struct WasmObserver {
     callback: Arc<Mutex<Option<Function>>>,
     queue: Arc<Mutex<Vec<ClientEvent>>>,

@@ -1,4 +1,4 @@
-import init, { JsClient } from './pkg/kaede_client_wasm.js'
+import init, { JsClient, initKeystore } from './pkg/kaede_client_wasm.js'
 
 let client: JsClient | null = null
 let initPromise: Promise<JsClient> | null = null
@@ -26,6 +26,7 @@ export function initWasm() {
   if (!initPromise) {
     initPromise = (async () => {
       await init()
+      await initKeystore()
       client = new JsClient()
       return client
     })()
