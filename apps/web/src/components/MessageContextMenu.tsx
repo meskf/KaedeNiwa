@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { platform } from '../platform'
 
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀']
 
@@ -72,9 +73,7 @@ export function MessageContextMenu({ x, y, text, channelId, msgTs, onReact, onCl
         data-testid="message-context-copy"
         className="w-full text-left px-3 py-2 text-[13px] text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition-colors"
         onClick={() => {
-          if (navigator.clipboard && text) {
-            navigator.clipboard.writeText(text).catch(console.error)
-          }
+          if (text) platform.copyText(text).catch(console.error)
           onClose()
         }}
       >
