@@ -127,7 +127,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const { t, lang } = useI18n()
   const [showMembers, setShowMembers] = useState(true)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; uid: string; inVoice: boolean } | null>(null)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sidebarOpen, setSidebarOpen] = useState(typeof window !== "undefined" ? window.innerWidth >= 768 : true)
 
   const [searchOpen, setSearchOpen] = useState(false)
   const [createDialogCategory, setCreateDialogCategory] = useState<string | null | undefined>(undefined)
@@ -738,17 +738,17 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   const isVoiceChannel = currentChannelInfo ? currentChannelInfo.kind === 'voice' : false
 
   return (
-    <div className={`h-screen w-screen flex flex-col text-[var(--text-main)] overflow-hidden font-sans ${dynamicBg ? 'bg-transparent' : 'bg-[var(--bg-app)]'}`}>
+    <div className={`h-[100dvh] w-screen flex flex-col text-[var(--text-main)] overflow-hidden pt-[env(safe-area-inset-top)] font-sans ${dynamicBg ? 'bg-transparent' : 'bg-[var(--bg-app)]'}`}>
 
       <StageManagerServers />
 
       
       {/* 上半部分：适度留白包裹 */}
-      <div className="flex-1 flex flex-col min-h-0 px-16 pt-12 pb-4">
+      <div className="flex-1 flex flex-col min-h-0 px-4 pt-4 pb-0 md:px-16 md:pt-12 md:pb-4">
         
         {/* 顶栏 */}
-        <header className="relative h-[40px] shrink-0 flex items-center gap-4 mb-10">
-          <div className="flex shrink-0 items-center text-[22px] font-extrabold tracking-wide">KaedeNiwa</div>
+        <header className="relative z-0 h-[40px] shrink-0 flex items-center gap-4 mb-4 md:mb-10">
+          <div className="flex shrink-0 items-center text-[16px] md:text-[22px] font-extrabold tracking-wide">KaedeNiwa</div>
           <div className="flex-1 min-w-0 flex justify-center px-2">
             <div className="relative flex items-center w-full max-w-[420px]">
               <IconSearch className="absolute left-3.5 w-4 h-4 text-[var(--text-muted)]" />
@@ -794,7 +794,19 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         <div className="flex-1 relative flex min-h-0">
           
           {/* 左侧侧边栏 */}
-          <aside className={`absolute left-0 top-0 bottom-0 w-[200px] flex-col z-10 ${sidebarOpen ? 'flex' : 'hidden'}`}>
+          {sidebarOpen && (
+            <div 
+              className="md:hidden fixed inset-0 bg-black/40 z-20 transition-opacity" 
+              onClick={() => setSidebarOpen(false)} 
+            />
+          )}
+          <aside className={`
+            fixed md:absolute inset-y-0 left-0 z-30 
+            w-[80%] max-w-[280px] md:w-[200px] 
+            bg-[var(--bg-app)] md:bg-transparent shadow-xl md:shadow-none 
+            flex flex-col transition-transform duration-300 ease-in-out
+            ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+          `}>
             <div className="h-[40px] flex items-center gap-3 mb-6">
               <div className="w-8 h-8 rounded-md bg-[var(--bg-hover)] flex items-center justify-center text-[var(--text-main)] font-bold text-sm shrink-0 overflow-hidden">
                 {serverProfile?.icon_url ? (
@@ -821,7 +833,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
           {/* 右侧成员列表 */}
           {showMembers && activeView === 'chat' && (
-            <aside className="absolute right-0 top-0 bottom-0 w-[200px] flex-col z-10 flex overflow-hidden">
+            <aside className="absolute right-0 top-0 bottom-0 w-[200px] flex-col z-10 hidden md:flex overflow-hidden">
               <div className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-4 mt-0">
                 Members
               </div>
@@ -851,7 +863,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           )}
 
           {/* 主区域 (绝对居中，留出左右安全距离) */}
-          <main className={`flex-1 flex flex-col min-w-0 overflow-hidden transition-all ${sidebarOpen ? 'pl-[220px]' : 'pl-6'} ${(showMembers && activeView === 'chat') ? 'pr-[220px]' : 'pr-6'}`}>
+          <main className={`flex-1 flex flex-col min-w-0 overflow-hidden transition-all ${sidebarOpen ? 'md:pl-[220px]' : 'md:pl-6'} pl-0 ${(showMembers && activeView === 'chat') ? 'md:pr-[220px] pr-0' : 'pr-0 md:pr-6'}`}>
             {activeView === 'chat' ? (
               <div className="flex-1 flex flex-col w-full max-w-[900px] mx-auto min-h-0">
 
@@ -974,7 +986,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                   )
                 })()}
 
-                <div className="w-full pb-4 pt-2 shrink-0">
+                <div className="w-full pb-6 md:pb-4 pt-2 shrink-0">
                   <div className="w-full flex items-end gap-2 bg-[var(--bg-hover)] rounded-md px-3 py-2">
                     <RichTextInput
                       handleRef={richInputRef}
@@ -1012,9 +1024,9 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       </div>
 
       {/* 底部栏 */}
-      <footer className="shrink-0 bg-[var(--bg-footer)] transition-colors">
-        <div className="px-16 h-[72px] flex items-center relative transition-colors">
-          <div className="w-[200px] shrink-0 flex items-center gap-3">
+      <footer className="shrink-0 bg-[var(--bg-footer)] transition-colors pb-[env(safe-area-inset-bottom)]">
+        <div className="px-4 h-[64px] md:h-[72px] md:px-16 flex items-center relative transition-colors">
+          <div className="hidden md:flex w-[200px] shrink-0 items-center gap-3">
             <div className="w-7 h-7 rounded-md bg-[var(--bg-active)] flex items-center justify-center text-[11px] text-[var(--text-main)] font-bold overflow-hidden relative">
               <span>{getInitial(loginId)}</span>
               <img
@@ -1031,7 +1043,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             </div>
           </div>
 
-          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-8 text-[13px] font-medium text-[var(--text-muted)]">
+          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 md:gap-8 text-[13px] font-medium text-[var(--text-muted)] whitespace-nowrap">
             <span onClick={() => setActiveView('chat')} data-testid="nav-chat" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'chat' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.groups')}</span>
             <span onClick={() => setActiveView('dms')} data-testid="nav-dms" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'dms' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.dms')}</span>
             <span onClick={() => setActiveView('friends')} data-testid="nav-friends" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'friends' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.friends')}</span>
@@ -1039,7 +1051,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             <span onClick={() => setActiveView('more')} data-testid="nav-more" className={`cursor-pointer transition-colors hover:text-[var(--text-main)] ${activeView === 'more' ? 'text-[var(--text-main)]' : ''}`}>{t('nav.more')}</span>
           </div>
 
-          <div className="ml-auto w-[200px] text-right text-[11px] text-[var(--text-muted)] font-mono">
+          <div className="hidden md:block ml-auto w-[200px] text-right text-[11px] text-[var(--text-muted)] font-mono">
             v0.0.5
           </div>
         </div>
