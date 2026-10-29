@@ -81,6 +81,9 @@ interface ChatState {
   serverMembers: string[];
   typingUsers: Record<string, Record<string, number>>;  // channelId -> {uid: expireTs}
 
+  // channelId -> String(msgTs) -> emoji -> [uid]
+  reactions: Record<string, Record<string, Record<string, string[]>>>;
+
   setChannels: (chs: string[]) => void;
   setChannel: (ch: string) => void;
   setActiveView: (view: ActiveView) => void;
@@ -106,6 +109,8 @@ interface ChatState {
   setFriends: (f: FriendEntry[]) => void;
   setServerMembers: (m: string[]) => void;
   setTyping: (channelId: string, uid: string, ttlMs: number) => void;
+  applyReaction: (channelId: string, targetTs: number, emoji: string, uid: string, action: 'add' | 'remove') => void;
+  clearReactions: (channelId: string) => void;
   pruneTyping: () => void;
 
   pendingAttachments: PendingAttachment[];
@@ -135,6 +140,7 @@ export const useChatStore = create<ChatState>((set) => ({
   friends: [],
   serverMembers: [],
   typingUsers: {},
+  reactions: {},
   pendingAttachments: [],
   attachmentCache: {},
 
@@ -212,6 +218,37 @@ export const useChatStore = create<ChatState>((set) => ({
       if (Object.keys(kept).length > 0) { next[ch] = kept; }
     }
     return changed ? { typingUsers: next } : state;
+  }),
+
+  applyReaction: (channelId, targetTs, emoji, uid, action) => set((state) => {
+    const tsKey = String(targetTs)
+    const chMap = state.reactions[channelId] || {}
+    const msgMap = chMap[tsKey] || {}
+    const uids = (msgMap[emoji] || []).slice()
+    let nextUids: string[]
+    if (action === 'add') {
+      if (uids.includes(uid)) return state
+      nextUids = [...uids, uid]
+    } else {
+      if (!uids.includes(uid)) return state
+      nextUids = uids.filter(u => u !== uid)
+    }
+    const nextMsgMap = { ...msgMap }
+    if (nextUids.length === 0) delete nextMsgMap[emoji]
+    else nextMsgMap[emoji] = nextUids
+    const nextChMap = { ...chMap }
+    if (Object.keys(nextMsgMap).length === 0) delete nextChMap[tsKey]
+    else nextChMap[tsKey] = nextMsgMap
+    const nextReactions = { ...state.reactions }
+    if (Object.keys(nextChMap).length === 0) delete nextReactions[channelId]
+    else nextReactions[channelId] = nextChMap
+    return { reactions: nextReactions }
+  }),
+  clearReactions: (channelId) => set((state) => {
+    if (!state.reactions[channelId]) return state
+    const next = { ...state.reactions }
+    delete next[channelId]
+    return { reactions: next }
   }),
 
   addPendingAttachment: (a) => set((state) => ({

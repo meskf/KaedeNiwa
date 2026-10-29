@@ -26,6 +26,8 @@ import { NodeContextMenu } from './NodeContextMenu'
 import { RichTextInput, type RichTextInputHandle } from './RichTextInput'
 import { MessageText } from './MessageText'
 import { MessageContextMenu } from './MessageContextMenu'
+import { ReactionBar } from './ReactionBar'
+import { tryDecodeReactionPayload } from '../lib/reactionUtils'
 import { extractMessage } from '../lib/messageUtils'
 import { useAvatarVersion } from '../lib/avatarCache'
 import { useMediaQuery, BP } from '../hooks/useMediaQuery'
@@ -35,7 +37,7 @@ import { useMediaQuery, BP } from '../hooks/useMediaQuery'
 
 export function MainView({ onLogout }: { onLogout: () => void }) {
   const [ctxNode, setCtxNode] = useState<{ x: number, y: number, node: any } | null>(null)
-  const [msgMenu, setMsgMenu] = useState<{ x: number, y: number, text: string } | null>(null)
+  const [msgMenu, setMsgMenu] = useState<{ x: number, y: number, text: string, channelId?: string, msgTs?: number } | null>(null)
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const setNodes = useChatStore(s => s.setNodes)
 
@@ -109,6 +111,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     pendingMessages, addPending, removePending, markPendingFailed, incrementRetry,
     peerStatus,
       typingUsers, setTyping, pruneTyping,
+      reactions,
   } = useChatStore()
   const categories = useChatStore(s => s.categories)
   const setCategories = useChatStore(s => s.setCategories)
@@ -421,6 +424,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 if (!c) return
                 // 稍等，确保 group 状态稳定
                 await new Promise(r => setTimeout(r, 800))
+                useChatStore.getState().clearReactions(jchId)
                 const hist = await c.load_history(jchId, 50)
                 const arr = typeof hist === 'string' ? JSON.parse(hist) : hist
                 const list = Array.isArray(arr) ? arr : []
@@ -463,6 +467,18 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           if (target) useChatStore.getState().updatePendingAttachment(target.id, { sent, total })
           return
         }
+        if ((ev as any).ChannelReaction) {
+          const cr: any = (ev as any).ChannelReaction
+          const rp = tryDecodeReactionPayload(cr.plaintext)
+          if (rp) {
+            const chId = rp.c || cr.channel_id
+            const curCh = useChatStore.getState().currentChannel
+            if (chId === curCh) {
+              const actor = rp.u || cr.from || 'Unknown'
+              useChatStore.getState().applyReaction(chId, rp.target_ts, rp.emoji, actor, rp.action)
+            }
+          }
+        }
           if (ev.Typing) {
             const tch = (ev.Typing as any).channel_id
             const tfrom = (ev.Typing as any).from
@@ -472,6 +488,20 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           }
         if (ev.ChannelMessage) {
           if (ev.ChannelMessage.channel_id !== useChatStore.getState().currentChannel) return
+          // 0x03 密文路径（general 等带 group 的频道走这里）也可能携带 ReactionPayload
+          {
+            const cm: any = ev.ChannelMessage
+            const rpCM = tryDecodeReactionPayload(cm.plaintext)
+            if (rpCM) {
+              const chId = rpCM.c || cm.channel_id
+              const curCh = useChatStore.getState().currentChannel
+              if (chId === curCh) {
+                const actor = rpCM.u || cm.from || 'Unknown'
+                useChatStore.getState().applyReaction(chId, rpCM.target_ts, rpCM.emoji, actor, rpCM.action)
+              }
+              return
+            }
+          }
           try {
             const { text, attachments } = extractMessage(ev.ChannelMessage.plaintext)
             useChatStore.getState().addMessage(useChatStore.getState().currentChannel, {
@@ -512,7 +542,19 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           return
         }
         if (ev.AppMessageReceived) {
-          if (ev.AppMessageReceived.channel_id !== useChatStore.getState().currentChannel) return
+          // 公开频道 reaction 走 MLS broadcast → 与普通消息混在同一路径
+          const amr: any = ev.AppMessageReceived
+          const rp2 = tryDecodeReactionPayload(amr.payload)
+          if (rp2) {
+            const chId = rp2.c || amr.channel_id
+            const curCh = useChatStore.getState().currentChannel
+            if (chId === curCh) {
+              const actor = rp2.u || amr.from || 'Unknown'
+              useChatStore.getState().applyReaction(chId, rp2.target_ts, rp2.emoji, actor, rp2.action)
+            }
+            return
+          }
+          if (amr.channel_id !== useChatStore.getState().currentChannel) return
           try {
             const { text, attachments } = extractMessage(ev.AppMessageReceived.payload)
             useChatStore.getState().addMessage(useChatStore.getState().currentChannel, {
@@ -936,15 +978,18 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                     {currentMessages.map((msg, idx) => (
                       <div
                         key={(msg as any).id || `${msg.ts}-${msg.sender}-${idx}`}
+                        data-testid="message-row"
+                        data-msg-ts={String(msg.ts)}
+                        data-msg-sender={msg.sender}
                         className="group flex gap-3 hover:bg-[var(--bg-hover)] -mx-3 px-3 py-2 rounded-md transition-colors"
                         onContextMenu={(e) => {
                           e.preventDefault()
-                          setMsgMenu({ x: e.clientX, y: e.clientY, text: (msg as any).plaintext || '' })
+                          setMsgMenu({ x: e.clientX, y: e.clientY, text: (msg as any).plaintext || '', channelId: currentChannel, msgTs: msg.ts })
                         }}
                         onPointerDown={(e) => {
                           if (e.pointerType === 'mouse') return
                           longPressTimer.current = setTimeout(() => {
-                            setMsgMenu({ x: e.clientX, y: e.clientY, text: (msg as any).plaintext || '' })
+                            setMsgMenu({ x: e.clientX, y: e.clientY, text: (msg as any).plaintext || '', channelId: currentChannel, msgTs: msg.ts })
                           }, 500)
                         }}
                         onPointerUp={() => {
@@ -974,6 +1019,21 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                           {Array.isArray((msg as any).attachments) && (msg as any).attachments.length > 0 && (
                             <MessageAttachments targetId={currentChannel} attachments={(msg as any).attachments} />
                           )}
+                          <ReactionBar
+                            reactions={(reactions[currentChannel] || {})[String(msg.ts)] || {}}
+                            currentUid={loginId}
+                            onToggle={(emoji, action) => {
+                              // 乐观更新：先本地 apply，服务器 echo 时 applyReaction 幂等
+                              useChatStore.getState().applyReaction(currentChannel, msg.ts, emoji, loginId, action)
+                              const c = getClient()
+                              if (!c) return
+                              ;(c as any).sendReaction(currentChannel, BigInt(msg.ts), emoji, action).catch((e: any) => {
+                                console.error('[reaction]', e)
+                                // 发送失败 → 回滚
+                                useChatStore.getState().applyReaction(currentChannel, msg.ts, emoji, loginId, action === 'add' ? 'remove' : 'add')
+                              })
+                            }}
+                          />
                         </div>
                       </div>
                     ))}
@@ -1224,6 +1284,21 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           x={msgMenu.x}
           y={msgMenu.y}
           text={msgMenu.text}
+          channelId={msgMenu.channelId}
+          msgTs={msgMenu.msgTs}
+          onReact={(emoji, action) => {
+            if (!msgMenu.channelId || msgMenu.msgTs == null) return
+            const chId = msgMenu.channelId
+            const ts = msgMenu.msgTs
+            // 乐观更新
+            useChatStore.getState().applyReaction(chId, ts, emoji, loginId, action)
+            const c = getClient()
+            if (!c) return
+            ;(c as any).sendReaction(chId, BigInt(ts), emoji, action).catch((e: any) => {
+              console.error('[reaction]', e)
+              useChatStore.getState().applyReaction(chId, ts, emoji, loginId, action === 'add' ? 'remove' : 'add')
+            })
+          }}
           onClose={() => setMsgMenu(null)}
         />
       )}
