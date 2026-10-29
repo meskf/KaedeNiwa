@@ -1824,3 +1824,127 @@ group、附件权限、LiveKit token 全部能无缝切到 nodes。channels 表�
 旧接口（前端早已不调用）。
 
 另外强烈建议：SettingsView 里任何 window.location.reload 都视为反模式，看到就删。
+
+---
+
+## 第十一部分（PART 31：2026-10-29 私密频道密码端到端）
+
+### 本轮修复的 P0 根因
+
+**nodes.create 从未落 password_hash。**
+
+无限目录树重构时引入 /api/nodes 新路由，替代老的 /api/channels。
+新的 create_node 只 INSERT id/name/parent_id/kind/position/is_private/created_at，
+完全忽略 _password 字段（字段名带下划线，暗示"占位未用"）。
+所有经此路由创建的私密频道 password_hash 全为 NULL。
+
+**后果：** join_channel L517-528 检测到 is_private=true 但
+pw_hash.is_none() 时，返回 ApiError::BadRequest("private channel
+without password_hash") → 前端收到 400，无任何"密码错误"语义。
+用户永远无法进入自己创建的私密频道。
+
+**修复：**
+- channels.rs 3 个 helper 改 pub(crate)：
+  argon2_permits / hash_channel_password / check_write_perm
+- nodes.rs create_node 走完整流程（与 channels::create_channel 对齐）：
+  1. check_write_perm 权限门（之前缺失，op1 也能建频道，安全漏洞）
+  2. check_rate_scoped(uid, "create_channel", 0.2, 3.0) 限流
+  3. acquire_argon2_weighted 并发 Argon2 permit
+  4. password 长度 8..=128 校验
+  5. hash_channel_password 生成 PHC 串
+  6. INSERT 带 password_hash + hash_tier
+
+### 前端路径重构：避免"无密码试探"
+
+**旧架构（错误）：**
+1. 点击私密频道 → initChannel → join_channel(chId)（空密码）
+2. 服务端返回 400（错误信息含糊："join_channel: 400 Bad Request"）
+3. 前端 catch 到 400 → 弹密码框
+4. 用户输密码 → joinChannelWithPassword → 服务端 401 → 弹框保留
+
+**问题：**
+- 步骤 2 白白消耗 join_channel 的 rate quota（0.5/s cap 3）
+- 步骤 2 的 400 与"真正的格式错误"共享同一状态码，语义混乱
+- 前序 general join 已消耗 token，私密频道 join 在 8s 内可能连续撞 400
+- 服务端返回的 "join_channel rate limited" 消息被 kaede-client
+  http.rs 丢弃（只读 status 不读 body），前端无法区分 rate limit 和
+  密码错误
+
+**新架构（正确）：**
+1. 点击 → initChannel 查 node.is_private
+2. is_private=true → 直接 setPasswordPrompt，零 HTTP
+3. 用户在弹窗输入密码 → joinChannelWithPassword（只调 1 次）
+4. 服务端 401（密码错）或 204（成功）
+
+**收益：** 零 rate 消耗、零 400 语义歧义、用户体验更顺滑（弹窗立现，
+无加载延迟）。
+
+### 密码缓存：unlockedPrivateRef
+
+Map<channelId, password> 仅存内存：
+- 首次成功 join 时 set
+- 用户在密码弹窗点"取消"时 delete
+- 切走再切回时，如 map 有该频道则带密码 join，不弹窗
+- 服务端 401（密码失效，如管理员改了频道密码）时清掉缓存并重新弹窗
+- 组件 unmount 后 map 自然被回收
+
+**安全权衡：** 明文密码在 JS 内存里。不写 localStorage / IndexedDB。
+tab 关闭即失效。对于"用户主动解锁过的频道"这是可接受的 UX / 安全
+平衡点。
+
+### 新测试：t30
+
+apps/web/test-private-channel-prompt.cjs，17th active test：
+1. u0 建私密频道 → nodes.create 落 hash
+2. u1 登录 → 看到节点
+3. 点击 → prompt 立刻出现（无需等待 HTTP）
+4. 输入错误密码 → 错误提示保留弹窗
+5. 输入正确密码 → 弹窗消失，频道可用
+6. 发消息 → 出现在历史
+7. 切走再切回 → 使用缓存密码，不弹窗
+
+**测试 wait 策略：**
+- u1 登录后等 10s（让 login 时的 general join_channel token 恢复）
+- prompt 出现后等 3s（rate window）
+- 错误密码尝试后再等 8s（join_channel rate 0.5/s 的跨尝试间隔）
+
+### 已知遗留 / Follow-ups
+
+1. **client http.rs 不读 response body** —— 所有 HTTP 错误都变成
+   "http error (NNN): <path>: NNN <status text>"，丢失了服务端
+   ApiError 里的 message 字段。这影响所有 400/401/409/429 的
+   可诊断性。PasswordPrompt 目前把 400/401 统一处理，只是权宜。
+   独立任务，建议下个会话处理。
+
+2. **channels.rs 和 nodes.rs 双路由并存** —— 老 /api/channels
+   仍有完整的 create / join / update / delete，新 /api/nodes 是
+   无限目录树重构引入的。两边 password hash 逻辑现在同步了，但
+   长期应合并。架构债，不急。
+
+3. **t29（Reaction UI）仍 disabled** —— 发送方消息 ts 不一致
+   （send_message 不返回 server ts），sender 自己发的消息停在
+   pending 队列。接收方 reaction 路径已完整可用。等修好 ts 一致性
+   后解冻，同时 edit / delete / reply 会一起解决。
+
+4. **DB 中残留的 NULL-hash 私密频道** —— -CleanDb 已清空。生产
+   环境若已有坏数据，需要一次性 migration：
+   DELETE FROM nodes WHERE is_private=1 AND password_hash IS NULL，
+   或通知用户重建。
+
+### 状态快照
+
+- e2e：17/17 skip-media 全绿（t29 disabled，t30 新增）
+- 8 个 crate 无改动编译通过
+- wasm 无需重建（server-only fix + 前端逻辑）
+- 三次 commit：reaction receive path / platform abstraction / 本轮
+
+### 下一步建议（按价值排序）
+
+1. **Electron 壳子骨架** —— apps/desktop/ 主进程 + preload + 首次
+   加载 dev server。Platform 抽象层已经就绪，直接接入。
+2. **client http.rs 读 response body** —— 一次性修所有 API 错误
+   可诊断性。
+3. **消息 ts 一致性** —— Rust send_message 返回 {ts, id}，解冻 t29，
+   同时打开 edit/delete/reply 的大门。
+4. **Capacitor 壳子** —— iOS Info.plist UIBackgroundModes:audio +
+   @capacitor/push-notifications + @capacitor/filesystem。
