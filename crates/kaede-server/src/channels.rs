@@ -958,7 +958,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, ApiError> {
 ///
 /// 值与 [`resolve_argon2`] 的内存参数成比例：19 MiB → 1 份，64 → 1 份（可接受），
 /// 256 MiB → 4 份（全局最多 2 个并发，峰值 512 MiB）。
-fn argon2_permits(tier: Option<&str>) -> u32 {
+pub(crate) fn argon2_permits(tier: Option<&str>) -> u32 {
     match tier {
         Some("256") => 4,
         _ => 1,
@@ -996,7 +996,7 @@ fn resolve_argon2(tier: Option<&str>) -> Result<(Argon2<'static>, &'static str),
     Ok((a2, tier_str))
 }
 
-fn hash_channel_password(password: &str, tier: Option<&str>) -> Result<(String, String), ApiError> {
+pub(crate) fn hash_channel_password(password: &str, tier: Option<&str>) -> Result<(String, String), ApiError> {
     use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
     let (a2, tier_str) = resolve_argon2(tier)?;
     let salt = SaltString::generate(&mut OsRng);
@@ -1021,7 +1021,7 @@ fn verify_channel_password(password: &str, hash: &str) -> bool {
 ///
 /// **临时策略**：第一个注册用户自动 op5（服主），其余默认 op2（成员）。
 /// 严格权限系统见后续阶段。
-async fn check_write_perm(state: &AppState, uid: &str) -> Result<(), ApiError> {
+pub(crate) async fn check_write_perm(state: &AppState, uid: &str) -> Result<(), ApiError> {
     let row: Option<(String,)> = sqlx::query_as("SELECT op FROM members WHERE login_id = ?")
         .bind(uid)
         .fetch_optional(&state.pool)

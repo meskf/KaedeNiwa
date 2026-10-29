@@ -49,6 +49,7 @@ const TESTS = [
   // reaction 路径已完整可用，本测试验证的是 sender 侧 view 一致，等 ts 一致性
   // 修好后恢复（disable: true 意为不参与 run.cjs 主循环）。
   { id: 't29', name: 'Reaction UI (WIP)', file: 'test-reaction-ui.cjs',         category: 'ui', disabled: true },
+  { id: 't30', name: '私密频道密码弹窗', file: 'test-private-channel-prompt.cjs',  category: 'channels' },
 ];
 
 const GREEN = '\x1b[32m', RED = '\x1b[31m', YELLOW = '\x1b[33m', GRAY = '\x1b[90m', RESET = '\x1b[0m';

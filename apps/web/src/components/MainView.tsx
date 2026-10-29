@@ -26,6 +26,7 @@ import { NodeContextMenu } from './NodeContextMenu'
 import { RichTextInput, type RichTextInputHandle } from './RichTextInput'
 import { MessageText } from './MessageText'
 import { MessageContextMenu } from './MessageContextMenu'
+import { PasswordPrompt } from './PasswordPrompt'
 import { ReactionBar } from './ReactionBar'
 import { tryDecodeReactionPayload } from '../lib/reactionUtils'
 import { extractMessage } from '../lib/messageUtils'
@@ -38,6 +39,10 @@ import { useMediaQuery, BP } from '../hooks/useMediaQuery'
 export function MainView({ onLogout }: { onLogout: () => void }) {
   const [ctxNode, setCtxNode] = useState<{ x: number, y: number, node: any } | null>(null)
   const [msgMenu, setMsgMenu] = useState<{ x: number, y: number, text: string, channelId?: string, msgTs?: number } | null>(null)
+  const [passwordPrompt, setPasswordPrompt] = useState<{ channelId: string, channelName?: string } | null>(null)
+  const lastGoodChannelRef = useRef<string>('general')
+  // 本次会话内已解锁的私密频道（内存 only）
+  const unlockedPrivateRef = useRef<Map<string, string>>(new Map())
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const setNodes = useChatStore(s => s.setNodes)
 
@@ -226,6 +231,40 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       if (cancelled) return
       const client = getClient()
       if (!client) { setTimeout(initChannel, 200); return }
+      // 私密频道：先看 is_private，直接弹窗，不发无密码 join（避免消耗 rate limit）
+      const privNode = useChatStore.getState().nodes.find((n: any) => n.id === CH)
+      if (privNode && privNode.is_private) {
+        const savedPw = unlockedPrivateRef.current.get(CH)
+        if (!savedPw) {
+          console.log("[initChannel] private channel", CH, "-> prompt (no join attempt)")
+          setPasswordPrompt({ channelId: CH, channelName: privNode.name })
+          return
+        }
+        try {
+          await client.joinChannelWithPassword(CH, savedPw)
+          lastGoodChannelRef.current = CH
+          if (cancelled) return
+          const hist = await client.load_history(CH, 50)
+          if (cancelled) return
+          const parsedHist = typeof hist === "string" ? JSON.parse(hist) : hist
+          if (Array.isArray(parsedHist) && parsedHist.length > 0) {
+            setMessages(CH, parsedHist)
+          }
+        } catch (e: any) {
+          const msg = String(e)
+          if (/401|unauthor/i.test(msg)) {
+            console.warn("[initChannel] saved password rejected, clearing cache")
+            unlockedPrivateRef.current.delete(CH)
+            if (!cancelled && useChatStore.getState().currentChannel === CH) {
+              setPasswordPrompt({ channelId: CH, channelName: privNode.name })
+            }
+          } else {
+            console.error("[initChannel] private rejoin failed:", e)
+          }
+        }
+        return
+      }
+      // 公开频道：正常 join_channel
       try {
         if (!(window as any).__kaede_join_locks__) (window as any).__kaede_join_locks__ = {}
         const locks = (window as any).__kaede_join_locks__
@@ -233,6 +272,8 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           locks[CH] = client.join_channel(CH).finally(() => { delete locks[CH] })
         }
         await locks[CH]
+        // join 成功 = 频道可访问。密码弹窗取消回退时用它作目标
+        lastGoodChannelRef.current = CH
         if (cancelled) return
         const hist = await client.load_history(CH, 50)
         if (cancelled) return
@@ -257,6 +298,18 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         const msg = String(e)
         if (msg.includes('welcome channel closed')) {
           console.warn('[initChannel] concurrent join detected, ignoring...')
+          return
+        }
+        // 私密频道未加入：
+        //   - join_channel 无密码尝试 → 服务端 400 Bad Request
+        //   - joinChannelWithPassword 密码错误 → 服务端 401 Unauthorized
+        // 两种都弹密码框，不重试、不清空消息
+        if (/401|unauthor|password/i.test(msg) || /join_channel: 400/i.test(msg)) {
+          if (!cancelled && useChatStore.getState().currentChannel === CH) {
+            const node = useChatStore.getState().nodes.find((n: any) => n.id === CH)
+            console.log('[initChannel] auth-required on', CH, '→ password prompt')
+            setPasswordPrompt({ channelId: CH, channelName: node?.name })
+          }
           return
         }
         console.error('[initChannel] join failed (attempt ' + attempt + '):', e)
@@ -1279,6 +1332,43 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       )}
     
 
+      {passwordPrompt && (
+        <PasswordPrompt
+          channelName={passwordPrompt.channelName}
+          onCancel={() => {
+            const canceled = passwordPrompt.channelId
+            setPasswordPrompt(null)
+            unlockedPrivateRef.current.delete(canceled)
+            // 回退到上一个成功频道。若用户当前仍停留在私密频道，UI 会显示空消息列表
+            const back = lastGoodChannelRef.current
+            if (back && back !== canceled) {
+              useChatStore.getState().setChannel(back)
+            }
+          }}
+          onSubmit={async (pw) => {
+            const chId = passwordPrompt.channelId
+            const c = getClient()
+            if (!c) throw new Error('client not ready')
+            // 1) 用密码 join（失败会抛 401，PasswordPrompt 内部显示错误并保持弹窗）
+            await c.joinChannelWithPassword(chId, pw)
+            // 2) 成功后加载历史
+            try {
+              const hist = await c.load_history(chId, 50)
+              const arr = typeof hist === 'string' ? JSON.parse(hist) : hist
+              if (Array.isArray(arr) && arr.length > 0) {
+                useChatStore.getState().setMessages(chId, arr)
+              }
+            } catch (e) {
+              console.warn('[password-prompt] load_history failed:', e)
+            }
+            // 3) 记住密码（本会话内）
+            unlockedPrivateRef.current.set(chId, pw)
+            // 4) 记录 good channel，关闭弹窗
+            lastGoodChannelRef.current = chId
+            setPasswordPrompt(null)
+          }}
+        />
+      )}
       {msgMenu && (
         <MessageContextMenu
           x={msgMenu.x}
