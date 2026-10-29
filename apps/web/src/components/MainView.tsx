@@ -748,7 +748,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         
         {/* 顶栏 */}
         <header className="relative h-[40px] shrink-0 flex items-center gap-4 mb-10">
-          <div className="flex shrink-0 items-center text-[16px] font-bold tracking-wide">KaedeNiwa</div>
+          <div className="flex shrink-0 items-center text-[22px] font-extrabold tracking-wide">KaedeNiwa</div>
           <div className="flex-1 min-w-0 flex justify-center px-2">
             <div className="relative flex items-center w-full max-w-[420px]">
               <IconSearch className="absolute left-3.5 w-4 h-4 text-[var(--text-muted)]" />
