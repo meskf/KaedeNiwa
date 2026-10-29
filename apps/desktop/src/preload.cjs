@@ -14,4 +14,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveFile: (opts) => ipcRenderer.invoke('electron:save-file', opts),
 })
 
+contextBridge.exposeInMainWorld('windowControls', {
+  minimize: () => ipcRenderer.invoke('window:minimize'),
+  toggleMaximize: () => ipcRenderer.invoke('window:maximize-toggle'),
+  close: () => ipcRenderer.invoke('window:close'),
+  isMaximized: () => ipcRenderer.invoke('window:is-maximized'),
+  onMaximizeChange: (cb) => {
+    const handler = (_e, isMax) => cb(isMax)
+    ipcRenderer.on('window:maximize-changed', handler)
+    return () => ipcRenderer.removeListener('window:maximize-changed', handler)
+  },
+})
+
 console.log('[preload] electronAPI exposed')

@@ -4,6 +4,8 @@ import { initWasm, getClient, recordLoginArgs, stopReconnect, allowReconnect } f
 import { LoginView } from './components/LoginView'
 import { MainView } from './components/MainView'
 import { DynamicBackground } from './components/DynamicBackground'
+import { WindowControls } from './components/WindowControls'
+import { TitleBarDragStrip } from './components/TitleBarDragStrip'
 
 export default function App() {
 
@@ -236,6 +238,8 @@ export default function App() {
 
   return (
     <>
+      <TitleBarDragStrip />
+      <WindowControls />
       {dynamicBg && <DynamicBackground />}
       <div className={`h-full w-full relative z-10 ${dynamicBg ? 'bg-transparent' : 'bg-[var(--bg-app)]'}`}>
         {isLoggedIn

@@ -11,6 +11,11 @@ const isDev = process.argv.includes('--dev') || !app.isPackaged
 const DEV_URL = 'http://127.0.0.1:5173'
 const PROD_HTML = path.join(__dirname, '..', '..', 'web', 'dist', 'index.html')
 
+// 维护最大化状态（Windows 上 w.isMaximized() 在 maximize/unmaximize 后
+// 短时间返回旧值，unmaximize 有时不触发事件——这是 Electron 已知怪癖。
+// 用事件维护的布尔量代替同步读取，比 w.isMaximized() 可靠。）
+let isMaxState = false
+
 // WebRTC 需要 SharedArrayBuffer（HANDOFF 第九部分）
 // 通过 COOP/COEP 头启用（见 createWindow 里的 onHeadersReceived）
 app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer')
@@ -38,6 +43,12 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: '#1a1a1a',
     show: false,
+    frame: false,
+    roundedCorners: false,
+    titleBarStyle: 'hidden',
+    hasShadow: true,
+    thickFrame: false,
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -87,6 +98,28 @@ function createWindow() {
     return { action: 'deny' }
   })
 
+  // 最大化/还原状态变化 -> 通知 renderer（更新按钮图标）
+  win.on('maximize', () => {
+    if (isMaxState) return
+    isMaxState = true
+    win.webContents.send('window:maximize-changed', true)
+    console.log('[main] maximize event -> isMaxState=true')
+  })
+  win.on('unmaximize', () => {
+    if (!isMaxState) return
+    isMaxState = false
+    win.webContents.send('window:maximize-changed', false)
+    console.log('[main] unmaximize event -> isMaxState=false')
+  })
+
+  // 应急快捷键 Ctrl+Shift+Q 强制退出（无边框窗口的自保险）
+  win.webContents.on('before-input-event', (_e, input) => {
+    if (input.type === 'keyDown' && input.control && input.shift && input.key.toLowerCase() === 'q') {
+      console.log('[main] emergency quit Ctrl+Shift+Q')
+      app.quit()
+    }
+  })
+
   return win
 }
 
@@ -122,6 +155,42 @@ function registerIpc() {
     fs.writeFileSync(filePath, buf)
     return { canceled: false, path: filePath, bytes: buf.length }
   })
+
+  // ---------- Window controls (custom titlebar) ----------
+  ipcMain.handle('window:minimize', (e) => {
+    const w = BrowserWindow.fromWebContents(e.sender)
+    if (!w) return
+    w.minimize()
+    console.log('[main] window:minimize')
+  })
+  ipcMain.handle('window:maximize-toggle', (e) => {
+    const w = BrowserWindow.fromWebContents(e.sender)
+    if (!w) return
+    const before = isMaxState
+    // 乐观更新：先翻转状态并通知 renderer（Windows unmaximize 异步且事件可能不触发）
+    isMaxState = !before
+    if (before) w.unmaximize()
+    else w.maximize()
+    w.webContents.send('window:maximize-changed', isMaxState)
+    console.log('[main] window:maximize-toggle before=' + before + ' -> ' + (before ? 'unmaximize' : 'maximize') + ', optimistic isMax=' + isMaxState)
+    // 300ms 后校验：若真实状态不符，纠正并再次通知
+    setTimeout(() => {
+      if (w.isDestroyed()) return
+      const real = w.isMaximized()
+      if (real !== isMaxState) {
+        isMaxState = real
+        w.webContents.send('window:maximize-changed', real)
+        console.log('[main] state corrected -> isMax=' + real)
+      }
+    }, 300)
+  })
+  ipcMain.handle('window:close', (e) => {
+    const w = BrowserWindow.fromWebContents(e.sender)
+    if (!w) return
+    console.log('[main] window:close')
+    w.close()
+  })
+  ipcMain.handle('window:is-maximized', () => isMaxState)
 }
 
 // ---------- app lifecycle ----------
