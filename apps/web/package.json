@@ -20,6 +20,9 @@
     "test:pw:ui": "playwright test --ui"
   },
   "dependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/cli": "^8.6.0",
+    "@capacitor/core": "^8.6.0",
     "@lexical/code": "^0.52.0",
     "@lexical/link": "^0.52.0",
     "@lexical/list": "^0.52.0",

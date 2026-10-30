@@ -431,7 +431,6 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
     // 必须发 simulcast 层，SVC/Simulcast 切层才能做到真正的"分辨率"变化。
     const videoPub = await currentRoom.localParticipant.publishTrack(videoTrack, {
       source: Track.Source.ScreenShare, // 【关键修复】必须声明这是屏幕共享！
-      source: Track.Source.ScreenShare,
       simulcast: true,
       screenShareEncoding: { maxBitrate: preset.bitrate, maxFramerate: preset.fps },
       // 屏幕共享必须用 screenShareSimulcastLayers（不是 videoSimulcastLayers，那是给摄像头的）
@@ -862,5 +861,6 @@ function stopBitrateSampling() {
   lastAudioBytes = 0
   lastAudioSampleTime = 0
 }
+
 
 
