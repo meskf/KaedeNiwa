@@ -13,7 +13,11 @@
     "test:e2e:fast": "node e2e/run.cjs --skip-media",
     "test:e2e:pq": "node e2e/run.cjs --only=pq",
     "test:e2e:mls": "node e2e/run.cjs --only=mls",
-    "test:e2e:network": "node e2e/run.cjs --only=network"
+    "test:e2e:network": "node e2e/run.cjs --only=network",
+    "test:pw": "playwright test",
+    "test:pw:smoke": "playwright test e2e-standard/01-smoke.spec.ts",
+    "test:pw:enc": "playwright test e2e-standard/02-encryption.spec.ts",
+    "test:pw:ui": "playwright test --ui"
   },
   "dependencies": {
     "@lexical/code": "^0.52.0",
@@ -32,6 +36,7 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
