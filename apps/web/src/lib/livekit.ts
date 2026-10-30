@@ -1,6 +1,7 @@
-import { Room, RoomEvent, RemoteParticipant, RemoteTrackPublication, RemoteTrack, Track, ConnectionState, ExternalE2EEKeyProvider, LocalTrack, VideoPreset, VideoQuality } from 'livekit-client'
+import { setLogLevel as setLiveKitLogLevel, Room, RoomEvent, RemoteParticipant, RemoteTrackPublication, RemoteTrack, Track, ConnectionState, ExternalE2EEKeyProvider, LocalTrack, VideoPreset, VideoQuality } from 'livekit-client'
 
 type QualityStr = 'low' | 'medium' | 'high'
+setLiveKitLogLevel('debug')
 function toVideoQuality(q: QualityStr): VideoQuality {
   return q === 'high' ? VideoQuality.HIGH : q === 'low' ? VideoQuality.LOW : VideoQuality.MEDIUM
 }
@@ -244,7 +245,49 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
       screenShareCache.delete(p.identity)
       emit()
     })
+    .on(RoomEvent.ConnectionStateChanged, (state) => {
+      console.log('[LiveKit Debug] 连接状态改变:', state)
+      if (typeof window !== 'undefined' && window.innerWidth < 800) {
+        const div = document.createElement('div')
+        div.style.cssText = 'position:fixed;bottom:80px;left:10px;right:10px;background:#3b82f6;color:white;padding:10px;z-index:9999;border-radius:8px;font-size:14px;'
+        div.innerText = '状态: ' + state
+        document.body.appendChild(div)
+        setTimeout(() => div.remove(), 5000)
+      }
+    })
+    .on(RoomEvent.Disconnected, (reason) => {
+      console.log('[LiveKit Debug] 已断开:', reason)
+      if (typeof window !== 'undefined' && window.innerWidth < 800) {
+        const div = document.createElement('div')
+        div.style.cssText = 'position:fixed;bottom:80px;left:10px;right:10px;background:#ef4444;color:white;padding:10px;z-index:9999;border-radius:8px;font-size:14px;'
+        div.innerText = '断开: ' + reason
+        document.body.appendChild(div)
+        setTimeout(() => div.remove(), 5000)
+      }
+    })
+    .on(RoomEvent.TrackSubscriptionFailed, (_sid, _p, reason) => {
+      console.log('[LiveKit Debug] 订阅失败:', reason)
+      if (typeof window !== 'undefined' && window.innerWidth < 800) {
+        const div = document.createElement('div')
+        div.style.cssText = 'position:fixed;bottom:80px;left:10px;right:10px;background:#ef4444;color:white;padding:10px;z-index:9999;border-radius:8px;font-size:14px;'
+        div.innerText = '订阅失败: ' + reason
+        document.body.appendChild(div)
+        setTimeout(() => div.remove(), 8000)
+      }
+    })
     .on(RoomEvent.TrackSubscribed, (track: RemoteTrack, pub: RemoteTrackPublication, p: RemoteParticipant) => {
+      // 【调试】超级详细的弹窗
+      const debugMsg = `收到轨道: ${track.kind} (${pub.source}) from ${p.identity} | Subscribed: ${pub.isSubscribed}`
+      console.log('[LiveKit Debug]', debugMsg)
+      if (typeof window !== 'undefined' && window.innerWidth < 800) {
+        const div = document.createElement('div')
+        // 根据不同的源给不同颜色
+        const color = pub.source === 'screen_share' ? '#eab308' : '#22c55e'
+        div.style.cssText = `position:fixed;top:80px;left:10px;right:10px;background:${color};color:white;padding:10px;z-index:9999;border-radius:8px;font-size:14px;font-weight:bold;box-shadow:0 4px 6px rgba(0,0,0,0.3);`
+        div.innerText = debugMsg
+        document.body.appendChild(div)
+        setTimeout(() => div.remove(), 8000)
+      }
       // 1. 处理所有音频轨道（麦克风、屏幕共享音频等）
       if (track.kind === 'audio') {
         const el = track.attach() as HTMLAudioElement
@@ -272,6 +315,12 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
 
       // 2. 处理屏幕共享视频
       if (pub.source === Track.Source.ScreenShare) {
+        // 清理旧的同参与者轨道，防止 React key 冲突
+        for (const [sid, info] of screenShareCache) {
+          if (info.participantIdentity === p.identity) {
+            screenShareCache.delete(sid)
+          }
+        }
         // 接收端画质偏好：从缓存读（用户可能切换过），默认 high
         const cachedQuality = screenShareCache.get(track.sid || '')?.quality || 'high'
         try {
@@ -316,7 +365,11 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
     .on(RoomEvent.LocalTrackUnpublished, () => emit())
     .on(RoomEvent.ActiveSpeakersChanged, () => emit())
     // 远端 track 发布/取消/静音/取消静音：必须 emit，否则远端麦克风/摄像头状态不会更新
-    .on(RoomEvent.TrackPublished, () => emit())
+    .on(RoomEvent.TrackPublished, (pub: RemoteTrackPublication, _p: RemoteParticipant) => {
+      // 暴力强制订阅所有远端轨道（防止因属性识别延迟漏掉视频）
+      pub.setSubscribed(true)
+      emit()
+    })
     .on(RoomEvent.TrackUnpublished, () => emit())
     .on(RoomEvent.TrackMuted, () => emit())
     .on(RoomEvent.TrackUnmuted, () => emit())
@@ -377,6 +430,7 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
     // 注意：屏幕共享单层的话，接收端调画质会导致 SFU 强制降码率 → 画面糊。
     // 必须发 simulcast 层，SVC/Simulcast 切层才能做到真正的"分辨率"变化。
     const videoPub = await currentRoom.localParticipant.publishTrack(videoTrack, {
+      source: Track.Source.ScreenShare, // 【关键修复】必须声明这是屏幕共享！
       source: Track.Source.ScreenShare,
       simulcast: true,
       screenShareEncoding: { maxBitrate: preset.bitrate, maxFramerate: preset.fps },

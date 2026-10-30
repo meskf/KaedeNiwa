@@ -187,21 +187,21 @@ export function MediaBar({ channelId, compact = false }: Props) {
             </select>
           </div>
 
-          {/* 底部操作按钮区：5 个等宽 w-8 h-8 图标按钮，均匀分布 */}
-          <div className="flex items-center justify-between gap-1 w-full">
+          {/* 底部操作按钮区：5 个等宽图标按钮，使用 grid 自适应宽度防止被截断 */}
+          <div className="grid grid-cols-5 gap-1 w-full mt-1">
             {/* 屏幕共享（图标按钮，tooltip 提示） */}
             <button
               data-testid="media-share-toggle"
               data-sharing={sharing ? 'on' : 'off'}
               onClick={handleToggleShare}
-              className={`w-10 h-10 rounded-md flex items-center justify-center transition-all shrink-0 ${
+              className={`w-8 h-8 rounded-md flex items-center justify-center transition-all shrink-0 ${
                 sharing
                   ? 'bg-red-500 text-white hover:bg-red-600'
                   : 'bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--bg-app)]'
               }`}
               title={sharing ? '停止共享' : '屏幕共享'}
             >
-              <IconMonitor className='w-5 h-5' />
+              <IconMonitor className='w-4 h-4' />
             </button>
 
             {/* 麦克风 */}
@@ -209,12 +209,12 @@ export function MediaBar({ channelId, compact = false }: Props) {
               data-testid="media-mic-toggle"
               data-mic={micOn ? 'on' : 'off'}
               onClick={handleToggleMic}
-              className={`w-10 h-10 rounded-md flex items-center justify-center transition-colors shrink-0 ${
+              className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors shrink-0 ${
                 micOn ? 'bg-[var(--text-main)] text-[var(--bg-app)]' : 'bg-[var(--bg-active)] text-[var(--text-muted)] hover:text-[var(--text-main)]'
               }`}
               title={micOn ? '关闭麦克风' : '开启麦克风'}
             >
-              {micOn ? <IconMic className='w-5 h-5'/> : <IconMicOff className='w-5 h-5'/>}
+              {micOn ? <IconMic className='w-4 h-4'/> : <IconMicOff className='w-4 h-4'/>}
             </button>
 
             {/* compact-noise-toggle: 降噪（RNNoise），始终显示；未开麦时禁用 */}
@@ -224,7 +224,7 @@ export function MediaBar({ channelId, compact = false }: Props) {
               data-mode={media.noiseMode}
               onClick={handleToggleNoise}
               disabled={!micOn}
-              className={`w-10 h-10 rounded-md flex items-center justify-center transition-colors shrink-0 text-[10px] font-bold ${
+              className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors shrink-0 text-[9px] font-bold ${
                 noiseOn ? 'bg-[var(--text-main)] text-[var(--bg-app)]' : 'bg-[var(--bg-active)] text-[var(--text-muted)] hover:text-[var(--text-main)]'
               } ${!micOn ? 'opacity-40 cursor-not-allowed' : ''}`}
               title={
@@ -241,21 +241,21 @@ export function MediaBar({ channelId, compact = false }: Props) {
               data-testid="media-deafen-toggle"
               data-deafened={deafened ? 'on' : 'off'}
               onClick={handleToggleDeafen}
-              className={`w-10 h-10 rounded-md flex items-center justify-center transition-colors shrink-0 ${
+              className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors shrink-0 ${
                 deafened ? 'bg-red-500 text-white' : 'bg-[var(--bg-active)] text-[var(--text-muted)] hover:text-[var(--text-main)]'
               }`}
               title={deafened ? '取消拒听' : '拒听'}
             >
-              <IconVolume className='w-5 h-5' style={{ opacity: deafened ? 0.4 : 1 }} />
+              <IconVolume className='w-4 h-4' style={{ opacity: deafened ? 0.4 : 1 }} />
             </button>
 
             {/* 挂断 */}
             <button
               onClick={handleLeave}
-              className="w-10 h-10 rounded-md flex items-center justify-center bg-[var(--bg-active)] hover:bg-red-500 hover:text-white text-[var(--text-muted)] transition-colors shrink-0"
+              className="w-8 h-8 rounded-md flex items-center justify-center bg-[var(--bg-active)] hover:bg-red-500 hover:text-white text-[var(--text-muted)] transition-colors shrink-0"
               title="断开连接"
             >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
                 <line x1="12" y1="2" x2="12" y2="12"></line>
               </svg>
@@ -306,7 +306,7 @@ export function MediaBar({ channelId, compact = false }: Props) {
             }`}
             title={micOn ? '关闭麦克风（右键音频设置）' : '开启麦克风（右键音频设置）'}
           >
-            {micOn ? <IconMic className='w-5 h-5'/> : <IconMicOff className='w-5 h-5'/>}
+            {micOn ? <IconMic className='w-4 h-4'/> : <IconMicOff className='w-4 h-4'/>}
           </button>
           <button
             data-testid="media-audio-settings-toggle"
@@ -326,12 +326,12 @@ export function MediaBar({ channelId, compact = false }: Props) {
           data-testid="media-deafen-toggle"
           data-deafened={deafened ? 'on' : 'off'}
           onClick={handleToggleDeafen}
-          className={`w-10 h-10 rounded-md flex items-center justify-center transition-colors shrink-0 ${
+          className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors shrink-0 ${
             deafened ? 'bg-red-500 text-white' : 'bg-[var(--bg-active)] hover:bg-[#3f3f46] text-[var(--text-secondary)]'
           }`}
           title={deafened ? '取消拒听' : '拒听（静音所有远端）'}
         >
-          <IconVolume className='w-5 h-5' style={{ opacity: deafened ? 0.4 : 1 }} />
+          <IconVolume className='w-4 h-4' style={{ opacity: deafened ? 0.4 : 1 }} />
         </button>
 
         {/* 降噪 */}

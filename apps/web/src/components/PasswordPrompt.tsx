@@ -88,7 +88,7 @@ export function PasswordPrompt({ channelName, onCancel, onSubmit }: Props) {
           <button
             onClick={submit}
             disabled={busy || !password}
-            className="px-4 py-2 text-[13px] font-semibold rounded-md bg-[var(--text-main)] text-[var(--bg-app)] hover:opacity-90 disabled:opacity-50 transition-opacity"
+            className="flex items-center justify-center min-w-[72px] px-5 py-2 text-[13px] font-semibold rounded-md bg-[var(--text-main)] text-[var(--bg-app)] hover:opacity-90 disabled:opacity-50 transition-opacity"
             data-testid="password-prompt-submit"
           >{busy ? '...' : '进入'}</button>
         </div>

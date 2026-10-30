@@ -54,15 +54,18 @@ function VideoPane({ share, multi }: { share: any; multi: boolean }) {
   const containerStyle: React.CSSProperties = {
     width: '100%',
     maxWidth: multi ? '100%' : '1000px',
-    maxHeight: multi ? '25vh' : '30vh',
-    aspectRatio: videoDims ? `${videoDims.w} / ${videoDims.h}` : '16 / 9',
+    maxHeight: fullscreen ? '100vh' : (multi ? '25vh' : '30vh'),
+    aspectRatio: fullscreen ? 'auto' : (videoDims ? `${videoDims.w} / ${videoDims.h}` : '16 / 9'),
     margin: '0 auto',
+    backgroundColor: '#000000',
+    // 全屏时去掉圆角和阴影，避免某些显卡驱动下产生边缘色彩失真
+    borderRadius: fullscreen ? '0' : '0.75rem',
   }
 
   return (
     <div
       ref={containerRef}
-      className="relative rounded-xl overflow-hidden bg-black flex items-center justify-center group shadow-lg"
+      className={`relative overflow-hidden flex items-center justify-center group ${fullscreen ? "" : "rounded-xl shadow-lg"}`}
       style={containerStyle}
     >
       <video
@@ -134,8 +137,8 @@ export function ScreenShareView() {
         \uD83D\uDCFA Screen sharing ({count})
       </div>
       <div className="grid gap-3 w-full" style={{ gridTemplateColumns: 'repeat(' + cols + ', minmax(0, 1fr))' }}>
-        {uniqueShares.map(share => (
-          <VideoPane key={share.trackSid} share={share} multi={true} />
+        {uniqueShares.map((share, idx) => (
+          <VideoPane key={`${share.trackSid}-${idx}`} share={share} multi={true} />
         ))}
       </div>
     </div>

@@ -746,8 +746,23 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       const tokenJson = await client.begin_media_session(targetCh)
       const tokenData = typeof tokenJson === 'string' ? JSON.parse(tokenJson) : tokenJson
       console.log(`[join-media] media session OK, e2ee_seed=${tokenData.e2ee_seed ? 'yes' : 'no'}`)
+      
+      // 【手机端 HTTPS 修复】如果在 HTTPS 环境（或手机通过局域网访问），
+      // LiveKit 的 ws:// 会被浏览器当成 Mixed Content 拦截。
+      // 且服务端返回的是 127.0.0.1，手机连自己会失败。
+      // 解决方案：如果当前端口是 5173（Vite代理）且协议是 https，强制走 Vite 的 wss 代理。
+      let secureWsUrl = tokenData.ws_url
+      if (window.location.port === '5173' || window.location.port === '5174') {
+        // 根据当前页面协议自动切换 ws:// 或 wss://
+        const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+        secureWsUrl = `${wsProto}//${window.location.host}/livekit`
+      } else if (window.location.protocol === 'https:' && secureWsUrl.startsWith('ws://')) {
+        secureWsUrl = secureWsUrl.replace('ws://', 'wss://')
+      }
+      console.log('[join-media] connectMedia using wsUrl:', secureWsUrl)
+
       await connectMedia({
-        wsUrl: tokenData.ws_url,
+        wsUrl: secureWsUrl,
         token: tokenData.token,
         channelId: targetCh,
         e2eeKeyB64: tokenData.e2ee_seed,
@@ -1017,6 +1032,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
 
                 {media.connected && media.channelId && (
                   <div className="w-full flex justify-center px-4 mt-2 shrink-0 max-h-[30vh]">
+                    {/* 调试：如果 screenShares 为空，在移动端显示一个红框占位 */}
+                    {media.screenShares.length === 0 && typeof window !== 'undefined' && window.innerWidth < 800 && (
+                      <div className="w-full max-w-[1000px] h-[200px] bg-red-500/20 border-2 border-red-500 rounded-xl flex items-center justify-center text-red-500 text-xs">
+                        UI 占位: 未收到视频轨道
+                      </div>
+                    )}
                     <ScreenShareView />
                   </div>
                 )}

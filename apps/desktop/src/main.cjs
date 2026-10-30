@@ -3,7 +3,7 @@
 // 生产模式（file:// 加载 dist）与 CORS 绕过留待下一轮。
 'use strict'
 
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, session } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, session, desktopCapturer } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 
@@ -195,6 +195,22 @@ function registerIpc() {
 
 // ---------- app lifecycle ----------
 app.whenReady().then(() => {
+  // 允许 getDisplayMedia (屏幕共享)
+  // 默认直接给第一个屏幕，生产环境可以扩展成自己写一个多屏幕选择器
+  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+    desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+      if (sources.length > 0) {
+        // audio: 'loopback' 允许共享系统声音 (Windows/macOS 支持)
+        callback({ video: sources[0], audio: 'loopback' })
+      } else {
+        callback({})
+      }
+    }).catch((err) => {
+      console.error('[main] desktopCapturer error:', err)
+      callback({})
+    })
+  }, { useSystemPicker: true })
+
   registerIpc()
   createWindow()
 

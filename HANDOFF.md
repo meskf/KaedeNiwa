@@ -1969,3 +1969,42 @@ Windows frameless 三坑：
 Follow-ups:
 - CSP warning (unsafe-eval in dev mode)
 - 边缘 resize 热区可能丢失（thickFrame:false 副作用）
+
+---
+
+## 第十四部分（PART 34：2026-10-30 局域网联调与手机端适配踩坑记录）
+
+### 目标与成果
+目标是让手机能够通过局域网访问运行在电脑上的 KaedeNiwa。
+**当前已打通：** 界面加载、登录、文字消息、进入语音频道（信令层、E2EE 密钥交换完全正常）。
+**当前阻塞：** 屏幕共享（ScreenShare）在接收端无法渲染画面（连电脑端双开互相测试也复现）。
+
+### 已解决/已落地的修改
+1. **Vite 开启 0.0.0.0 监听和 HTTPS 自签名证书**
+   - `vite.config.ts` 引入 `@vitejs/plugin-basic-ssl`。
+   - 手机通过 `https://<IP>:5173` 访问，绕过浏览器 WebCrypto 仅限安全上下文的限制（否则 `crypto.subtle` 为 undefined，报 `WebCrypto DEK not initialized`）。
+2. **局域网 API 与 WebSocket 代理**
+   - `LoginView.tsx` 根据 `window.location` 自动推导 API 地址。
+   - WebSocket（Kaede 协议）和 LiveKit 信令全部通过 Vite 代理（`/ws` 和 `/livekit`）转发，避免暴露更多端口及解决 HTTPS 下 Mixed Content 问题。
+3. **防火墙放行与 LiveKit IP 绑定**
+   - `start-all.ps1` 动态探测局域网 IP 并传给 `LIVEKIT_WS_URL`。
+   - 本机测试时 LiveKit 需指定 `--node-ip 192.168.1.3`（否则会广播 Tailscale 或 WSL 的无效 IP）。
+4. **前端 UI 调试与占位**
+   - 在屏幕共享区域增加了 `UI 占位: 未收到视频轨道` 的红色框（方便排障）。
+   - 消除了 React 渲染多个同名参与者（"alice"）时的 key 冲突报错（`Encountered two children with the same key`）。
+
+### 待排查问题（Open Issue）：屏幕共享画面收不到
+**现象：** 发送端能正常看到自己的画面，接收端能收到 `screen_share_audio` 音频，并正常解密播放，但始终收不到 `screen_share_video` 视频轨道。接收端 UI 弹出红框占位。
+**已排除：**
+- 与局域网、防火墙、WebRTC 穿透无关（**电脑本地双开也复现**）。
+- 与 E2EE（端到端加密）无关（加上 `?noe2ee=1` 参数关闭 E2EE 依然复现）。
+- 与画面分辨率、Simulcast 无关（强制 480p 或关闭 simulcast 依然复现）。
+
+**调试痕迹：** 
+- 修改了 `livekit.ts` 中的 `TrackPublished`、`TrackSubscribed`、`TrackSubscriptionFailed` 等监听器，尝试强制订阅（`setSubscribed(true)`）均无效。
+- 检查了推流时的 `source: Track.Source.ScreenShare` 选项，确认已正确传入。
+- 检查了 SDP，接收端 Offer 生成时，在某些版本中甚至未包含 `m=video` 行，这表明推流端的 LiveKit Client 可能没有把视频轨正确发到 SFU，或者 SFU 没有下发。
+
+**下一步建议：**
+- 单独写一个最简单的 WebRTC 测试页面，不依赖项目代码，验证原生 `getDisplayMedia` + `RTCPeerConnection` 能否走通。
+- 检查 `livekit-client` 库的版本是否有已知 Bug，或者抓取 LiveKit 服务端的日志（`--dev` 模式的日志非常详细），确认 SFU 是否真的收到了推流端的视频数据。

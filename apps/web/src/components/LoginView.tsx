@@ -1,4 +1,22 @@
 import { useState, useEffect } from 'react'
+
+/**
+ * 推导默认服务器地址：
+ * - localhost / 127.0.0.1 / Electron (file://) → 用 127.0.0.1
+ * - 否则（局域网 IP 访问）→ 用当前 hostname（服务端已绑定 0.0.0.0）
+ */
+function resolveDefaultServerUrl(): string {
+  if (typeof window === 'undefined') return 'http://127.0.0.1:18080'
+  const origin = window.location.origin
+  // 如果是 Vite 开发服务器（5173），使用当前 origin，借助 Vite proxy 转发
+  if (window.location.port === '5173' || window.location.port === '5174') {
+    return origin
+  }
+  const h = window.location.hostname
+  if (!h || h === 'localhost' || h === '127.0.0.1') return 'http://127.0.0.1:18080'
+  return `http://${h}:18080`
+}
+
 import { useAuthStore } from '../stores/auth'
 import { initWasm, getClient, recordLoginArgs, allowReconnect } from '../wasm/client'
 import { useI18n } from '../stores/i18n'
@@ -13,7 +31,7 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
   const [isRegister, setIsRegister] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [serverUrl, setServerUrl] = useState('http://127.0.0.1:18080')
+  const [serverUrl, setServerUrl] = useState(() => resolveDefaultServerUrl())
   const [loginId, setLoginId] = useState('')
   const [password, setPassword] = useState('')
   const setAuth = useAuthStore(s => s.setAuth)
@@ -46,7 +64,11 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
       const token = data.token || data.session_token
       if (!token) throw new Error('Server did not return a token')
       
-      const wsUrl = data.ws_url || serverUrl.replace(/^http/, 'ws') + '/ws'
+      // 如果走的是 Vite 开发服务器（5173），强制通过 Vite proxy 转发 WS 请求
+      // 避免服务端返回了 127.0.0.1 导致手机连不上自己的本机
+      const wsUrl = (window.location.port === '5173' || window.location.port === '5174')
+        ? window.location.origin.replace(/^http/, 'ws') + '/ws'
+        : (data.ws_url || serverUrl.replace(/^http/, 'ws') + '/ws')
       await initWasm()
       const client = getClient()
       if (!client) throw new Error('WASM not initialized')
