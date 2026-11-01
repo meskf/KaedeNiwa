@@ -46,7 +46,7 @@ axum               = "0.8"
 tokio              = { version = "1", features = ["full"] }
 # 必须启用 rustls，否则 wss:// 在生产环境直接失败（默认特性只支持 ws://）。
 # 同时避免 native-tls/OpenSSL，便于 Android 交叉编译。
-tokio-tungstenite  = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite  = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 rustls             = "0.23"
 rustls-pemfile     = "2"
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
