@@ -29,7 +29,7 @@ serde_bytes = "0.11"
 ciborium = "0.2"
 
 # crypto
-hkdf             = "0.12"
+hkdf             = "=0.12.4"
 sha2             = "0.10"
 aes-gcm          = "0.10"
 zeroize          = { version = "1", features = ["derive"] }
