@@ -111,3 +111,9 @@ apps/desktop/*.log
 _bak/
 _bak_*/
 *_backup_*/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# Ad-hoc per-test scripts (superseded by e2e-standard/ Playwright suite)
+apps/web/test-*.cjs
