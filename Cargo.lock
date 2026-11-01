@@ -1932,7 +1932,7 @@ dependencies = [
  "base64 0.22.1",
  "ciborium",
  "futures-util",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "ipnet",
  "kaede-mls",
  "kaede-protocol",
