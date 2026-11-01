@@ -11,7 +11,7 @@
     "build:client": "electron-builder --win nsis portable"
   },
   "devDependencies": {
-    "electron": "^34.0.0",
+    "electron": "^45.1.0",
     "electron-builder": "^26.18.0"
   },
   "allowScripts": {
