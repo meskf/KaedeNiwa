@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-- 协议 v8（MIN_SUPPORTED_VERSION = 7），workspace 版本 0.0.5
+- 协议 v8（MIN_SUPPORTED_VERSION = 7），workspace 版本 0.1.0
 - 8 个 crate，7 个在 workspace（kaede-denoise 未纳入）
 - 前端：apps/web（React 19 + Vite 6 + Tailwind 4）+ apps/desktop（Electron）
 
@@ -55,3 +55,4 @@
 已排除局域网、防火墙、E2EE、分辨率、Simulcast。本地双开复现。
 下一步：独立 WebRTC 最小页验证 + 抓 LiveKit SFU 日志。
 详见 HANDOFF.md PART 34。
+

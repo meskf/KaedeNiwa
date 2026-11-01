@@ -124,3 +124,4 @@ MLS 密文只能解密一次（ratchet 前进后不可重放）。`inbound.rs` �
   `test-helpers.cjs` 的引用者、根目录 cjs 的全仓引用，确认孤立后才移动。
 - 破坏性操作（删除、移动、协议变更）先做可逆版本（移到 `_archive/`、
   加 `serde(default)`），确认无副作用后再考虑彻底清理。
+

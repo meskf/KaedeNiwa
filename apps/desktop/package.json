@@ -1,7 +1,7 @@
 {
   "name": "kaede-desktop",
   "private": true,
-  "version": "0.0.5",
+  "version": "0.1.0",
   "description": "KaedeNiwa Electron shell",
   "author": "KaedeNiwa",
   "main": "src/main.cjs",
@@ -18,3 +18,4 @@
     "electron@34.5.8": true
   }
 }
+
