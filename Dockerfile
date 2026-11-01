@@ -1,5 +1,5 @@
 # Stage 1: 编译 Rust 后端与 WASM
-FROM docker.m.daocloud.io/library/rust:1.91-slim AS rust-builder
+FROM docker.m.daocloud.io/library/rust:1.99-bookworm AS rust-builder
 WORKDIR /app
 
 # 1. 替换 Debian apt 源
@@ -25,7 +25,7 @@ RUN npm run build:wasm
 
 # 编译 Rust 后端 (绕过 sqlx 版本限制)
 WORKDIR /app
-RUN cargo build -p kaede-server --release --features dev-mode --ignore-rust-version
+RUN cargo build -p kaede-server --release --locked
 
 # Stage 2: 编译前端 React
 FROM docker.m.daocloud.io/library/node:22-slim AS web-builder

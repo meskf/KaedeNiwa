@@ -31,4 +31,5 @@
 ## 漏洞报告
 
 如果您发现任何安全问题，请不要在 GitHub Issues 公开，请通过以下方式联系我们：
-- 发送邮件至：[你的邮箱]
+- 通过 GitHub Security Advisories 私密报告（推荐）：https://github.com/meskf/KaedeNiwa/security/advisories/new
+- 邮件报告地址将在 v0.1.0-beta 正式发布前补充。
