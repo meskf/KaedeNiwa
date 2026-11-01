@@ -1,6 +1,6 @@
 [package]
 name = "kaede-protocol-fuzz"
-version = "0.0.5"
+version = "0.1.0"
 publish = false
 edition = "2024"
 
@@ -26,4 +26,5 @@ path = "fuzz_targets/decode_server.rs"
 test = false
 doc = false
 bench = false
+
 

@@ -63,7 +63,7 @@ features = ["js"]
 [dev-dependencies]
 base64 = "0.22"
 tokio = { workspace = true }
-kaede-server = { path = "../kaede-server", version = "0.0.5" }
+kaede-server = { path = "../kaede-server", version = "0.1.0" }
 axum = "0.8"
 
 
@@ -84,4 +84,5 @@ keyring = { version = "3", default-features = false, features = [
     "sync-secret-service",
     "crypto-rust",
 ] }
+
 
