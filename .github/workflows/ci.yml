@@ -36,7 +36,7 @@ jobs:
       - name: install keyring deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
       - name: check core crates
-        run: cargo check -p kaede-protocol -p kaede-crypto -p kaede-storage -p kaede-mls -p kaede-client -p kaede-server --all-targets
+        run: cargo check -p kaede-protocol -p kaede-crypto -p kaede-storage -p kaede-mls -p kaede-client -p kaede-server --all-targets --locked
 
   test:
     name: cargo test
@@ -122,9 +122,9 @@ jobs:
       - name: install keyring deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
       - name: clippy (workspace, excl. client-wasm)
-        run: cargo clippy --workspace --exclude kaede-client-wasm --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude kaede-client-wasm --all-targets --locked -- -D warnings
       - name: clippy (kaede-client native)
-        run: cargo clippy -p kaede-client --features native --all-targets -- -D warnings
+        run: cargo clippy -p kaede-client --features native --all-targets --locked -- -D warnings
 
   deny:
     name: cargo deny
