@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible bug
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issues must NOT be reported here.**
+        See [SECURITY.md](../blob/main/SECURITY.md) for private disclosure.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Web (browser)
+        - Desktop (Electron, Windows)
+        - Desktop (Electron, macOS)
+        - Desktop (Electron, Linux)
+        - Android (Capacitor)
+        - Server (self-hosted)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `kaede-server --version`, or the desktop app build label.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include server logs (`RUST_LOG=debug`) and browser console output.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context

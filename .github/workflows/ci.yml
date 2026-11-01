@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, ui-rewrite, pw-standardize]
+    branches: [main]
   pull_request:
 
 permissions:
@@ -105,3 +105,49 @@ jobs:
           KAEDE_HEADLESS: "1"
           KAEDE_HTTP: "1"
         run: npx playwright test --reporter=list
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # TODO(v0.2): remove continue-on-error once baseline warnings are cleared.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install keyring deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
+      - name: clippy (workspace, excl. client-wasm)
+        run: cargo clippy --workspace --exclude kaede-client-wasm --all-targets -- -D warnings
+      - name: clippy (kaede-client native)
+        run: cargo clippy -p kaede-client --features native --all-targets -- -D warnings
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  release-build:
+    name: cargo build --release (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: install keyring deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
+      - name: cargo build --release
+        run: cargo build --release --locked -p kaede-server
