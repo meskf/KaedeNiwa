@@ -59,6 +59,11 @@ jobs:
         run: |
           cargo test --workspace --exclude kaede-client --exclude kaede-client-wasm --all-targets
       - name: test (kaede-client native integration)
+        env:
+          # Linux CI 容器没有 D-Bus Secret Service (org.freedesktop.secrets)。
+          # 这个变量让 keystore::device_cipher 在测试时降级到固定 test key。
+          # 生产构建不设此变量，仍然走系统钥匙串。
+          KAEDE_TEST_KEYSTORE: memory
         run: |
           cargo test -p kaede-client --features native --all-targets
 

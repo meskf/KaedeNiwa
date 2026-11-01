@@ -19,6 +19,7 @@ ignore = [
     { id = "RUSTSEC-2024-0375", reason = "atty unmaintained via nnnoiseless->clap3" },
     # wry -> kuchikiki
     { id = "RUSTSEC-2025-0057", reason = "fxhash via wry->kuchikiki; build-time hashmap" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via elliptic-curve 0.13; upgrade to 0.7 requires major bump of p256/p384/k256, deferred to v0.2. Timing-side-channel only, not exploitable in v0.1.0 threat model (server never touches secret scalar math; client-side ops are user-local)." },
 ]
 
 [licenses]

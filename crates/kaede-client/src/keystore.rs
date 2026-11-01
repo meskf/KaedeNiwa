@@ -33,6 +33,29 @@
 use kaede_mls::SnapshotCipher;
 
 // =========================================================================
+// CI 测试辅助：Linux 上 keyring 需要 D-Bus Secret Service，CI 容器没有。
+// 设置 KAEDE_TEST_KEYSTORE=memory 时降级为固定 test key（仅测试）。
+// 生产环境不设此变量，走系统钥匙串。风险隔离：fixed key 常量仅在本 crate 可见。
+// =========================================================================
+#[cfg(all(
+    not(windows),
+    not(target_arch = "wasm32"),
+    not(target_os = "android"),
+    not(target_os = "ios")
+))]
+fn test_keyring_override() -> Option<[u8; 32]> {
+    if std::env::var("KAEDE_TEST_KEYSTORE").ok().as_deref() != Some("memory") {
+        return None;
+    }
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"kaede-test-keystore-v1-fixed-for-ci-only");
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&h.finalize());
+    Some(key)
+}
+
+// =========================================================================
 // Windows: DPAPI
 // =========================================================================
 
@@ -434,6 +457,10 @@ pub fn device_cipher(uid: &str, server_url: &str) -> Box<dyn SnapshotCipher> {
         not(target_os = "ios")
     ))]
     {
+        if let Some(k) = test_keyring_override() {
+            tracing::warn!("[keystore] KAEDE_TEST_KEYSTORE=memory active; using fixed test key");
+            return Box::new(kaede_mls::AesGcmCipher::from_bytes(k));
+        }
         match keyring_store::KeyringCipher::open(uid, server_url) {
             Ok(cipher) => Box::new(cipher),
             Err(e) => {
@@ -554,6 +581,9 @@ pub fn device_cipher_for_snapshot(
             not(target_os = "ios")
         ))]
         kaede_mls::ALG_AES_GCM => {
+            if let Some(k) = test_keyring_override() {
+                return Box::new(kaede_mls::AesGcmCipher::from_bytes(k));
+            }
             let secondary = fallback::cipher(uid, server_url);
             match keyring_store::KeyringCipher::open(uid, server_url) {
                 Ok(primary) => Box::new(KeyringWithFallback { primary, secondary }),

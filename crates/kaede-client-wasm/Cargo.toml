@@ -3,6 +3,7 @@ name = "kaede-client-wasm"
 version.workspace = true
 edition.workspace = true
 
+license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
