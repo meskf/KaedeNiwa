@@ -1,0 +1,14 @@
+:8080 {
+    root * /srv/web
+    try_files {path} /index.html
+    
+    handle /api/* {
+        reverse_proxy localhost:18080
+    }
+    
+    handle /ws* {
+        reverse_proxy localhost:18080
+    }
+
+    file_server
+}

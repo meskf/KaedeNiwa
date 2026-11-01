@@ -106,3 +106,8 @@ apps/desktop/out/
 apps/desktop/dist/
 apps/desktop/release/
 apps/desktop/*.log
+
+# 历史备份与本地归档（2026-11 清洁后新增）
+_bak/
+_bak_*/
+*_backup_*/

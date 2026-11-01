@@ -212,8 +212,8 @@ async fn run_socket(socket: WebSocket, state: AppState) -> anyhow::Result<()> {
                 let _ = sink.send(Message::Binary(err.encode()?.into())).await;
                 return Ok(());
             }
-            if protocol_version < kaede_protocol::MIN_SUPPORTED_VERSION
-                || protocol_version > kaede_protocol::PROTOCOL_VERSION
+            if !(kaede_protocol::MIN_SUPPORTED_VERSION..=kaede_protocol::PROTOCOL_VERSION)
+                .contains(&protocol_version)
             {
                 let err = ServerMessage::Error {
                     code: ErrorCode::UnsupportedVersion,
@@ -836,11 +836,10 @@ async fn handle_message(
                 return Ok(());
             }
 
-            let meta: Option<(i64,)> =
-                sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
-                    .bind(&channel_id)
-                    .fetch_optional(&state.pool)
-                    .await?;
+            let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
+                .bind(&channel_id)
+                .fetch_optional(&state.pool)
+                .await?;
             let Some((is_private,)) = meta else {
                 let _ = tx.try_send(ServerMessage::Error {
                     code: ErrorCode::TargetNotFound,
@@ -1305,6 +1304,8 @@ async fn handle_message(
         ClientMessage::MlsAppMessage {
             channel_id,
             payload,
+            id,
+            ts,
         } => {
             let from = ensure_joined(state, my_uid, my_session_id)?;
             if payload.len() > MAX_MLS_APP_BYTES {
@@ -1331,6 +1332,8 @@ async fn handle_message(
                         from: from.clone(),
                         channel_id: channel_id.clone(),
                         payload,
+                        id,
+                        ts,
                     },
                 )
                 .await;
@@ -1382,11 +1385,10 @@ async fn handle_message(
                 return Ok(());
             }
 
-            let meta: Option<(i64,)> =
-                sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
-                    .bind(&channel_id)
-                    .fetch_optional(&state.pool)
-                    .await?;
+            let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
+                .bind(&channel_id)
+                .fetch_optional(&state.pool)
+                .await?;
             let Some((is_private,)) = meta else {
                 // 不存在的频道：静默丢（同上，不泄露频道存在性）。
                 return Ok(());
@@ -1612,6 +1614,10 @@ mod typing_tests {
         .execute(&pool)
         .await
         .unwrap();
+        // nodes 表由 db::init_nodes_table 内联创建（不在 migrations 里），
+        // mk_state 只调了 SqlitePoolOptions 直连，这里必须显式补建。
+        crate::db::init_nodes_table(&pool).await.unwrap();
+
         let cfg = Config {
             bind: "127.0.0.1:0".into(),
             database_url: "sqlite::memory:".into(),

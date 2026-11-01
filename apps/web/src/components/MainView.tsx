@@ -38,7 +38,7 @@ import { useMediaQuery, BP } from '../hooks/useMediaQuery'
 
 export function MainView({ onLogout }: { onLogout: () => void }) {
   const [ctxNode, setCtxNode] = useState<{ x: number, y: number, node: any } | null>(null)
-  const [msgMenu, setMsgMenu] = useState<{ x: number, y: number, text: string, channelId?: string, msgTs?: number } | null>(null)
+  const [msgMenu, setMsgMenu] = useState<{ x: number, y: number, text: string, channelId?: string, msgId?: number, msgTs?: number } | null>(null)
   const [passwordPrompt, setPasswordPrompt] = useState<{ channelId: string, channelName?: string } | null>(null)
   const lastGoodChannelRef = useRef<string>('general')
   // 本次会话内已解锁的私密频道（内存 only）
@@ -528,7 +528,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             const curCh = useChatStore.getState().currentChannel
             if (chId === curCh) {
               const actor = rp.u || cr.from || 'Unknown'
-              useChatStore.getState().applyReaction(chId, rp.target_ts, rp.emoji, actor, rp.action)
+              useChatStore.getState().applyReaction(chId, rp.target_id, rp.target_ts, rp.emoji, actor, rp.action)
             }
           }
         }
@@ -550,7 +550,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               const curCh = useChatStore.getState().currentChannel
               if (chId === curCh) {
                 const actor = rpCM.u || cm.from || 'Unknown'
-                useChatStore.getState().applyReaction(chId, rpCM.target_ts, rpCM.emoji, actor, rpCM.action)
+                useChatStore.getState().applyReaction(chId, rpCM.target_id, rpCM.target_ts, rpCM.emoji, actor, rpCM.action)
               }
               return
             }
@@ -561,6 +561,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               sender: ev.ChannelMessage.from || 'Unknown',
               plaintext: text,
               ts: ev.ChannelMessage.ts || Date.now(),
+              id: (ev.ChannelMessage as any).id || 0,
               attachments: ev.ChannelMessage.attachments || attachments,
             })
           } catch (err) { console.error('Parse message failed:', err) }
@@ -603,7 +604,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             const curCh = useChatStore.getState().currentChannel
             if (chId === curCh) {
               const actor = rp2.u || amr.from || 'Unknown'
-              useChatStore.getState().applyReaction(chId, rp2.target_ts, rp2.emoji, actor, rp2.action)
+              useChatStore.getState().applyReaction(chId, rp2.target_id, rp2.target_ts, rp2.emoji, actor, rp2.action)
             }
             return
           }
@@ -614,6 +615,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
               sender: ev.AppMessageReceived.from || 'Unknown',
               plaintext: text,
               ts: (ev.AppMessageReceived as any).ts || Date.now(),
+              id: (ev.AppMessageReceived as any).id || 0,
               attachments: (ev.AppMessageReceived as any).attachments || attachments,
             })
           } catch (err) { console.error('Parse message failed:', err) }
@@ -1058,12 +1060,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                         className="group flex gap-3 hover:bg-[var(--bg-hover)] -mx-3 px-3 py-2 rounded-md transition-colors"
                         onContextMenu={(e) => {
                           e.preventDefault()
-                          setMsgMenu({ x: e.clientX, y: e.clientY, text: (msg as any).plaintext || '', channelId: currentChannel, msgTs: msg.ts })
+                          setMsgMenu({ x: e.clientX, y: e.clientY, text: (msg as any).plaintext || '', channelId: currentChannel, msgId: Number((msg as any).id) || 0, msgTs: msg.ts })
                         }}
                         onPointerDown={(e) => {
                           if (e.pointerType === 'mouse') return
                           longPressTimer.current = setTimeout(() => {
-                            setMsgMenu({ x: e.clientX, y: e.clientY, text: (msg as any).plaintext || '', channelId: currentChannel, msgTs: msg.ts })
+                            setMsgMenu({ x: e.clientX, y: e.clientY, text: (msg as any).plaintext || '', channelId: currentChannel, msgId: Number((msg as any).id) || 0, msgTs: msg.ts })
                           }, 500)
                         }}
                         onPointerUp={() => {
@@ -1094,17 +1096,20 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                             <MessageAttachments targetId={currentChannel} attachments={(msg as any).attachments} />
                           )}
                           <ReactionBar
-                            reactions={(reactions[currentChannel] || {})[String(msg.ts)] || {}}
+                            reactions={
+                              (reactions[currentChannel] || {})[String((msg as any).id || 0)] ||
+                              (reactions[currentChannel] || {})[String(msg.ts)] ||
+                              {}
+                            }
                             currentUid={loginId}
                             onToggle={(emoji, action) => {
-                              // 乐观更新：先本地 apply，服务器 echo 时 applyReaction 幂等
-                              useChatStore.getState().applyReaction(currentChannel, msg.ts, emoji, loginId, action)
+                              const mid = Number((msg as any).id) || 0
+                              useChatStore.getState().applyReaction(currentChannel, mid, msg.ts, emoji, loginId, action)
                               const c = getClient()
                               if (!c) return
-                              ;(c as any).sendReaction(currentChannel, BigInt(msg.ts), emoji, action).catch((e: any) => {
+                              ;(c as any).sendReaction(currentChannel, BigInt(mid), BigInt(msg.ts), emoji, action).catch((e: any) => {
                                 console.error('[reaction]', e)
-                                // 发送失败 → 回滚
-                                useChatStore.getState().applyReaction(currentChannel, msg.ts, emoji, loginId, action === 'add' ? 'remove' : 'add')
+                                useChatStore.getState().applyReaction(currentChannel, mid, msg.ts, emoji, loginId, action === 'add' ? 'remove' : 'add')
                               })
                             }}
                           />
@@ -1396,18 +1401,19 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           y={msgMenu.y}
           text={msgMenu.text}
           channelId={msgMenu.channelId}
+          msgId={msgMenu.msgId}
           msgTs={msgMenu.msgTs}
           onReact={(emoji, action) => {
             if (!msgMenu.channelId || msgMenu.msgTs == null) return
             const chId = msgMenu.channelId
+            const mid = msgMenu.msgId || 0
             const ts = msgMenu.msgTs
-            // 乐观更新
-            useChatStore.getState().applyReaction(chId, ts, emoji, loginId, action)
+            useChatStore.getState().applyReaction(chId, mid, ts, emoji, loginId, action)
             const c = getClient()
             if (!c) return
-            ;(c as any).sendReaction(chId, BigInt(ts), emoji, action).catch((e: any) => {
+            ;(c as any).sendReaction(chId, BigInt(mid), BigInt(ts), emoji, action).catch((e: any) => {
               console.error('[reaction]', e)
-              useChatStore.getState().applyReaction(chId, ts, emoji, loginId, action === 'add' ? 'remove' : 'add')
+              useChatStore.getState().applyReaction(chId, mid, ts, emoji, loginId, action === 'add' ? 'remove' : 'add')
             })
           }}
           onClose={() => setMsgMenu(null)}

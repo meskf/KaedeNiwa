@@ -28,7 +28,11 @@ export interface ChatMessage {
   sender: string;
   plaintext: string;
   ts: number;
+  /// 服务端消息主键（v8.1）。reaction 定位首选 id，0 时回退按 ts。
+  id?: number;
   attachments?: Attachment[];
+  edited?: boolean;
+  reactions?: { emoji: string; users: string[] }[];
 }
 
 export interface ChannelInfo {
@@ -109,7 +113,7 @@ interface ChatState {
   setFriends: (f: FriendEntry[]) => void;
   setServerMembers: (m: string[]) => void;
   setTyping: (channelId: string, uid: string, ttlMs: number) => void;
-  applyReaction: (channelId: string, targetTs: number, emoji: string, uid: string, action: 'add' | 'remove') => void;
+  applyReaction: (channelId: string, targetId: number, targetTs: number, emoji: string, uid: string, action: 'add' | 'remove') => void;
   clearReactions: (channelId: string) => void;
   pruneTyping: () => void;
 
@@ -220,8 +224,8 @@ export const useChatStore = create<ChatState>((set) => ({
     return changed ? { typingUsers: next } : state;
   }),
 
-  applyReaction: (channelId, targetTs, emoji, uid, action) => set((state) => {
-    const tsKey = String(targetTs)
+  applyReaction: (channelId, targetId, targetTs, emoji, uid, action) => set((state) => {
+    const tsKey = targetId > 0 ? String(targetId) : String(targetTs)
     const chMap = state.reactions[channelId] || {}
     const msgMap = chMap[tsKey] || {}
     const uids = (msgMap[emoji] || []).slice()

@@ -81,7 +81,7 @@ pub async fn init_web_keystore() -> Result<(), String> {
                 .await
                 .map_err(|e| format!("put kek: {:?}", e))?;
             tx.done().await.map_err(|e| format!("tx done: {:?}", e))?;
-            
+
             new_kek
         }
     };

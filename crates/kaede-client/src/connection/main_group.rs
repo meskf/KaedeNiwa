@@ -174,11 +174,15 @@ impl ServerConnection {
         &self,
         channel_id: String,
         ciphertext: Vec<u8>,
+        id: i64,
+        ts: i64,
     ) -> Result<(), ClientError> {
         self.transport
             .send(ClientMessage::MlsAppMessage {
                 channel_id,
                 payload: ciphertext,
+                id,
+                ts,
             })
             .await
     }
@@ -196,7 +200,7 @@ impl ServerConnection {
         plaintext: &[u8],
     ) -> Result<Vec<u8>, ClientError> {
         let ciphertext = self.mls_encrypt_app(plaintext)?;
-        self.mls_send_ciphertext(channel_id.to_string(), ciphertext.clone())
+        self.mls_send_ciphertext(channel_id.to_string(), ciphertext.clone(), 0, 0)
             .await?;
         Ok(ciphertext)
     }

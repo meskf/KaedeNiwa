@@ -1,0 +1,33 @@
+appId: com.kaedeniwa.desktop
+productName: KaedeNiwa
+copyright: Copyright © 2026 KaedeNiwa
+
+directories:
+  output: ../../release/desktop
+  buildResources: build
+
+files:
+  - src/**/*
+  - package.json
+
+extraResources:
+  - from: ../web/dist
+    to: web
+
+asar: true
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: kaede-client-${version}-setup.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: KaedeNiwa
+  deleteAppDataOnUninstall: false

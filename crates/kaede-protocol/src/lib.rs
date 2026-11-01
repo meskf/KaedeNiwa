@@ -97,7 +97,7 @@ where
 /// v5：新增 `ServerMessage::FriendsChanged`；移除 SDP/ICE/SfuToken 遗留变体。
 /// v6：新增私密频道表情反应（`ChannelReaction` 双向变体）。
 /// v7：新增 `Typing` 双向变体（输入中指示）。
-    /// v8：ChannelMessage 新增 id 字段（用于增量拉取）。
+/// v8：ChannelMessage 新增 id 字段（用于增量拉取）。
 pub const PROTOCOL_VERSION: u16 = 8;
 
 /// 服务器接受的最低协议版本。
@@ -280,11 +280,18 @@ pub enum ClientMessage {
     },
 
     /// 广播 Application Message（聊天 / 数据）。
+    ///
+    /// v8.1：`id` / `ts` 由发送端在 POST /api/messages 拿到服务端权威值后回填。
+    /// 旧客户端不带这两个字段时默认 0，服务端/接收端按 0 处理（等价旧行为）。
     MlsAppMessage {
         channel_id: String,
         #[serde(with = "serde_bytes")]
         #[ts(type = "number[]")]
         payload: Vec<u8>,
+        #[serde(default)]
+        id: i64,
+        #[serde(default)]
+        ts: i64,
     },
 
     // ---- 在线状态 ----
@@ -597,12 +604,18 @@ pub enum ServerMessage {
         payload: Vec<u8>,
     },
 
+    /// v8.1：`id` / `ts` 透传客户端回填的服务端权威值。
+    /// 反应 / 媒体信令这类不落库的消息 `id=0`，接收端只用 `ts` 做排序。
     MlsAppMessage {
         from: UserId,
         channel_id: String,
         #[serde(with = "serde_bytes")]
         #[ts(type = "number[]")]
         payload: Vec<u8>,
+        #[serde(default)]
+        id: i64,
+        #[serde(default)]
+        ts: i64,
     },
 
     // ---- 保活 ----
@@ -824,6 +837,8 @@ mod tests {
         round_trip_client(ClientMessage::MlsAppMessage {
             channel_id: "general".into(),
             payload: vec![0xde, 0xad, 0xbe, 0xef],
+            id: 0,
+            ts: 0,
         });
     }
 
@@ -856,6 +871,7 @@ mod tests {
     #[test]
     fn channel_message_round_trip() {
         round_trip_server(ServerMessage::ChannelMessage {
+            id: 42,
             channel_id: "ch_secret".into(),
             from: UserId::new("alice"),
             ts: 123456789,
@@ -909,6 +925,8 @@ mod tests {
         let big = ClientMessage::MlsAppMessage {
             channel_id: "general".into(),
             payload: vec![0; MAX_MESSAGE_BYTES + 1],
+            id: 0,
+            ts: 0,
         };
         assert!(matches!(
             big.encode(),
@@ -970,6 +988,8 @@ mod tests {
         let msg = ClientMessage::MlsAppMessage {
             channel_id: "general".into(),
             payload: vec![],
+            id: 0,
+            ts: 0,
         };
         let bytes = msg.encode().unwrap();
         assert!(
@@ -1007,7 +1027,6 @@ fn export_ts() {
     eprintln!("TS types written to {:?}", dir);
 }
 
-
 // ============================================================================
 // 目录树节点（无限嵌套：文件夹 + 频道）
 // ============================================================================
@@ -1018,7 +1037,7 @@ pub struct Node {
     pub id: String,
     pub name: String,
     pub parent_id: Option<String>,
-    pub kind: String,       // "folder" | "text" | "voice"
+    pub kind: String, // "folder" | "text" | "voice"
     pub position: i64,
     pub is_private: bool,
     pub created_at: i64,

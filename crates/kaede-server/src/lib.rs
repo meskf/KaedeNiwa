@@ -10,7 +10,6 @@ pub mod attachments;
 pub mod avatars;
 pub mod categories;
 pub mod channels;
-mod nodes;
 pub mod config;
 pub mod db;
 pub mod dm;
@@ -20,6 +19,7 @@ pub mod http;
 pub mod livekit;
 pub mod members;
 pub mod metrics;
+mod nodes;
 pub mod reads;
 pub mod sessions_api;
 pub mod state;
@@ -57,6 +57,10 @@ pub async fn spawn_test_server() -> std::io::Result<std::net::SocketAddr> {
         admin_token: String::new(),
     };
     let pool = db::init(&cfg.database_url).await.expect("db init");
+    // nodes 表由 migrations/20261030000001_nodes.sql 创建；
+    // 这里调 init_nodes_table 是为了做老 channels -> nodes 的幂等数据同步，
+    // 与 main.rs 启动顺序（db::init -> init_nodes_table -> ensure_default_channels）一致。
+    db::init_nodes_table(&pool).await.expect("init nodes");
     ensure_default_channels(&pool).await;
     let state = state::AppState::new(pool, cfg);
     let app = with_middleware(
@@ -67,7 +71,7 @@ pub async fn spawn_test_server() -> std::io::Result<std::net::SocketAddr> {
             .merge(dm::router(state.clone()))
             .merge(livekit::router(state.clone()))
             .merge(categories::router(state.clone()))
-        .merge(channels::router(state.clone()))
+            .merge(channels::router(state.clone()))
             .merge(members::router(state.clone()))
             .merge(reads::router(state.clone()))
             .merge(sessions_api::router(state.clone()))
@@ -145,15 +149,15 @@ mod default_channel_tests {
             std::env::temp_dir().join(format!("kaede_default_{}_{}.db", std::process::id(), id));
         let url = format!("sqlite://{}?mode=rwc", path.display());
         let pool = db::init(&url).await.unwrap();
+        db::init_nodes_table(&pool).await.unwrap();
 
         ensure_default_channels(&pool).await;
         ensure_default_channels(&pool).await;
 
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT id, kind FROM nodes ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+        let rows: Vec<(String, String)> = sqlx::query_as("SELECT id, kind FROM nodes ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 2, "default channels must be created once");
         assert!(
             rows.iter()

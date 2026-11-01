@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAuthStore } from './stores/auth'
+import { useChatStore } from './stores/chat'
 import { initWasm, getClient, recordLoginArgs, stopReconnect, allowReconnect } from './wasm/client'
 import { LoginView } from './components/LoginView'
 import { MainView } from './components/MainView'
@@ -131,6 +132,9 @@ export default function App() {
         try { return parseRaw((c as any).debug_channel_state(ch)) } catch (e) { return { error: String(e) } }
       },
       ping: () => 'pong',
+      store: {
+        getState: () => useChatStore.getState(),
+      },
 
       dm: {
         list:     async () => parseRaw(await reqClient().listDmConversations()),
@@ -201,8 +205,12 @@ export default function App() {
         send: async (ch: string) => reqClient().sendTyping(ch),
       },
       reaction: {
+        // 兼容旧签名（targetId=0 → 接收端按 ts 匹配）。
         send: async (ch: string, targetTs: number, emoji: string, action: 'add' | 'remove' = 'add') =>
-          reqClient().sendReaction(ch, BigInt(targetTs), emoji, action),
+          reqClient().sendReaction(ch, 0n, BigInt(targetTs), emoji, action),
+        // v8.1：id 优先（避免发送端乐观 ts 与接收端服务端 ts 错位）。
+        sendById: async (ch: string, targetId: number, targetTs: number, emoji: string, action: 'add' | 'remove' = 'add') =>
+          reqClient().sendReaction(ch, BigInt(targetId), BigInt(targetTs), emoji, action),
       },
       presence: {
         set: async (status: string) => reqClient().setPresence(status),

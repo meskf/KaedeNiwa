@@ -3,13 +3,16 @@
   "private": true,
   "version": "0.0.5",
   "description": "KaedeNiwa Electron shell",
+  "author": "KaedeNiwa",
   "main": "src/main.cjs",
   "scripts": {
     "dev": "electron . --dev",
-    "start": "electron ."
+    "start": "electron .",
+    "build:client": "electron-builder --win nsis portable"
   },
   "devDependencies": {
-    "electron": "^34.0.0"
+    "electron": "^34.0.0",
+    "electron-builder": "^26.18.0"
   },
   "allowScripts": {
     "electron@34.5.8": true

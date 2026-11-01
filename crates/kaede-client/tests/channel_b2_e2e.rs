@@ -140,7 +140,14 @@ async fn b2_private_channel_full_flow() {
     // === 1. Alice 创建私密频道 ===
     let ch = t
         .alice
-        .create_channel_with("secret-room", "text", true, Some(CHANNEL_PASSWORD), None)
+        .create_channel_with(
+            "secret-room",
+            "text",
+            true,
+            Some(CHANNEL_PASSWORD),
+            None,
+            None,
+        )
         .await
         .expect("create private channel");
     assert!(ch.is_private, "channel should be private");
@@ -216,7 +223,7 @@ async fn b2_wrong_password_rejected() {
 
     let ch = t
         .alice
-        .create_channel_with("secret", "text", true, Some(CHANNEL_PASSWORD), None)
+        .create_channel_with("secret", "text", true, Some(CHANNEL_PASSWORD), None, None)
         .await
         .expect("create");
     let ch_id = ch.id.clone();
@@ -242,7 +249,7 @@ async fn b2_carol_cryptographic_isolation() {
 
     let ch = t
         .alice
-        .create_channel_with("secret", "text", true, Some(CHANNEL_PASSWORD), None)
+        .create_channel_with("secret", "text", true, Some(CHANNEL_PASSWORD), None, None)
         .await
         .expect("create");
     let ch_id = ch.id.clone();
@@ -295,7 +302,14 @@ async fn b2_private_channel_media_isolation() {
 
     let ch = t
         .alice
-        .create_channel_with("media-room", "text", true, Some(CHANNEL_PASSWORD), None)
+        .create_channel_with(
+            "media-room",
+            "text",
+            true,
+            Some(CHANNEL_PASSWORD),
+            None,
+            None,
+        )
         .await
         .expect("create private channel");
     let ch_id = ch.id.clone();

@@ -69,7 +69,6 @@ mod tests {
 /// `openmls_rust_crypto`。
 pub use openmls_rust_crypto::OpenMlsRustCrypto;
 
-
 #[cfg(test)]
 mod pq_probe {
     use super::*;
@@ -81,10 +80,16 @@ mod pq_probe {
         println!("AEAD       = {:?}", cs.aead_algorithm());
         println!("HASH       = {:?}", cs.hash_algorithm());
         println!("SIG        = {:?}", cs.signature_algorithm());
-        assert_eq!(
-            cs,
-            openmls::prelude::Ciphersuite::MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519,
-            "DEFAULT_CIPHERSUITE must be the PQ hybrid suite"
+        // 断言"必须处于 PQ 混合套件"而非钉死某个 draft 变体：
+        // 既防降级回经典 X25519+Ed25519，也允许后续切到同族更新 PQ 套件。
+        let dbg = format!("{:?}", cs);
+        assert!(
+            dbg.contains("MLKEM"),
+            "DEFAULT_CIPHERSUITE must use a PQ hybrid KEM, got {dbg}"
+        );
+        assert!(
+            dbg.contains("MLDSA"),
+            "DEFAULT_CIPHERSUITE must use a PQ signature, got {dbg}"
         );
     }
 }

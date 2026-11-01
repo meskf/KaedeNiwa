@@ -1,6 +1,4 @@
 // KaedeNiwa Electron preload
-// 通过 contextBridge 暴露最小原生 API。apps/web/src/platform/index.ts
-// 会在下一轮检测 window.electronAPI 并切换到 electron.ts 实现。
 'use strict'
 
 const { contextBridge, ipcRenderer } = require('electron')
@@ -12,6 +10,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   copyText: (text) => ipcRenderer.invoke('electron:copy-text', text),
   readText: () => ipcRenderer.invoke('electron:read-text'),
   saveFile: (opts) => ipcRenderer.invoke('electron:save-file', opts),
+  getServerUrl: () => ipcRenderer.invoke('electron:get-server-url'),
+  setServerUrl: (url) => ipcRenderer.invoke('electron:set-server-url', url),
 })
 
 contextBridge.exposeInMainWorld('windowControls', {
@@ -25,5 +25,3 @@ contextBridge.exposeInMainWorld('windowControls', {
     return () => ipcRenderer.removeListener('window:maximize-changed', handler)
   },
 })
-
-console.log('[preload] electronAPI exposed')

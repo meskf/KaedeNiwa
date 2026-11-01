@@ -430,11 +430,13 @@ async fn private_channel_message_is_broadcast_realtime() {
     .await;
     match got {
         ServerMessage::ChannelMessage {
+            id,
             channel_id,
             from,
             ts,
             ciphertext,
         } => {
+            assert!(id >= 0, "message id must be non-negative");
             assert_eq!(channel_id, ch);
             assert_eq!(from.as_str(), "alice");
             assert!(ts > 0, "server ts must be authoritative");

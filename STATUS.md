@@ -1,95 +1,57 @@
-[已归档 - 见 HANDOFF.md]
+# KaedeNiwa 状态快照
 
-本文件是本会话期间的进度快照，部分内容（e2e 数量、测试范围）已过时。
-完整、准确的交接文档见 HANDOFF.md（632 行，覆盖架构 / 加密 / 网络 / session /
-pending / DM / 测试 / 技术债 / 15 个踩坑 / 下一步 / 工作方式建议）。
+最后更新：2026-11-02
 
-以下内容保留作为历史参考。
+## 当前版本
 
-================================================================================
+- 协议 v8（MIN_SUPPORTED_VERSION = 7），workspace 版本 0.0.5
+- 8 个 crate，7 个在 workspace（kaede-denoise 未纳入）
+- 前端：apps/web（React 19 + Vite 6 + Tailwind 4）+ apps/desktop（Electron）
 
-KaedeNiwa STATUS
-================
+## 测试基线（2026-11-02 实测全绿）
 
-Last updated: 2026-10-25 (P0-Z 真 E2EE + P1 tab-lock/session-kick，e2e 12/12 green)
+    Rust workspace   217 passed / 0 failed / 8 ignored
+    Rust client native 112 passed / 0 failed
+    Playwright e2e-standard  13 passed / 0 failed（7 spec）
+    clippy           4 个既有 warning（metrics/channels/nodes/ws 旧代码）
 
-Commit history (this session)
------------------------------
-  5c4eee3  P0-1: strict welcome verification + restore spawn_test_server
-  2fcfb47  fix(rate-limit): dev-mode short-circuit for check_rate_scoped / check_rate_key
-  224ff32  P0-2 r2: per-channel commit gap buffering + drain + reconnect backfill
-  4c65547  P0-2 r1: mls_commits channel_id dimension + protocol ReportEpoch/MlsCommit.channel_id
-  3550cb7  fix(wasm): rebuild with correct out-dir + fix build:wasm script; test-10 green
-  8a68d79  chore: wasm rebuild wired into start-all + run-all-tests; STATUS.md
-  8a544a8  fix(run-all-tests): trailing comma after test-9 entry
-  9c9fa70  fix(run-all-tests): wasm rebuild path uses $PSScriptRoot directly
+## 最近完成（2026-11-02）
 
-Completed
----------
-  [x] P0-1 Welcome 强验证（服务端 authority gate + 客户端 strict verify + 时序容忍）
-  [x] P0-2 频道 Commit 补发
-      - mls_commits (channel_id, epoch) 复合主键 migration
-      - 服务端 ChannelCommit 落库（INSERT OR IGNORE）
-      - 服务端 ReportEpoch 支持 channel_id 分支 + 日志
-      - 客户端 report_channel_epoch + backfill_all_channel_epochs
-      - ChannelSync.epoch gap 检测 + per-channel buffered drain
-      - test-10-commit-replay 验证 reload + backfill 全链路
-  [x] dev-mode 限流短路（honor "dev 无限流" contract）
-  [x] spawn_test_server 恢复（cleanup regression 修复）
-  [x] cargo-fuzz scaffold（build ok；run 留 Linux CI）
-  [x] wasm rebuild 接入 start-all.ps1 + run-all-tests.ps1
+1. CI 补强：新增 test job，两段跑 workspace + client --features native，
+   消灭「测试存在但 CI 从不执行」盲区。
+2. Playwright webServer：本地与 CI 共用同一份启动/探活逻辑，
+   替代原先手写 spawn/wait 和交互式 start-all.ps1。
+3. 消息身份 v8.1：从 ts 迁移到服务端 id，贯通协议/服务端/客户端/wasm/前端。
+   修复 reaction 永远挂不上对端消息的缺陷（Playwright 05 此前一直失败）。
+4. 安全修复：inbound.rs 双解密导致 sender 校验与私密频道过滤落在死路径，
+   实际生效路径不校验发送者——已合并为单次解密 + 活路径校验。
+5. 功能修复：notify_authority 成功入队仍返回 false（离线权威加入频道误报 409）。
+6. 功能修复：begin_media_session 无条件走 channel key，DM 媒体 key 永远拿不到。
+7. 架构修复：nodes 表纳入 migrations，统一生产与测试初始化路径。
+8. 仓库清洁：222 个临时脚本/日志/备份移入 _archive/2026-11-cleanup
+   （含 MANIFEST.json 逐条记录，可逆）。根目录只剩规范文件。
+9. 文档重写：README（架构/快速开始/测试/已知限制）、STATUS（本文件）、
+   .cargo/config.toml 别名修正。
 
-Test status (as of this commit)
--------------------------------
-  Rust unit:  cargo test -p protocol -p client -p server --no-run  OK
-  e2e (12):   run-all-tests.ps1 -FreshEachMediaTest  ✅ 12/12 PASS
-    - test-1 ~ test-11  PASS（同前）
-    - test-12 多 tab/设备 PASS（tab-lock + server kick session）
-  fuzz build: cargo +nightly fuzz build  OK
+## 待办（按优先级）
 
-!!!!! 踩过的坑（必读，避免重复） !!!!!
-------------------------------------
-  【wasm 缓存陷阱】
-  客户端 Rust 改动（kaede-client）必须 npm run build:wasm 重建 wasm，
-  否则 apps/web 加载的是旧的 kaede_client_wasm_bg.wasm，e2e 会跑旧代码。
-  这是本次会话最大的坑：P0-1 客户端 + P0-2 客户端两层修复一度全是"假阳性"，
-  test-8 通过但跑的是旧 wasm。诊断线索：
-    - apps/web/src/wasm/pkg/kaede_client_wasm_bg.wasm 的 mtime < crates 下源文件 mtime
-    - 客户端日志（[join_room] / [backfill_all]）完全不出现
-  现在 start-all.ps1 和 run-all-tests.ps1 都已接入 wasm rebuild，不会再踩。
+### P1
+- 屏幕共享视频轨接收端渲染（HANDOFF PART 34 Open Issue）
+- safety number / 密钥指纹核验（Signal 同级定义性特征，计划正式版前做）
+- 元数据最小化：presence / typing 目前服务器可见
 
-Known technical debt
---------------------
-  1. dev-mode 限流短路是临时补丁——生产走 --release 不受影响。
-  2. kaede-client-wasm 的 web_sys 依赖有问题（cargo check --workspace 报 E0433）；
-     实际 WASM 构建走 target=wasm32 不受影响。
-  3. JoinChannelResp struct 未被使用（dead_code warning）——历史遗留，可清。
-  4. cargo-fuzz run 在 Windows 缺 ASan DLL；build 通过即可，run 留 Linux CI。
-  5. test-10 用 reload 测试，覆盖了"snapshot 恢复 + backfill"全链路。但用 CDP
-     setOffline 单独测 WS 断线重连（不 reload）仍是更纯粹的 backfill 隔离测试。
-  6. 【P1 观察】reload 后 u0 authority 收到 PeerJoined { u1 } 会认为 u1 是新成员，
-     给 u1 发 Welcome epoch=1，覆盖 u1 本地可能已 epoch=2 的 group。test-10 通过
-     靠 backfill 兜底，但这是潜在数据丢失。修复方向：服务端拒绝给已在
-     channel_members 的 target 发 Welcome（但要注意"房主重连重建主群"的合法场景）。
+### P2
+- wasm/src/lib.rs（30KB，60+ 导出）拆模块 + TS 类型化
+- HANDOFF.md 拆分归档（现 1950 行多会话累积）
+- Playwright 扩 firefox/webkit smoke 子集
 
-Next priorities
----------------
-  A. RNNoise WASM 收尾（test-5 断言）——30-45 分钟
-  B. CI（GitHub Actions）跑 cargo check/test + 10 个 e2e + fuzz build
-  C. P1 修复：服务端 already_member 检查 + 客户端拒绝覆盖 Welcome
-  D. DM / 好友 / 编辑 / 反应 / 附件（每功能 1-2 天）
-  E. UI 重做（Tailwind + Radix + Lexical）——1-2 周
-  F. Tauri v2 壳子（架构已预留）
-  G. Docker Compose 部署验证（deploy/ 未跑过）
+### P3
+- kaede-crypto / kaede-mls 挂 cargo-fuzz 持续跑
+- kaede-denoise 决定纳入 workspace 或标记 deprecated
 
-Why this session matters
-------------------------
-  上个对话把 spawn_test_server 在清理误伤，且暴露了"9/9 e2e 但 Rust 单测炸"的现状
-  （cargo check 不编译 tests/）。本轮：
-  - 补 P0-1 从"主群做了频道没做"到"主群+频道都做"
-  - 从"频道 Commit 完全无补发"到"两级 gap 检测 + 补发链路 + 持久化"
-  - 加 test-10 验证断线重连 backfill 全链路
-  - 修复 wasm 缓存陷阱（本次最大隐形炸弹）
+## 已知 Open Issue
 
-  现有系统在 10 人场景下频道 epoch 一致、断线重连后能追平——这是 Discord
-  级别频道隔离 + Signal 级别 MLS 前向安全的必要基础。
+**屏幕共享视频轨**：发送端正常、接收端收不到视频轨（音频轨正常）。
+已排除局域网、防火墙、E2EE、分辨率、Simulcast。本地双开复现。
+下一步：独立 WebRTC 最小页验证 + 抓 LiveKit SFU 日志。
+详见 HANDOFF.md PART 34。

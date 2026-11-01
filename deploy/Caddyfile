@@ -1,57 +1,21 @@
-# KaedeNiwa Caddy 配置
-#
-# 环境变量：
-#   KAEDE_DOMAIN=kaede.example.com
-#
-# Caddy 自动申请/续期 TLS 证书，并原生转发 WebSocket（/ws）。
-# 静态站来自 dist/web（compose 中挂载到 /srv/kaede）。
-{$KAEDE_DOMAIN} {
-	encode zstd gzip
+# 如果配置了 KAEDE_DOMAIN，Caddy 会自动申请 SSL 证书并开启 443
+{$KAEDE_DOMAIN:localhost} {
+    root * /srv/kaede
+    try_files {path} /index.html
 
-	# PQC: 显式锁定 hybrid ML-KEM 曲线。Caddy 2.10+ 默认启用 x25519mlkem768；
-	# 此处显式声明，避免未来默认值变更导致 PQ 悄悄关闭。需要 Caddy >= 2.10。
-	tls {
-		curves x25519mlkem768
-	}
+    handle /api/* {
+        reverse_proxy kaede:18080
+    }
 
-	# 指标只给本机 Prometheus；公网不暴露。
-	handle /metrics {
-		respond "not found" 404
-	}
+    handle /ws* {
+        reverse_proxy kaede:18080
+    }
 
-	handle /api/* {
-		reverse_proxy {$KAEDE_UPSTREAM:127.0.0.1:18080}
-	}
+    # LiveKit WebSocket 信令代理
+    handle /livekit/* {
+        uri strip_prefix /livekit
+        reverse_proxy livekit:7880
+    }
 
-	handle /ws {
-		reverse_proxy {$KAEDE_UPSTREAM:127.0.0.1:18080}
-	}
-
-	handle /health {
-		reverse_proxy {$KAEDE_UPSTREAM:127.0.0.1:18080}
-	}
-
-	handle /ready {
-		reverse_proxy {$KAEDE_UPSTREAM:127.0.0.1:18080}
-	}
-
-	# SPA：未知路径回退 index.html
-	# dx bundle 的产物在 dist/web/public（compose 挂载 dist/web → /srv/kaede）。
-	handle {
-		root * /srv/kaede/public
-		try_files {path} /index.html
-		file_server
-	}
-
-	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Content-Type-Options "nosniff"
-		Referrer-Policy "same-origin"
-		# Web 快照密钥有公开信息回退方案；CSP 是抵御 XSS/浏览器扩展读取
-		# IndexedDB 的重要纵深防御。Blob/Same-origin 用于 LiveKit E2EE worker。
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; object-src 'none'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self' wss: https:; base-uri 'self'; frame-ancestors 'none'"
-		Permissions-Policy "camera=(self), microphone=(self), display-capture=(self), geolocation=(), notifications=()"
-		-Server
-	}
+    file_server
 }
-

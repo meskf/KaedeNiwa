@@ -263,92 +263,109 @@ impl ServerConnection {
                 from,
                 channel_id,
                 payload,
+                id,
+                ts,
             } => {
-                // 【核心修复】真正的 MLS 密文解密
-                match self.mls_decrypt(&payload) {
-                    Ok(plaintext) => {
-                        self.emit_local_event(ClientEvent::AppMessageReceived {
-                            from: from.0.clone(),
-                            channel_id,
-                            payload: plaintext,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!("[mls] 解密 MlsAppMessage 失败: {}", e);
-                    }
-                }
-                let plaintext = {
+                // MLS 密文只能解密一次（ratchet 前进后同一密文不可重放）。
+                // 曾同时调用 mls_decrypt + decrypt_with_sender：
+                // 第二次必然失败 → AppMessage 永不 emit；更糟的是 sender 校验、
+                // 私密频道过滤、MediaMeta 识别全落在死路径上，实际生效的
+                // AppMessageReceived 路径未校验发送者身份（服务器可篡改 from）。
+                //
+                // 现在：单次解密拿 (plaintext, mls_sender)，安全逻辑放在活路径，
+                // 通过后同时 emit AppMessageReceived（前端消费）与 AppMessage（内部）。
+                let decrypted = {
                     let mut guard = self.mls.lock().unwrap_or_else(|e| e.into_inner());
                     match guard.as_mut() {
-                        Some(s) if s.is_ready() => match s.decrypt_with_sender(&payload) {
-                            Ok((pt, mls_sender)) if mls_sender == from.as_str() => Some(pt),
-                            Ok((_, mls_sender)) => {
-                                // 服务器改写了 from：MLS 密文本身有效，但归属不可信。
-                                tracing::warn!(
-                                    "[client:{}] sender mismatch: MLS={} server={}; dropping",
-                                    self.server_id,
-                                    mls_sender,
-                                    from
-                                );
-                                None
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[client:{}] decrypt from {} failed: {}",
-                                    self.server_id,
-                                    from,
-                                    e
-                                );
-                                None
-                            }
-                        },
+                        Some(s) if s.is_ready() => Some(s.decrypt_with_sender(&payload)),
                         _ => None,
                     }
                 };
-                if let Some(pt) = plaintext {
-                    // 先尝试识别媒体信令（MediaMeta），识别成功就不发 AppMessage。
-                    // 其它类型（Message / Reaction / Raw）仍走 AppMessage 事件，
-                    // 由上层自行 decode（保持既有行为）。
-                    use crate::payload::{DecodedPayload, decode};
-                    match decode(&pt) {
-                        DecodedPayload::MediaMeta(meta) => {
-                            self.emit(ClientEvent::MediaMetaReceived {
-                                server_id: self.server_id.clone(),
-                                from,
-                                meta,
-                            });
-                        }
-                        // R2-02: 私密频道内容不得经主群广播进入本地状态。
-                        // 任意主群成员都能构造 `c = <私密频道 id>` 的 payload。
-                        DecodedPayload::Message(ref p)
-                            if self.channel_has_group(&p.c)
-                                || self.is_known_private_channel(&p.c) =>
-                        {
-                            tracing::warn!(
-                                "[client:{}] drop main-group message targeting private channel {}",
-                                self.server_id,
-                                p.c
-                            );
-                        }
-                        DecodedPayload::Reaction(ref r)
-                            if self.channel_has_group(&r.c)
-                                || self.is_known_private_channel(&r.c) =>
-                        {
-                            tracing::warn!(
-                                "[client:{}] drop main-group reaction targeting private channel {}",
-                                self.server_id,
-                                r.c
-                            );
-                        }
-                        _ => {
-                            self.emit(ClientEvent::AppMessage {
-                                server_id: self.server_id.clone(),
-                                from,
-                                plaintext: pt,
-                            });
-                        }
+
+                let (pt, mls_sender) = match decrypted {
+                    None => {
+                        tracing::warn!(
+                            "[client:{}] MlsAppMessage but mls not ready; dropping",
+                            self.server_id
+                        );
+                        return Ok(());
                     }
+                    Some(Ok(v)) => v,
+                    Some(Err(e)) => {
+                        tracing::warn!(
+                            "[client:{}] decrypt from {} failed: {}",
+                            self.server_id,
+                            from,
+                            e
+                        );
+                        return Ok(());
+                    }
+                };
+
+                // 服务器给的 from 只是元数据；归属必须由 MLS 认证身份决定。
+                if mls_sender != from.as_str() {
+                    tracing::warn!(
+                        "[client:{}] sender mismatch: MLS={} server={}; dropping",
+                        self.server_id,
+                        mls_sender,
+                        from
+                    );
+                    return Ok(());
                 }
+
+                use crate::payload::{DecodedPayload, decode};
+                match decode(&pt) {
+                    DecodedPayload::MediaMeta(meta) => {
+                        self.emit(ClientEvent::MediaMetaReceived {
+                            server_id: self.server_id.clone(),
+                            from,
+                            meta,
+                        });
+                        return Ok(());
+                    }
+                    // R2-02: 私密频道内容不得经主群广播进入本地状态。
+                    //
+                    // 判据只用 is_known_private_channel（明确记录该频道是私密），
+                    // 不能用 channel_has_group：general 等公开频道也可能因 join
+                    // 流程持有 channel group，用 has_group 会误杀合法的主群消息/
+                    // 反应（公开频道 reaction 只能走主群 MLS，服务端拒绝
+                    // ChannelReaction 公开频道请求）。
+                    //
+                    // 未加入过该私密频道的用户：is_known_private_channel=false，
+                    // 但本地也没有该频道的 group，收到 payload 也无法解密，无风险。
+                    DecodedPayload::Message(ref m) if self.is_known_private_channel(&m.c) => {
+                        tracing::warn!(
+                            "[client:{}] drop main-group message targeting private channel {}",
+                            self.server_id,
+                            m.c
+                        );
+                        return Ok(());
+                    }
+                    DecodedPayload::Reaction(ref r) if self.is_known_private_channel(&r.c) => {
+                        tracing::warn!(
+                            "[client:{}] drop main-group reaction targeting private channel {}",
+                            self.server_id,
+                            r.c
+                        );
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+
+                // 前端（MainView.tsx）实际消费 AppMessageReceived；
+                // AppMessage 保留给内部消费者与现有测试。
+                self.emit_local_event(ClientEvent::AppMessageReceived {
+                    from: mls_sender,
+                    channel_id,
+                    payload: pt.clone(),
+                    id,
+                    ts,
+                });
+                self.emit(ClientEvent::AppMessage {
+                    server_id: self.server_id.clone(),
+                    from,
+                    plaintext: pt,
+                });
             }
 
             ServerMessage::ChannelMemberJoined {
@@ -742,7 +759,7 @@ impl ServerConnection {
             }
 
             ServerMessage::ChannelMessage {
-                id: _id,
+                id,
                 channel_id,
                 from,
                 ts,
@@ -776,6 +793,7 @@ impl ServerConnection {
                                     server_id: self.server_id.clone(),
                                     channel_id,
                                     from,
+                                    id,
                                     ts,
                                     plaintext,
                                 });

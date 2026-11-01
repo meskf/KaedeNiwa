@@ -162,6 +162,8 @@ async fn fanout_one_mib_reaches_every_peer() {
         &ClientMessage::MlsAppMessage {
             channel_id: "general".into(),
             payload: payload.clone(),
+            id: 0,
+            ts: 0,
         },
     )
     .await;
@@ -267,6 +269,8 @@ async fn four_mib_flood_hits_byte_budget_without_disconnect() {
             &ClientMessage::MlsAppMessage {
                 channel_id: "general".into(),
                 payload: payload.clone(),
+                id: 0,
+                ts: 0,
             },
         )
         .await;

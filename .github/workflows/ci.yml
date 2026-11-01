@@ -38,6 +38,30 @@ jobs:
       - name: check core crates
         run: cargo check -p kaede-protocol -p kaede-crypto -p kaede-storage -p kaede-mls -p kaede-client -p kaede-server --all-targets
 
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: install keyring deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
+      # 分两段跑的原因：
+      # 1) kaede-client 的 native 集成测试（channel_b2/dm_b2/room_e2e）由
+      #    #![cfg(feature = "native")] 门控，默认 features 下整个文件是空 crate，
+      #    cargo test 会显示 "running 0 tests" 且静默通过。必须显式 --features native。
+      # 2) kaede-client-wasm 只能 wasm32 编译，host 下无法测试，必须排除。
+      - name: test (workspace, excl. client & client-wasm)
+        run: |
+          cargo test --workspace --exclude kaede-client --exclude kaede-client-wasm --all-targets
+      - name: test (kaede-client native integration)
+        run: |
+          cargo test -p kaede-client --features native --all-targets
+
   e2e:
     name: e2e (playwright)
     runs-on: ubuntu-latest
@@ -67,47 +91,17 @@ jobs:
       - name: build wasm
         working-directory: apps/web
         run: npm run build:wasm
-      - name: build server (release, dev-mode)
-        run: cargo build -p kaede-server --release --features dev-mode
+      - name: build server (dev-mode, debug)
+        # 必须与 playwright.config.ts 里 webServer 的 `cargo run` profile 一致，
+        # 否则 cargo run 会重新编译一遍，e2e job 白等几分钟。
+        run: cargo build -p kaede-server --features dev-mode
       
+      # 服务由 playwright.config.ts 的 webServer 自动拉起：
+      # 本地与 CI 共用同一份启动/探活/清理逻辑，避免两套代码漂移。
+      # CI 下 reuseExistingServer=false，由 Playwright 负责启停。
       - name: run Playwright E2E
         working-directory: apps/web
         env:
           KAEDE_HEADLESS: "1"
           KAEDE_HTTP: "1"
-        run: |
-          set -e
-          # 启动后端
-          KAEDE_BIND=0.0.0.0:18080 \
-          LIVEKIT_API_KEY=devkey \
-          LIVEKIT_API_SECRET=secret \
-          LIVEKIT_WS_URL=ws://127.0.0.1:7880 \
-          RUST_LOG=info \
-          ../../target/release/kaede-server > /tmp/backend.log 2>&1 &
-          BACKEND_PID=$!
-          
-          # 启动 vite (纯 HTTP)
-          KAEDE_HTTP=1 npx vite --host 127.0.0.1 --port 5173 > /tmp/vite.log 2>&1 &
-          VITE_PID=$!
-          
-          trap "kill $BACKEND_PID $VITE_PID 2>/dev/null || true" EXIT
-          
-          wait_port() {
-            local port=$1
-            local i=0
-            while ! (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null; do
-              i=$((i+1))
-              if [ $i -ge 60 ]; then
-                echo "port $port timeout"
-                echo "=== backend.log ==="; tail -40 /tmp/backend.log
-                echo "=== vite.log ==="; tail -40 /tmp/vite.log
-                return 1
-              fi
-              sleep 1
-            done
-            echo "port $port ready"
-          }
-          wait_port 18080
-          wait_port 5173
-          
-          npx playwright test --reporter=list
+        run: npx playwright test --reporter=list

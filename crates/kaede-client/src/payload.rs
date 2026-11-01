@@ -58,8 +58,12 @@ impl MessagePayload {
 pub struct ReactionPayload {
     pub c: String,
     pub u: String,
-    /// 目标消息的 ts。
+    /// 目标消息的 ts（旧字段，兼容旧客户端与历史 fold 回退匹配）。
+    #[serde(default)]
     pub target_ts: i64,
+    /// 目标消息的服务端 id（v8.1 起首选；0 表示旧客户端，走 target_ts 回退）。
+    #[serde(default)]
+    pub target_id: i64,
     pub emoji: String,
     /// `"add"` | `"remove"`。
     pub action: String,
@@ -69,6 +73,7 @@ impl ReactionPayload {
     pub fn new(
         channel_id: impl Into<String>,
         uid: impl Into<String>,
+        target_id: i64,
         target_ts: i64,
         emoji: impl Into<String>,
         action: impl Into<String>,
@@ -76,6 +81,7 @@ impl ReactionPayload {
         Self {
             c: channel_id.into(),
             u: uid.into(),
+            target_id,
             target_ts,
             emoji: emoji.into(),
             action: action.into(),

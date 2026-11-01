@@ -1,8 +1,8 @@
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     routing::{get, patch},
-    Json, Router,
 };
 use kaede_protocol::Node;
 use serde::Deserialize;
@@ -16,7 +16,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/nodes", get(list_nodes).post(create_node))
         .route("/api/nodes/{id}", patch(update_node).delete(delete_node))
-        }
+}
 
 #[derive(Deserialize)]
 pub struct CreateNodeReq {
@@ -37,15 +37,31 @@ pub struct UpdateNodeReq {
     pub _position: Option<i64>,
 }
 
-async fn list_nodes(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<Node>>, ApiError> {
+async fn list_nodes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Node>>, ApiError> {
     let _uid = authenticate(&state, &headers).await?;
-    let rows: Vec<(String, String, Option<String>, String, i64, i64, i64)> = sqlx::query_as(
+    // list_nodes 返回的完整行，提成别名便于维护。
+    type NodeRow = (String, String, Option<String>, String, i64, i64, i64);
+    let rows: Vec<NodeRow> = sqlx::query_as(
         "SELECT id, name, parent_id, kind, position, is_private, created_at FROM nodes ORDER BY position ASC"
     ).fetch_all(&state.pool).await?;
 
-    let nodes = rows.into_iter().map(|(id, name, parent_id, kind, position, is_private, created_at)| Node {
-        id, name, parent_id, kind, position, is_private: is_private != 0, created_at
-    }).collect();
+    let nodes = rows
+        .into_iter()
+        .map(
+            |(id, name, parent_id, kind, position, is_private, created_at)| Node {
+                id,
+                name,
+                parent_id,
+                kind,
+                position,
+                is_private: is_private != 0,
+                created_at,
+            },
+        )
+        .collect();
 
     Ok(Json(nodes))
 }
@@ -80,9 +96,15 @@ async fn create_node(
         (None, None)
     };
 
-    let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let id = format!("node_{}", now_ns);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
 
     sqlx::query(
         "INSERT INTO nodes (id, name, parent_id, kind, position, is_private, password_hash, hash_tier, created_at) \
@@ -100,7 +122,13 @@ async fn create_node(
     .execute(&state.pool).await?;
 
     Ok(Json(Node {
-        id, name: req.name, parent_id: req.parent_id, kind: req.kind, position: 0, is_private, created_at: now
+        id,
+        name: req.name,
+        parent_id: req.parent_id,
+        kind: req.kind,
+        position: 0,
+        is_private,
+        created_at: now,
     }))
 }
 
@@ -112,10 +140,18 @@ async fn update_node(
 ) -> Result<StatusCode, ApiError> {
     let _uid = authenticate(&state, &headers).await?;
     if let Some(name) = req.name {
-        sqlx::query("UPDATE nodes SET name = ? WHERE id = ?").bind(name).bind(&id).execute(&state.pool).await?;
+        sqlx::query("UPDATE nodes SET name = ? WHERE id = ?")
+            .bind(name)
+            .bind(&id)
+            .execute(&state.pool)
+            .await?;
     }
     if let Some(pid) = req.parent_id {
-        sqlx::query("UPDATE nodes SET parent_id = ? WHERE id = ?").bind(pid).bind(&id).execute(&state.pool).await?;
+        sqlx::query("UPDATE nodes SET parent_id = ? WHERE id = ?")
+            .bind(pid)
+            .bind(&id)
+            .execute(&state.pool)
+            .await?;
     }
     Ok(StatusCode::OK)
 }
@@ -126,6 +162,9 @@ async fn delete_node(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let _uid = authenticate(&state, &headers).await?;
-    sqlx::query("DELETE FROM nodes WHERE id = ?").bind(&id).execute(&state.pool).await?;
+    sqlx::query("DELETE FROM nodes WHERE id = ?")
+        .bind(&id)
+        .execute(&state.pool)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }

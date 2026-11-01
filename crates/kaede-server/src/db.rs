@@ -313,7 +313,6 @@ pub fn hash_token(token: &str) -> String {
     base64_url(&h)
 }
 
-
 pub async fn init_nodes_table(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS nodes (
@@ -326,9 +325,11 @@ pub async fn init_nodes_table(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error
             password_hash TEXT,
             hash_tier TEXT,
             created_at INTEGER NOT NULL
-        );"
-    ).execute(pool).await?;
-    
+        );",
+    )
+    .execute(pool)
+    .await?;
+
     // 【平滑迁移】把旧 channels 表的数据同步到 nodes 表（幂等）
     let _ = sqlx::query(
         "INSERT OR IGNORE INTO nodes (id, name, parent_id, kind, position, is_private, password_hash, hash_tier, created_at)

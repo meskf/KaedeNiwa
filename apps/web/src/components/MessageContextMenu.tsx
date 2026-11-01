@@ -8,12 +8,13 @@ interface Props {
   y: number
   text: string
   channelId?: string
+  msgId?: number
   msgTs?: number
   onReact?: (emoji: string, action: 'add' | 'remove') => void
   onClose: () => void
 }
 
-export function MessageContextMenu({ x, y, text, channelId, msgTs, onReact, onClose }: Props) {
+export function MessageContextMenu({ x, y, text, channelId, msgId: _msgId, msgTs, onReact, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const onCloseRef = useRef(onClose)
 

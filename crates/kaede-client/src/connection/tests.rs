@@ -212,6 +212,8 @@ async fn mls_receive_app_message_decrypts() {
         from: UserId::new("bob"),
         channel_id: "general".into(),
         payload: ct.clone(),
+        id: 0,
+        ts: 0,
     })
     .await
     .unwrap();
@@ -417,6 +419,8 @@ async fn main_group_message_targeting_private_channel_is_dropped() {
         from: UserId::new("bob"),
         channel_id: "general".into(),
         payload: ct,
+        id: 0,
+        ts: 0,
     })
     .await
     .unwrap();

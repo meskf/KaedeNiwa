@@ -1,4 +1,4 @@
-import { test, expect, waitDebug, getFirstTextChannelId, sendMessage } from './fixtures';
+import { test, expect, waitDebug, getFirstTextChannelId } from './fixtures';
 
 test.describe('ATTACHMENTS & REACTION', () => {
   test('发送附件与表情回应', async ({ u0, u1 }) => {
@@ -9,8 +9,8 @@ test.describe('ATTACHMENTS & REACTION', () => {
     const chId = await getFirstTextChannelId(u0);
     expect(chId).toBeTruthy();
 
-    // 1. 上传附件 (使用一个小字节数组)
-    const bytes = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
+    // 1. 上传附件
+    const bytes = new Uint8Array([72, 101, 108, 108, 111]);
     const att = await u0.evaluate(async ({ ch, bytes }) => {
       const dbg = (window as any).__kaede_debug__;
       return await dbg.attachments.upload(ch, 'test.txt', 'text/plain', bytes);
@@ -25,21 +25,21 @@ test.describe('ATTACHMENTS & REACTION', () => {
     }, { ch: chId, text: msgText, att });
     await u0.waitForTimeout(2000);
 
-    // 3. u1 能在 UI 看到消息文本
+    // 3. u1 能看到消息
     await expect(u1.getByText(msgText, { exact: false }).first()).toBeVisible({ timeout: 10000 });
 
-    // 4. u0 对消息发表情
-    // 注意：需要获取消息的时间戳，这里可以用 loadHistory 拿到最新的 ts
+    // 4. u0 取目标消息 id/ts，按 id 加表情（v8.1：id 优先）
     const history = await u0.evaluate((ch) => (window as any).__kaede_debug__.loadHistory(ch, 10), chId);
     const targetMsg = history.find((m: any) => JSON.stringify(m).includes(msgText));
     expect(targetMsg).toBeTruthy();
+    const msgId = Number(targetMsg.id) || 0;
     const msgTs = targetMsg.ts;
+    expect(msgId).toBeGreaterThan(0);
 
-    await u0.evaluate(({ ch, ts }) => (window as any).__kaede_debug__.reaction.send(ch, ts, '👍'), { ch: chId, ts: msgTs });
+    await u0.evaluate(({ ch, id, ts }) => (window as any).__kaede_debug__.reaction.sendById(ch, id, ts, '👍'), { ch: chId, id: msgId, ts: msgTs });
     await u0.waitForTimeout(1500);
 
-    // 5. u1 应该能收到 reaction（可以通过 UI 看到 👍，或者通过 loadHistory 看到）
-    // 这里我们先简单断言 UI 中出现了这个 emoji
-    await expect(u1.getByText('👍').first()).toBeVisible({ timeout: 5000 });
+    // 5. u1 能看到 reaction pill
+    await expect(u1.locator('[data-testid="reaction-pill-👍"]').first()).toBeVisible({ timeout: 5000 });
   });
 });

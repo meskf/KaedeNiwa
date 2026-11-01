@@ -438,4 +438,3 @@ async fn get_op(state: &AppState, uid: &str) -> Result<String, ApiError> {
         .await?;
     Ok(row.map(|(o,)| o).unwrap_or_else(|| "op2".into()))
 }
-

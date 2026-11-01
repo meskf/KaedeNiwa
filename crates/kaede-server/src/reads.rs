@@ -45,11 +45,10 @@ async fn mark_read(
 
     match (&req.channel_id, &req.conv_id) {
         (Some(channel_id), _) => {
-            let meta: Option<(i64,)> =
-                sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
-                    .bind(channel_id)
-                    .fetch_optional(&state.pool)
-                    .await?;
+            let meta: Option<(i64,)> = sqlx::query_as("SELECT is_private FROM nodes WHERE id = ?")
+                .bind(channel_id)
+                .fetch_optional(&state.pool)
+                .await?;
             let Some((is_private,)) = meta else {
                 return Err(ApiError::NotFound("channel".into()));
             };

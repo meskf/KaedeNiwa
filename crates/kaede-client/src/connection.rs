@@ -706,6 +706,8 @@ impl ServerConnection {
         let msg = ClientMessage::MlsAppMessage {
             channel_id,
             payload,
+            id: 0,
+            ts: 0,
         };
         self.transport.send(msg).await
     }

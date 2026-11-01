@@ -8,9 +8,11 @@ cbr    = "build --workspace --profile release-wasm"
 ct     = "test --workspace"
 ct1    = "test --workspace -- --test-threads=1"
 cf     = "fmt --all"
-cc     = "clippy --workspace --all-targets -- -D warnings"
-cwasm  = "check -p kaede-wasm --target wasm32-unknown-unknown"
-cwd    = "check -p kaede-wasm --target wasm32-unknown-unknown"
+cc     = "clippy --workspace --exclude kaede-client-wasm --all-targets -- -D warnings"
+cwasm  = "check -p kaede-client-wasm --target wasm32-unknown-unknown"
+cwd    = "check -p kaede-client-wasm --target wasm32-unknown-unknown"
+ctall  = "test --workspace --exclude kaede-client-wasm --all-targets"
+ctnative = "test -p kaede-client --features native --all-targets"
 
 # ============================================================
 # Windows target 配置

@@ -36,8 +36,8 @@ async fn main() -> Result<()> {
         bail!("op must be one of op1, op2, op3, op4, op5");
     }
 
-    let db_url = std::env::var("KAEDE_DB_URL")
-        .unwrap_or_else(|_| "sqlite://kaede.db?mode=rwc".to_string());
+    let db_url =
+        std::env::var("KAEDE_DB_URL").unwrap_or_else(|_| "sqlite://kaede.db?mode=rwc".to_string());
 
     println!("db: {}", db_url);
     println!("promoting '{}' -> {}", login_id, op);
@@ -59,11 +59,10 @@ async fn main() -> Result<()> {
         bail!("login_id '{}' not found in members table", login_id);
     }
 
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT login_id, op FROM members ORDER BY joined_at"
-    )
-    .fetch_all(&pool)
-    .await?;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT login_id, op FROM members ORDER BY joined_at")
+            .fetch_all(&pool)
+            .await?;
     println!("\ncurrent members:");
     for (id, o) in rows {
         let marker = if id == *login_id { " <- updated" } else { "" };

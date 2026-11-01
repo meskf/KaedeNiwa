@@ -1,0 +1,17 @@
+services:
+  kaede:
+    build: .
+    container_name: kaede-app
+    ports:
+      - "8080:8080"
+    volumes:
+      - kaede-data:/data
+    environment:
+      - LIVEKIT_API_KEY=devkey
+      - LIVEKIT_API_SECRET=secret
+      - LIVEKIT_WS_URL=ws://127.0.0.1:7880
+    restart: unless-stopped
+
+volumes:
+  kaede-data:
+

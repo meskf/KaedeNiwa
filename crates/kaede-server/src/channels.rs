@@ -81,7 +81,16 @@ async fn list_channels(
     let uid = authenticate(&state, &headers).await?;
 
     // 私密频道只对已加入的成员可见。
-    type ChannelRow = (String, String, String, i64, i64, i64, Option<String>, Option<String>);
+    type ChannelRow = (
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+    );
     let rows: Vec<ChannelRow> = sqlx::query_as(
         "SELECT id, name, kind, position, created_at, is_private, hash_tier, parent_id AS category_id \
          FROM nodes \
@@ -165,10 +174,9 @@ async fn create_channel(
     let now = db::now_ms();
 
     // 计算新 position
-    let max_pos: Option<(i64,)> =
-        sqlx::query_as("SELECT COALESCE(MAX(position), -1) FROM nodes")
-            .fetch_optional(&state.pool)
-            .await?;
+    let max_pos: Option<(i64,)> = sqlx::query_as("SELECT COALESCE(MAX(position), -1) FROM nodes")
+        .fetch_optional(&state.pool)
+        .await?;
     let position = max_pos.map(|(p,)| p + 1).unwrap_or(0);
 
     // 事务：INSERT channel + 创建者自动加入 channel_members
@@ -235,7 +243,17 @@ async fn update_channel(
     let uid = authenticate(&state, &headers).await?;
     check_write_perm(&state, uid.as_str()).await?;
 
-    let row: Option<(String, String, i64, i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
+    // update_channel 读取的列较多，提成别名便于维护。
+    type ChannelRow = (
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<ChannelRow> = sqlx::query_as(
         "SELECT name, kind, position, created_at, is_private, hash_tier, parent_id AS category_id FROM nodes WHERE id = ?",
     )
     .bind(&id)
@@ -465,11 +483,10 @@ async fn join_channel(
     Path(id): Path<String>,
     Json(req): Json<JoinChannelReq>,
 ) -> Result<StatusCode, ApiError> {
-        let uid = authenticate(&state, &headers).await?;
+    let uid = authenticate(&state, &headers).await?;
 
     // 【并发终极锁】强制串行化所有频道的加入请求，防止 A 和 B 同时 SELECT 查不到对方，各自建群。
     let _guard = state.join_channel_lock.lock().await;
-
 
     // C10: per-uid 限流，防频道密码暴破
     if !state.check_rate_scoped(&uid, "join_channel", 0.5, 3.0) {
@@ -567,7 +584,9 @@ async fn join_channel(
                 );
                 let online = notify_authority(&state, &id, &uid, kp_b64, &others).await;
                 if !online {
-                    return Err(ApiError::Conflict("solo channel: no online authority".into()));
+                    return Err(ApiError::Conflict(
+                        "solo channel: no online authority".into(),
+                    ));
                 }
             }
         }
@@ -634,7 +653,9 @@ async fn join_channel(
         }
         let online = notify_authority(&state, &id, &uid, &kp_b64, &members).await;
         if !online {
-            return Err(ApiError::Conflict("solo channel: no online authority".into()));
+            return Err(ApiError::Conflict(
+                "solo channel: no online authority".into(),
+            ));
         }
     }
 
@@ -702,6 +723,11 @@ async fn notify_authority(
                 channel_id,
                 authority
             );
+            // 请求已持久化 —— 从调用方视角这就是"成功"：
+            // 权威上线后 ws.rs 的 pending 补投逻辑会重放 ChannelMemberJoined。
+            // 曾硬编码 return false，导致调用方误判"无在线权威"返回 409，
+            // 而请求其实已入队 → 客户端收到错误却又入群，状态不一致。
+            return true;
         }
     } else {
         tracing::warn!(
@@ -996,7 +1022,10 @@ fn resolve_argon2(tier: Option<&str>) -> Result<(Argon2<'static>, &'static str),
     Ok((a2, tier_str))
 }
 
-pub(crate) fn hash_channel_password(password: &str, tier: Option<&str>) -> Result<(String, String), ApiError> {
+pub(crate) fn hash_channel_password(
+    password: &str,
+    tier: Option<&str>,
+) -> Result<(String, String), ApiError> {
     use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
     let (a2, tier_str) = resolve_argon2(tier)?;
     let salt = SaltString::generate(&mut OsRng);

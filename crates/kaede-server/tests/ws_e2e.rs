@@ -271,6 +271,8 @@ async fn authenticated_join_and_app_message_broadcast() {
         ClientMessage::MlsAppMessage {
             channel_id: "general".into(),
             payload: payload.clone(),
+            id: 0,
+            ts: 0,
         },
     )
     .await;
@@ -580,6 +582,8 @@ async fn p0d_mls_app_message_without_join_dropped() {
         ClientMessage::MlsAppMessage {
             channel_id: "general".into(),
             payload: b"should-be-dropped".to_vec(),
+            id: 0,
+            ts: 0,
         },
     )
     .await;
@@ -615,6 +619,8 @@ async fn p0d_mls_app_message_without_join_dropped() {
         ClientMessage::MlsAppMessage {
             channel_id: "general".into(),
             payload: b"after-join".to_vec(),
+            id: 0,
+            ts: 0,
         },
     )
     .await;

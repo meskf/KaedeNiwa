@@ -32,6 +32,16 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [serverUrl, setServerUrl] = useState(() => resolveDefaultServerUrl())
+
+  // Electron: 从主进程 config.json 恢复上次使用的服务器地址
+  useEffect(() => {
+    const api = (window as any).electronAPI
+    if (api?.getServerUrl) {
+      api.getServerUrl().then((saved: string) => {
+        if (saved) setServerUrl(saved)
+      }).catch(() => {})
+    }
+  }, [])
   const [loginId, setLoginId] = useState('')
   const [password, setPassword] = useState('')
   const setAuth = useAuthStore(s => s.setAuth)
@@ -73,6 +83,11 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
       const client = getClient()
       if (!client) throw new Error('WASM not initialized')
       
+      // Electron: 先告知主进程本地代理目标，再发起登录
+      const api = (window as any).electronAPI
+      if (api?.setServerUrl) {
+        await api.setServerUrl(serverUrl)
+      }
       await client.login(serverUrl, wsUrl, loginId, token)
       setAuth({ serverUrl, wsUrl, token, loginId })
       recordLoginArgs({ serverUrl, wsUrl, loginId, token })

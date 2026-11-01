@@ -68,7 +68,9 @@ impl JsClient {
         // 先 drain 到本地 Vec，释放 queue 锁，再 clone callback，最后调 JS。
         let queued: Vec<ClientEvent> = {
             let mut queue = self.observer.queue.lock().unwrap();
-            if queue.is_empty() { return; }
+            if queue.is_empty() {
+                return;
+            }
             queue.drain(..).collect()
         };
         let cb_opt = {
@@ -183,12 +185,19 @@ impl JsClient {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
         let list = room.connection().pending_welcome_info();
-        let json: Vec<serde_json::Value> = list.iter().map(|p| serde_json::json!({
-            "sender_login_id": p.sender_login_id,
-            "is_rebuild": p.is_rebuild,
-            "age_secs": p.age_secs,
-        })).collect();
-        Ok(JsValue::from_str(&serde_json::to_string(&json).unwrap_or_else(|_| "[]".into())))
+        let json: Vec<serde_json::Value> = list
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "sender_login_id": p.sender_login_id,
+                    "is_rebuild": p.is_rebuild,
+                    "age_secs": p.age_secs,
+                })
+            })
+            .collect();
+        Ok(JsValue::from_str(
+            &serde_json::to_string(&json).unwrap_or_else(|_| "[]".into()),
+        ))
     }
 
     /// P0-1 测试钩子：模拟网络错误断开 WS，触发 JS 层自动重连。
@@ -410,19 +419,13 @@ impl JsClient {
             .load_history(&channel_id, limit)
             .await
             .map_err(|e| JsValue::from_str(&format!("History error: {}", e)))?;
-        let json_msgs: Vec<serde_json::Value> = msgs
-            .into_iter()
-            .map(|m| {
-                serde_json::json!({
-                    "sender": m.sender,
-                    "ts": m.ts,
-                    "plaintext": m.plaintext,
-                })
-            })
-            .collect();
-        Ok(JsValue::from_str(
-            &serde_json::to_string(&json_msgs).unwrap(),
-        ))
+        // 直接序列化完整 HistoryMessage（derive Serialize）：
+        // 之前手动只挑 sender/ts/plaintext，导致 id/attachments/reactions/
+        // edited/mentions/reply_to 全部丢失，前端无法按消息 id 精确挂反应，
+        // 附件也只能在刚收到时靠事件里临时携带的数据渲染。
+        let json = serde_json::to_string(&msgs)
+            .map_err(|e| JsValue::from_str(&format!("serialize history: {}", e)))?;
+        Ok(JsValue::from_str(&json))
     }
 
     // ============ DM wasm 桥 ============
@@ -523,6 +526,7 @@ impl JsClient {
     pub async fn send_reaction(
         &self,
         channel_id: String,
+        target_id: i64,
         target_ts: i64,
         emoji: String,
         action: String,
@@ -534,7 +538,7 @@ impl JsClient {
         let Some(room) = room else {
             return Err(JsValue::from_str("not logged in"));
         };
-        room.send_reaction(&channel_id, target_ts, &emoji, &action)
+        room.send_reaction(&channel_id, target_id, target_ts, &emoji, &action)
             .await
             .map_err(|e| JsValue::from_str(&format!("reaction error: {}", e)))
     }
@@ -553,39 +557,71 @@ impl JsClient {
             .map_err(|e| JsValue::from_str(&format!("presence error: {}", e)))
     }
 
-    
     #[wasm_bindgen(js_name = listNodes)]
     pub async fn list_nodes(&self) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let nodes = room.list_nodes().await.map_err(|e| JsValue::from_str(&format!("list nodes: {}", e)))?;
+        let nodes = room
+            .list_nodes()
+            .await
+            .map_err(|e| JsValue::from_str(&format!("list nodes: {}", e)))?;
         let arr = js_sys::Array::new();
         for n in nodes {
-            arr.push(&JsValue::from_str(&serde_json::to_string(&n).unwrap_or_default()));
+            arr.push(&JsValue::from_str(
+                &serde_json::to_string(&n).unwrap_or_default(),
+            ));
         }
         Ok(arr.into())
     }
 
     #[wasm_bindgen(js_name = createNode)]
-    pub async fn create_node(&self, name: String, kind: String, parent_id: Option<String>, is_private: bool, password: Option<String>) -> Result<JsValue, JsValue> {
+    pub async fn create_node(
+        &self,
+        name: String,
+        kind: String,
+        parent_id: Option<String>,
+        is_private: bool,
+        password: Option<String>,
+    ) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let node = room.create_node(&name, &kind, parent_id.as_deref(), is_private, password.as_deref()).await.map_err(|e| JsValue::from_str(&format!("create node: {}", e)))?;
-        Ok(JsValue::from_str(&serde_json::to_string(&node).unwrap_or_default()))
+        let node = room
+            .create_node(
+                &name,
+                &kind,
+                parent_id.as_deref(),
+                is_private,
+                password.as_deref(),
+            )
+            .await
+            .map_err(|e| JsValue::from_str(&format!("create node: {}", e)))?;
+        Ok(JsValue::from_str(
+            &serde_json::to_string(&node).unwrap_or_default(),
+        ))
     }
 
     #[wasm_bindgen(js_name = updateNode)]
-    pub async fn update_node(&self, id: String, name: Option<String>, parent_id: Option<String>, position: Option<i64>) -> Result<(), JsValue> {
+    pub async fn update_node(
+        &self,
+        id: String,
+        name: Option<String>,
+        parent_id: Option<String>,
+        position: Option<i64>,
+    ) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.update_node(&id, name.as_deref(), parent_id.as_deref(), position).await.map_err(|e| JsValue::from_str(&format!("update node: {}", e)))
+        room.update_node(&id, name.as_deref(), parent_id.as_deref(), position)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("update node: {}", e)))
     }
 
     #[wasm_bindgen(js_name = deleteNode)]
     pub async fn delete_node(&self, id: String) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.delete_node(&id).await.map_err(|e| JsValue::from_str(&format!("delete node: {}", e)))
+        room.delete_node(&id)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("delete node: {}", e)))
     }
 
     #[wasm_bindgen(js_name = listChannels)]
@@ -644,7 +680,9 @@ impl JsClient {
             position: None,
             category_id,
         };
-        let ch = room.update_channel(&id, patch).await
+        let ch = room
+            .update_channel(&id, patch)
+            .await
             .map_err(|e| JsValue::from_str(&format!("update channel: {}", e)))?;
         let json = serde_json::to_string(&ch)
             .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
@@ -655,7 +693,8 @@ impl JsClient {
     pub async fn delete_channel_js(&self, id: String) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.delete_channel(&id).await
+        room.delete_channel(&id)
+            .await
             .map_err(|e| JsValue::from_str(&format!("delete channel: {}", e)))
     }
 
@@ -665,7 +704,9 @@ impl JsClient {
     pub async fn list_categories(&self) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let cats = room.list_categories().await
+        let cats = room
+            .list_categories()
+            .await
             .map_err(|e| JsValue::from_str(&format!("list categories: {}", e)))?;
         let json = serde_json::to_string(&cats)
             .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
@@ -673,10 +714,16 @@ impl JsClient {
     }
 
     #[wasm_bindgen(js_name = createCategory)]
-    pub async fn create_category(&self, name: String, position: Option<i32>) -> Result<JsValue, JsValue> {
+    pub async fn create_category(
+        &self,
+        name: String,
+        position: Option<i32>,
+    ) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let cat = room.create_category(&name, position.map(|p| p as i64)).await
+        let cat = room
+            .create_category(&name, position.map(|p| p as i64))
+            .await
             .map_err(|e| JsValue::from_str(&format!("create category: {}", e)))?;
         let json = serde_json::to_string(&cat)
             .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
@@ -684,10 +731,17 @@ impl JsClient {
     }
 
     #[wasm_bindgen(js_name = updateCategory)]
-    pub async fn update_category(&self, id: String, name: Option<String>, position: Option<i32>) -> Result<JsValue, JsValue> {
+    pub async fn update_category(
+        &self,
+        id: String,
+        name: Option<String>,
+        position: Option<i32>,
+    ) -> Result<JsValue, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        let cat = room.update_category(&id, name.as_deref(), position.map(|p| p as i64)).await
+        let cat = room
+            .update_category(&id, name.as_deref(), position.map(|p| p as i64))
+            .await
             .map_err(|e| JsValue::from_str(&format!("update category: {}", e)))?;
         let json = serde_json::to_string(&cat)
             .map_err(|e| JsValue::from_str(&format!("serialize: {}", e)))?;
@@ -698,7 +752,8 @@ impl JsClient {
     pub async fn delete_category(&self, id: String) -> Result<(), JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.delete_category(&id).await
+        room.delete_category(&id)
+            .await
             .map_err(|e| JsValue::from_str(&format!("delete category: {}", e)))
     }
 
@@ -745,5 +800,3 @@ impl JsClient {
             .map_err(|e| JsValue::from_str(&format!("remove friend: {}", e)))
     }
 }
-
-

@@ -2,7 +2,12 @@
 //!
 //! 分类只是 UI 分组，本身不含消息；权限管理统一走 `check_write_perm`（op3+）。
 
-use axum::{Json, Router, extract::{Path, State}, http::{HeaderMap, StatusCode}, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    routing::get,
+};
 use serde::{Deserialize, Serialize};
 
 use kaede_protocol::Category;
@@ -14,7 +19,10 @@ use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/api/categories", get(list_categories).post(create_category))
+        .route(
+            "/api/categories",
+            get(list_categories).post(create_category),
+        )
         .route(
             "/api/categories/{id}",
             axum::routing::patch(update_category).delete(delete_category),
@@ -54,7 +62,12 @@ async fn list_categories(
     .await?;
     let categories = rows
         .into_iter()
-        .map(|(id, name, position, created_at)| Category { id, name, position, created_at })
+        .map(|(id, name, position, created_at)| Category {
+            id,
+            name,
+            position,
+            created_at,
+        })
         .collect();
     Ok(Json(ListResp { categories }))
 }
@@ -82,27 +95,29 @@ async fn create_category(
             p
         }
         None => {
-            let (max,): (Option<i64>,) =
-                sqlx::query_as("SELECT MAX(position) FROM categories")
-                    .fetch_one(&state.pool)
-                    .await?;
+            let (max,): (Option<i64>,) = sqlx::query_as("SELECT MAX(position) FROM categories")
+                .fetch_one(&state.pool)
+                .await?;
             max.map(|m| m + 1).unwrap_or(0)
         }
     };
 
-    sqlx::query(
-        "INSERT INTO categories (id, name, position, created_at) VALUES (?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(&name)
-    .bind(position)
-    .bind(now)
-    .execute(&state.pool)
-    .await?;
+    sqlx::query("INSERT INTO categories (id, name, position, created_at) VALUES (?, ?, ?, ?)")
+        .bind(&id)
+        .bind(&name)
+        .bind(position)
+        .bind(now)
+        .execute(&state.pool)
+        .await?;
 
     Ok((
         StatusCode::CREATED,
-        Json(Category { id, name, position, created_at: now }),
+        Json(Category {
+            id,
+            name,
+            position,
+            created_at: now,
+        }),
     ))
 }
 
@@ -148,7 +163,12 @@ async fn update_category(
         position = p;
     }
 
-    Ok(Json(Category { id, name, position, created_at }))
+    Ok(Json(Category {
+        id,
+        name,
+        position,
+        created_at,
+    }))
 }
 
 async fn delete_category(
@@ -199,4 +219,3 @@ async fn check_write_perm(state: &AppState, uid: &str) -> Result<(), ApiError> {
     }
     Ok(())
 }
-

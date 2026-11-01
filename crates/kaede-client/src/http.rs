@@ -119,6 +119,8 @@ pub struct PostMessageReq {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessageRecord {
+    #[serde(default)]
+    pub id: i64,
     pub ts: i64,
     pub sender: String,
     pub ciphertext: String,
@@ -537,7 +539,7 @@ impl HttpApi {
         ts: i64,
         sender: &str,
         ciphertext: &[u8],
-    ) -> Result<i64, ClientError> {
+    ) -> Result<(i64, i64), ClientError> {
         let req = PostMessageReq {
             channel_id: channel_id.into(),
             ts,
@@ -555,13 +557,15 @@ impl HttpApi {
         if resp.status().is_success() {
             #[derive(Deserialize)]
             struct PostMessageResp {
+                #[serde(default)]
+                id: i64,
                 ts: i64,
             }
-            Ok(resp
+            let r = resp
                 .json::<PostMessageResp>()
                 .await
-                .map_err(map_reqwest_err)?
-                .ts)
+                .map_err(map_reqwest_err)?;
+            Ok((r.id, r.ts))
         } else {
             Err(parse_api_error(resp).await)
         }
@@ -647,7 +651,7 @@ impl HttpApi {
     // 频道
     // -----------------------------------------------------------------
 
-        /// v8：增量拉取 —— 返回 id > since_id 的消息。
+    /// v8：增量拉取 —— 返回 id > since_id 的消息。
     ///
     /// 与 load_messages 的区别：
     ///   - load_messages: before_ts 倒序取历史（滚动加载）
@@ -684,41 +688,127 @@ impl HttpApi {
         Ok(body.messages)
     }
 
-
     pub async fn list_nodes(&self) -> Result<Vec<kaede_protocol::Node>, ClientError> {
-        let resp = self.http.get(format!("{}/api/nodes", self.base_url))
+        let resp = self
+            .http
+            .get(format!("{}/api/nodes", self.base_url))
             .bearer_auth(self.bearer()?)
-            .send().await.map_err(|e| ClientError::Http { status: 500, message: e.to_string() })?;
-        if !resp.status().is_success() { return Err(ClientError::Http { status: resp.status().as_u16(), message: resp.text().await.unwrap_or_default() }); }
-        let nodes = resp.json().await.map_err(|e| ClientError::Protocol(e.to_string()))?;
+            .send()
+            .await
+            .map_err(|e| ClientError::Http {
+                status: 500,
+                message: e.to_string(),
+            })?;
+        if !resp.status().is_success() {
+            return Err(ClientError::Http {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let nodes = resp
+            .json()
+            .await
+            .map_err(|e| ClientError::Protocol(e.to_string()))?;
         Ok(nodes)
     }
-    pub async fn create_node(&self, name: &str, kind: &str, parent_id: Option<&str>, is_private: bool, password: Option<&str>) -> Result<kaede_protocol::Node, ClientError> {
+    pub async fn create_node(
+        &self,
+        name: &str,
+        kind: &str,
+        parent_id: Option<&str>,
+        is_private: bool,
+        password: Option<&str>,
+    ) -> Result<kaede_protocol::Node, ClientError> {
         #[derive(serde::Serialize)]
-        struct Req<'a> { name: &'a str, kind: &'a str, parent_id: Option<&'a str>, is_private: bool, password: Option<&'a str> }
-        let resp = self.http.post(format!("{}/api/nodes", self.base_url))
+        struct Req<'a> {
+            name: &'a str,
+            kind: &'a str,
+            parent_id: Option<&'a str>,
+            is_private: bool,
+            password: Option<&'a str>,
+        }
+        let resp = self
+            .http
+            .post(format!("{}/api/nodes", self.base_url))
             .bearer_auth(self.bearer()?)
-            .json(&Req { name, kind, parent_id, is_private, password })
-            .send().await.map_err(|e| ClientError::Http { status: 500, message: e.to_string() })?;
-        if !resp.status().is_success() { return Err(ClientError::Http { status: resp.status().as_u16(), message: resp.text().await.unwrap_or_default() }); }
-        let node = resp.json().await.map_err(|e| ClientError::Protocol(e.to_string()))?;
+            .json(&Req {
+                name,
+                kind,
+                parent_id,
+                is_private,
+                password,
+            })
+            .send()
+            .await
+            .map_err(|e| ClientError::Http {
+                status: 500,
+                message: e.to_string(),
+            })?;
+        if !resp.status().is_success() {
+            return Err(ClientError::Http {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let node = resp
+            .json()
+            .await
+            .map_err(|e| ClientError::Protocol(e.to_string()))?;
         Ok(node)
     }
-    pub async fn update_node(&self, id: &str, name: Option<&str>, parent_id: Option<&str>, position: Option<i64>) -> Result<(), ClientError> {
+    pub async fn update_node(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        parent_id: Option<&str>,
+        position: Option<i64>,
+    ) -> Result<(), ClientError> {
         #[derive(serde::Serialize)]
-        struct Req<'a> { name: Option<&'a str>, parent_id: Option<&'a str>, position: Option<i64> }
-        let resp = self.http.patch(format!("{}/api/nodes/{}", self.base_url, id))
+        struct Req<'a> {
+            name: Option<&'a str>,
+            parent_id: Option<&'a str>,
+            position: Option<i64>,
+        }
+        let resp = self
+            .http
+            .patch(format!("{}/api/nodes/{}", self.base_url, id))
             .bearer_auth(self.bearer()?)
-            .json(&Req { name, parent_id, position })
-            .send().await.map_err(|e| ClientError::Http { status: 500, message: e.to_string() })?;
-        if !resp.status().is_success() { return Err(ClientError::Http { status: resp.status().as_u16(), message: resp.text().await.unwrap_or_default() }); }
+            .json(&Req {
+                name,
+                parent_id,
+                position,
+            })
+            .send()
+            .await
+            .map_err(|e| ClientError::Http {
+                status: 500,
+                message: e.to_string(),
+            })?;
+        if !resp.status().is_success() {
+            return Err(ClientError::Http {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
         Ok(())
     }
     pub async fn delete_node(&self, id: &str) -> Result<(), ClientError> {
-        let resp = self.http.delete(format!("{}/api/nodes/{}", self.base_url, id))
+        let resp = self
+            .http
+            .delete(format!("{}/api/nodes/{}", self.base_url, id))
             .bearer_auth(self.bearer()?)
-            .send().await.map_err(|e| ClientError::Http { status: 500, message: e.to_string() })?;
-        if !resp.status().is_success() { return Err(ClientError::Http { status: resp.status().as_u16(), message: resp.text().await.unwrap_or_default() }); }
+            .send()
+            .await
+            .map_err(|e| ClientError::Http {
+                status: 500,
+                message: e.to_string(),
+            })?;
+        if !resp.status().is_success() {
+            return Err(ClientError::Http {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
         Ok(())
     }
 
@@ -737,7 +827,9 @@ impl HttpApi {
     /// 分类列表（GET /api/categories）
     pub async fn list_categories(&self) -> Result<Vec<kaede_protocol::Category>, ClientError> {
         #[derive(Deserialize)]
-        struct Resp { categories: Vec<kaede_protocol::Category> }
+        struct Resp {
+            categories: Vec<kaede_protocol::Category>,
+        }
         let resp = self
             .http
             .get(format!("{}/api/categories", self.base_url))
@@ -756,7 +848,11 @@ impl HttpApi {
         position: Option<i64>,
     ) -> Result<kaede_protocol::Category, ClientError> {
         #[derive(Serialize)]
-        struct Req<'a> { name: &'a str, #[serde(skip_serializing_if = "Option::is_none")] position: Option<i64> }
+        struct Req<'a> {
+            name: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            position: Option<i64>,
+        }
         let resp = self
             .http
             .post(format!("{}/api/categories", self.base_url))
@@ -777,8 +873,10 @@ impl HttpApi {
     ) -> Result<kaede_protocol::Category, ClientError> {
         #[derive(Serialize)]
         struct Req<'a> {
-            #[serde(skip_serializing_if = "Option::is_none")] name: Option<&'a str>,
-            #[serde(skip_serializing_if = "Option::is_none")] position: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            position: Option<i64>,
         }
         let resp = self
             .http
@@ -800,7 +898,11 @@ impl HttpApi {
             .send()
             .await
             .map_err(map_reqwest_err)?;
-        if resp.status().is_success() { Ok(()) } else { Err(parse_api_error(resp).await) }
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(parse_api_error(resp).await)
+        }
     }
 
     pub async fn create_channel(

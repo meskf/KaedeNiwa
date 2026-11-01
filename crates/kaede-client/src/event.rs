@@ -6,10 +6,17 @@ use kaede_protocol::UserId;
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum ClientEvent {
     /// 收到群组应用消息（明文载荷，由 UI 决定如何展示）
+    ///
+    /// `id` 是服务端分配的消息主键（v8.1 起），reaction/edit/delete 用它定位目标消息；
+    /// `ts` 是服务端权威时间戳，用于排序。旧路径（反应/媒体信令）两者均为 0。
     AppMessageReceived {
         from: String,
         channel_id: String,
         payload: Vec<u8>,
+        #[serde(default)]
+        id: i64,
+        #[serde(default)]
+        ts: i64,
     },
     /// 状态变化。
     StateChanged {
@@ -112,6 +119,9 @@ pub enum ClientEvent {
         server_id: String,
         channel_id: String,
         from: UserId,
+        /// 服务端消息主键（v8.1）。0 = pending envelope 旧格式无 id。
+        #[serde(default)]
+        id: i64,
         /// 服务器权威时间戳。
         ts: i64,
         plaintext: Vec<u8>,

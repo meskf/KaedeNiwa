@@ -4,6 +4,7 @@
 export interface DecodedReaction {
   c: string
   u: string
+  target_id: number
   target_ts: number
   emoji: string
   action: 'add' | 'remove'
@@ -23,7 +24,7 @@ export function tryDecodeReactionPayload(raw: any): DecodedReaction | null {
     const o: any = raw
     if (typeof o.target_ts === 'number' && typeof o.emoji === 'string'
         && (o.action === 'add' || o.action === 'remove')) {
-      return { c: o.c || '', u: o.u || '', target_ts: o.target_ts, emoji: o.emoji, action: o.action }
+      return { c: o.c || '', u: o.u || '', target_id: typeof o.target_id === 'number' ? o.target_id : 0, target_ts: o.target_ts, emoji: o.emoji, action: o.action }
     }
     return null
   }
@@ -34,7 +35,7 @@ export function tryDecodeReactionPayload(raw: any): DecodedReaction | null {
     if (typeof o.target_ts !== 'number') return null
     if (typeof o.emoji !== 'string' || !o.emoji) return null
     if (o.action !== 'add' && o.action !== 'remove') return null
-    return { c: o.c || '', u: o.u || '', target_ts: o.target_ts, emoji: o.emoji, action: o.action }
+    return { c: o.c || '', u: o.u || '', target_id: typeof o.target_id === 'number' ? o.target_id : 0, target_ts: o.target_ts, emoji: o.emoji, action: o.action }
   } catch {
     return null
   }

@@ -12,12 +12,12 @@
 use std::path::PathBuf;
 
 use axum::{
+    Router,
     body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
-    Router,
 };
 
 use crate::db;
@@ -67,7 +67,9 @@ async fn upload_my_avatar(
 ) -> Result<StatusCode, ApiError> {
     let uid = authenticate(&state, &headers).await?;
     if !state.check_rate_scoped(&uid, "avatar_upload", 0.2, 2.0) {
-        return Err(ApiError::TooManyRequests("avatar upload rate limited".into()));
+        return Err(ApiError::TooManyRequests(
+            "avatar upload rate limited".into(),
+        ));
     }
     if body.len() > MAX_AVATAR_BYTES {
         return Err(ApiError::BadRequest(format!(
@@ -179,10 +181,12 @@ async fn upload_server_icon(
         .map_err(|e| ApiError::Internal(format!("write: {e}")))?;
 
     let now = db::now_ms();
-    sqlx::query("UPDATE server_profile SET icon_url = '/api/server/icon', updated_at = ? WHERE id = 1")
-        .bind(now)
-        .execute(&state.pool)
-        .await?;
+    sqlx::query(
+        "UPDATE server_profile SET icon_url = '/api/server/icon', updated_at = ? WHERE id = 1",
+    )
+    .bind(now)
+    .execute(&state.pool)
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -128,9 +128,6 @@ fn spawn_bundled_livekit() -> LivekitChild {
     }
 }
 
-
-
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // 共享 log buffer：subscriber 写、admin /api/logs 读
@@ -197,7 +194,7 @@ async fn main() -> Result<()> {
     let bind = cfg.bind.clone();
     let pool = db::init(&cfg.database_url).await?;
     kaede_server::db::init_nodes_table(&pool).await?;
-    
+
     // 全新数据库必须补齐默认频道，否则客户端默认的 `general` 会 404。
     kaede_server::ensure_default_channels(&pool).await;
 
