@@ -1,3 +1,6 @@
+// WASM 是单线程环境，RoomSession 包含 js_sys 回调，天然不是 Send + Sync。
+// 这里的 Arc 纯粹是为了克隆所有权，跨线程的 lint 在这里不适用。
+#![allow(clippy::arc_with_non_send_sync)]
 use js_sys::Function;
 use kaede_client::room::RoomSession;
 use kaede_client::{ClientEvent, ClientObserver};
@@ -798,5 +801,10 @@ impl JsClient {
         room.remove_friend(&login_id)
             .await
             .map_err(|e| JsValue::from_str(&format!("remove friend: {}", e)))
+    }
+}
+impl Default for JsClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
