@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: kaede-server-linux-x86_64
+            livekit_asset: livekit-server_linux_amd64.tar.gz
+            binary_name: kaede-server
+            livekit_bin: livekit-server
+          - os: windows-latest
+            artifact_name: kaede-server-windows-x86_64
+            livekit_asset: livekit-server_windows_amd64.zip
+            binary_name: kaede-server.exe
+            livekit_bin: livekit-server.exe
+          - os: macos-latest
+            artifact_name: kaede-server-macos-x86_64
+            livekit_asset: livekit-server_darwin_amd64.tar.gz
+            binary_name: kaede-server
+            livekit_bin: livekit-server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Install keyring deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
+
+      - name: Build Frontend
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run build:wasm
+          npm run build
+
+      - name: Build Server (embed-web)
+        run: cargo build -p kaede-server --release --features embed-web --locked
+
+      - name: Download LiveKit
+        shell: pwsh
+        run: |
+          $url = "https://github.com/livekit/livekit/releases/latest/download/${{ matrix.livekit_asset }}"
+          Write-Host "Downloading LiveKit from: $url"
+          Invoke-WebRequest -Uri $url -OutFile $env:RUNNER_TEMP/livekit-archive
+          
+          if ("${{ matrix.livekit_asset }}" -match "\.zip$") {
+              Expand-Archive -Path $env:RUNNER_TEMP/livekit-archive -DestinationPath $env:RUNNER_TEMP/livekit-extracted
+          } else {
+              New-Item -ItemType Directory -Force -Path $env:RUNNER_TEMP/livekit-extracted
+              tar -xzf $env:RUNNER_TEMP/livekit-archive -C $env:RUNNER_TEMP/livekit-extracted
+          }
+
+      - name: Package Release Zip
+        shell: pwsh
+        run: |
+          $dist = "kaede-${{ github.ref_name }}-${{ runner.os }}"
+          New-Item -ItemType Directory -Force -Path $dist
+          
+          Copy-Item "target/release/${{ matrix.binary_name }}" -Destination "$dist/"
+          
+          # 找到解压出来的 livekit 可执行文件并复制
+          $livekitExe = Get-ChildItem -Path "$env:RUNNER_TEMP/livekit-extracted" -Filter "${{ matrix.livekit_bin }}" -Recurse | Select-Object -First 1
+          if ($livekitExe) {
+              Copy-Item $livekitExe.FullName -Destination "$dist/"
+          } else {
+              Write-Error "LiveKit binary not found!"
+              exit 1
+          }
+          
+          # 添加一个简明的 README
+          $readme = @"
+          KaedeNiwa Server ${{ github.ref_name }}
+          
+          How to run:
+          1. Double-click kaede-server.
+          2. Open your browser to http://127.0.0.1:18080
+          
+          Note: LiveKit server is bundled in this folder. The main server will automatically spawn it on port 7880.
+          "@
+          Set-Content -Path "$dist/README.txt" -Value $readme
+          
+          Compress-Archive -Path "$dist/*" -DestinationPath "${{ matrix.artifact_name }}.zip"
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_name }}.zip
+          draft: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
