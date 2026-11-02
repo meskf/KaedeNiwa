@@ -18,17 +18,17 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact_name: kaede-server-linux-x86_64
-            livekit_asset: livekit-server_linux_amd64.tar.gz
+            livekit_pattern: "*linux*amd64*.tar.gz"
             binary_name: kaede-server
             livekit_bin: livekit-server
           - os: windows-latest
             artifact_name: kaede-server-windows-x86_64
-            livekit_asset: livekit-server_windows_amd64.zip
+            livekit_pattern: "*windows*amd64*.zip"
             binary_name: kaede-server.exe
             livekit_bin: livekit-server.exe
           - os: macos-13
             artifact_name: kaede-server-macos-x86_64
-            livekit_asset: livekit-server_darwin_amd64.tar.gz
+            livekit_pattern: "*darwin*amd64*.tar.gz"
             binary_name: kaede-server
             livekit_bin: livekit-server
 
@@ -70,18 +70,46 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $asset = "${{ matrix.livekit_asset }}"
-          Write-Host "Downloading LiveKit asset: $asset"
+          $pattern = "${{ matrix.livekit_pattern }}"
+          $dlDir = "$env:RUNNER_TEMP/livekit-dl"
+          New-Item -ItemType Directory -Force -Path $dlDir
           
-          # 使用 GitHub 官方 CLI 下载，绝对跨平台兼容
-          gh release download -R livekit/livekit -p $asset -O "$env:RUNNER_TEMP/livekit-archive" --clobber
+          Write-Host "Downloading LiveKit matching pattern: $pattern"
+          gh release download -R livekit/livekit -p $pattern -D $dlDir --clobber
           if ($LASTEXITCODE -ne 0) { exit 1 }
           
-          New-Item -ItemType Directory -Force -Path $env:RUNNER_TEMP/livekit-extracted
-          if ($asset -match "\.zip$") {
-              Expand-Archive -Path $env:RUNNER_TEMP/livekit-archive -DestinationPath $env:RUNNER_TEMP/livekit-extracted
+          $archive = Get-ChildItem -Path $dlDir | Select-Object -First 1
+          if (-not $archive) {
+              Write-Error "Archive not found after download!"
+              exit 1
+          }
+          
+          $extractDir = "$env:RUNNER_TEMP/livekit-extracted"
+          New-Item -ItemType Directory -Force -Path $extractDir
+          
+          if ($archive.Name -match "\.zip$") {
+              Expand-Archive -Path $archive.FullName -DestinationPath $extractDir
           } else {
-              tar -xzf $env:RUNNER_TEMP/livekit-archive -C $env:RUNNER_TEMP/livekit-extracted
+              tar -xzf $archive.FullName -C $extractDir
+          }
+          
+          # 在解压出的文件里寻找 livekit 的可执行文件，无视具体名字，强行重命名
+          $foundExe = Get-ChildItem -Path $extractDir -Recurse -File | Where-Object { 
+              $_.Name -match "livekit" -and $_.Name -notmatch "\.(md|txt|json|yaml|yml)$" 
+          } | Select-Object -First 1
+          
+          if ($foundExe) {
+              $targetName = "${{ matrix.livekit_bin }}"
+              $targetPath = Join-Path $extractDir $targetName
+              Copy-Item $foundExe.FullName -Destination $targetPath -Force
+              # 在 Linux/Mac 上需要赋予可执行权限
+              if ("${{ runner.os }}" -ne "Windows") {
+                  chmod +x $targetPath
+              }
+              Write-Host "Successfully renamed $($foundExe.Name) to $targetName"
+          } else {
+              Write-Error "Could not find livekit executable in extracted files!"
+              exit 1
           }
 
       - name: Package Release Zip
@@ -92,11 +120,11 @@ jobs:
           
           Copy-Item "target/release/${{ matrix.binary_name }}" -Destination "$dist/"
           
-          $livekitExe = Get-ChildItem -Path "$env:RUNNER_TEMP/livekit-extracted" -Filter "${{ matrix.livekit_bin }}" -Recurse | Select-Object -First 1
-          if ($livekitExe) {
-              Copy-Item $livekitExe.FullName -Destination "$dist/"
+          $livekitPath = Join-Path "$env:RUNNER_TEMP/livekit-extracted" "${{ matrix.livekit_bin }}"
+          if (Test-Path $livekitPath) {
+              Copy-Item $livekitPath -Destination "$dist/"
           } else {
-              Write-Error "LiveKit binary not found!"
+              Write-Error "LiveKit binary not found in extract folder!"
               exit 1
           }
           
