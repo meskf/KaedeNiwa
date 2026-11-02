@@ -18,6 +18,8 @@ name = "kaede_server"
 path = "src/lib.rs"
 
 [dependencies]
+rust-embed = { version = "8", optional = true }
+mime_guess = { version = "2", optional = true }
 kaede-protocol = { workspace = true }
 kaede-mls      = { workspace = true }
 
@@ -54,4 +56,4 @@ serde_json        = "1"
 [features]
 default = []
 dev-mode = []
-
+embed-web = ["dep:rust-embed", "dep:mime_guess"]

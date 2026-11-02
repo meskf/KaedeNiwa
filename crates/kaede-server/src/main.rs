@@ -1,6 +1,7 @@
 //! KaedeNiwa signaling server 入口。
 
 use anyhow::Result;
+use axum::response::IntoResponse;
 use kaede_server::avatars;
 use kaede_server::{
     admin, attachments, categories, channels, config::Config, db, dm, friends, http, livekit,
@@ -128,6 +129,25 @@ fn spawn_bundled_livekit() -> LivekitChild {
     }
 }
 
+#[cfg(feature = "embed-web")]
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../apps/web/dist"]
+struct Asset;
+
+#[cfg(feature = "embed-web")]
+async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    if let Some(content) = Asset::get(path) {
+        ([(axum::http::header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+    } else {
+        match Asset::get("index.html") {
+            Some(content) => ([(axum::http::header::CONTENT_TYPE, "text/html")], content.data).into_response(),
+            None => (axum::http::StatusCode::NOT_FOUND, "404 Not Found").into_response(),
+        }
+    }
+}
 #[tokio::main]
 async fn main() -> Result<()> {
     // 共享 log buffer：subscriber 写、admin /api/logs 读
@@ -213,25 +233,33 @@ async fn main() -> Result<()> {
     }
     let state = AppState::new_with_log(pool, cfg, log_buffer);
 
-    let app = kaede_server::with_middleware(
-        http::router(state.clone())
-            .merge(attachments::router(state.clone()))
-            .merge(avatars::router(state.clone()))
-            .merge(friends::router(state.clone()))
-            .merge(dm::router(state.clone()))
-            .merge(livekit::router(state.clone()))
-            .merge(categories::router(state.clone()))
-            .merge(channels::router(state.clone()))
-            .merge(members::router(state.clone()))
-            .merge(reads::router(state.clone()))
-            .merge(sessions_api::router(state.clone()))
-            .merge(ws::router(state.clone()))
-            // 静态文件托管：所有非 API 请求 fallback 到 dist/web/public
-            .fallback_service(
-                tower_http::services::ServeDir::new("web")
-                    .fallback(tower_http::services::ServeFile::new("web/index.html")),
-            ),
-    );
+    let mut app = http::router(state.clone())
+        .merge(attachments::router(state.clone()))
+        .merge(avatars::router(state.clone()))
+        .merge(friends::router(state.clone()))
+        .merge(dm::router(state.clone()))
+        .merge(livekit::router(state.clone()))
+        .merge(categories::router(state.clone()))
+        .merge(channels::router(state.clone()))
+        .merge(members::router(state.clone()))
+        .merge(reads::router(state.clone()))
+        .merge(sessions_api::router(state.clone()))
+        .merge(ws::router(state.clone()));
+
+    #[cfg(feature = "embed-web")]
+    {
+        app = app.fallback(static_handler);
+    }
+
+    #[cfg(not(feature = "embed-web"))]
+    {
+        app = app.fallback_service(
+            tower_http::services::ServeDir::new("web")
+                .fallback(tower_http::services::ServeFile::new("web/index.html")),
+        );
+    }
+
+    let app = kaede_server::with_middleware(app);
 
     // 管理面板：独立 task + 独立 listener（默认 127.0.0.1:18081）
     if state.cfg.admin_enabled {
