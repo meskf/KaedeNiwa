@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "electron . --dev",
     "start": "electron .",
-    "build:client": "electron-builder --win nsis portable"
+    "build:client": "electron-builder --win"
   },
   "devDependencies": {
     "electron": "^34.0.0",
@@ -18,4 +18,5 @@
     "electron@34.5.8": true
   }
 }
+
 
