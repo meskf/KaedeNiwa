@@ -67,16 +67,18 @@ jobs:
 
       - name: Download LiveKit
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $url = "https://github.com/livekit/livekit/releases/latest/download/${{ matrix.livekit_asset }}"
-          Write-Host "Downloading LiveKit from: $url"
+          $asset = "${{ matrix.livekit_asset }}"
+          Write-Host "Downloading LiveKit asset: $asset"
           
-          # 使用 curl.exe 完美绕过 GitHub 的 User-Agent 拦截和重定向问题
-          curl.exe -L -sS -o "$env:RUNNER_TEMP/livekit-archive" $url
+          # 使用 GitHub 官方 CLI 下载，绝对跨平台兼容
+          gh release download -R livekit/livekit -p $asset -O "$env:RUNNER_TEMP/livekit-archive" --clobber
           if ($LASTEXITCODE -ne 0) { exit 1 }
           
           New-Item -ItemType Directory -Force -Path $env:RUNNER_TEMP/livekit-extracted
-          if ("${{ matrix.livekit_asset }}" -match "\.zip$") {
+          if ($asset -match "\.zip$") {
               Expand-Archive -Path $env:RUNNER_TEMP/livekit-archive -DestinationPath $env:RUNNER_TEMP/livekit-extracted
           } else {
               tar -xzf $env:RUNNER_TEMP/livekit-archive -C $env:RUNNER_TEMP/livekit-extracted
