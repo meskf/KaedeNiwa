@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# 同分支连续 push 取消旧 run；main 分支保留历史
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -16,8 +21,11 @@ jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.0"
@@ -35,6 +43,7 @@ jobs:
   check:
     name: cargo check (core crates)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -91,7 +100,7 @@ jobs:
           npm run build
       - name: test (workspace, excl. client & client-wasm)
         run: |
-          cargo test --workspace --exclude kaede-client --exclude kaede-client-wasm --all-targets
+          cargo test --workspace --exclude kaede-client --exclude kaede-client-wasm --all-targets --locked
       - name: test (kaede-client native integration)
         env:
           # Linux CI 容器没有 D-Bus Secret Service (org.freedesktop.secrets)。
@@ -99,7 +108,24 @@ jobs:
           # 生产构建不设此变量，仍然走系统钥匙串。
           KAEDE_TEST_KEYSTORE: memory
         run: |
-          cargo test -p kaede-client --features native --all-targets
+          cargo test -p kaede-client --features native --all-targets --locked
+
+  wasm:
+    name: wasm32 check + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: check wasm32
+        run: cargo check -p kaede-client-wasm --target wasm32-unknown-unknown --locked
+      - name: clippy wasm32
+        run: cargo clippy -p kaede-client-wasm --target wasm32-unknown-unknown --locked -- -D warnings
 
   e2e:
     name: e2e (playwright)
@@ -134,7 +160,7 @@ jobs:
         # 必须与 playwright.config.ts 里 webServer 的 `cargo run` profile 一致，
         # 否则 cargo run 会重新编译一遍，e2e job 白等几分钟。
         run: cargo build -p kaede-server --features dev-mode
-      
+
       # 服务由 playwright.config.ts 的 webServer 自动拉起：
       # 本地与 CI 共用同一份启动/探活/清理逻辑，避免两套代码漂移。
       # CI 下 reuseExistingServer=false，由 Playwright 负责启停。
@@ -145,12 +171,21 @@ jobs:
           KAEDE_HTTP: "1"
         run: npx playwright test --reporter=list
 
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            apps/web/test-results/
+            apps/web/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
   clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # TODO(v0.2): remove continue-on-error once baseline warnings are cleared.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -176,10 +211,13 @@ jobs:
         run: cargo clippy --workspace --exclude kaede-client-wasm --all-targets --locked -- -D warnings
       - name: clippy (kaede-client native)
         run: cargo clippy -p kaede-client --features native --all-targets --locked -- -D warnings
+      - name: clippy (kaede-server embed-web)
+        run: cargo clippy -p kaede-server --features embed-web --all-targets --locked -- -D warnings
 
   deny:
     name: cargo deny
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -202,5 +240,3 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
       - name: cargo build --release
         run: cargo build --release --locked -p kaede-server
-
-
