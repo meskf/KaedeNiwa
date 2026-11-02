@@ -35,7 +35,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install keyring deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
-      - name: check core crates
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Build Frontend
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run build:wasm
+          npm run build      - name: check core crates
         run: cargo check -p kaede-protocol -p kaede-crypto -p kaede-storage -p kaede-mls -p kaede-client -p kaede-server --all-targets --locked
 
   test:
@@ -55,7 +66,18 @@ jobs:
       #    #![cfg(feature = "native")] 门控，默认 features 下整个文件是空 crate，
       #    cargo test 会显示 "running 0 tests" 且静默通过。必须显式 --features native。
       # 2) kaede-client-wasm 只能 wasm32 编译，host 下无法测试，必须排除。
-      - name: test (workspace, excl. client & client-wasm)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Build Frontend
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run build:wasm
+          npm run build      - name: test (workspace, excl. client & client-wasm)
         run: |
           cargo test --workspace --exclude kaede-client --exclude kaede-client-wasm --all-targets
       - name: test (kaede-client native integration)
@@ -126,7 +148,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install keyring deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
-      - name: clippy (workspace, excl. client-wasm)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Build Frontend
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run build:wasm
+          npm run build      - name: clippy (workspace, excl. client-wasm)
         run: cargo clippy --workspace --exclude kaede-client-wasm --all-targets --locked -- -D warnings
       - name: clippy (kaede-client native)
         run: cargo clippy -p kaede-client --features native --all-targets --locked -- -D warnings
