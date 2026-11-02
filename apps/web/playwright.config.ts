@@ -56,9 +56,12 @@ export default defineConfig({
       // vite 代理 /api 和 /ws 到 18080，与 start-all.ps1 行为一致。
       command: 'npx vite --host 127.0.0.1 --port 5173',
       cwd: '.',
-      url: 'https://127.0.0.1:5173',
+      url: 'http://127.0.0.1:5173',
       reuseExistingServer: !process.env.CI, ignoreHTTPSErrors: true,
       timeout: 120_000,
+      env: {
+        KAEDE_HTTP: '1',
+      },
       
     },
   ],
