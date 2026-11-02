@@ -1,4 +1,8 @@
-import { test, expect, _electron as electron } from '@playwright/test';
+import { test, expect } from '@playwright/test';
+
+// CI 环境中没有本地预先打包好的 Electron 应用，因此跳过此用例
+test.skip(!!process.env.CI || process.platform !== 'win32', 'Desktop e2e requires Windows and a pre-built app');
+
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';

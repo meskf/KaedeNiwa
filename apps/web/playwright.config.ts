@@ -1,6 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
 
-const BASE = process.env.KAEDE_BASE_URL ?? ('https://127.0.0.1:5173');
+const BASE = process.env.KAEDE_BASE_URL ?? (process.env.KAEDE_HTTP === '1' ? 'http://127.0.0.1:5173' : 'https://127.0.0.1:5173');
 
 export default defineConfig({
   testDir: './e2e-standard',
