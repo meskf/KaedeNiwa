@@ -101,12 +101,16 @@ jobs:
           if ($foundExe) {
               $targetName = "${{ matrix.livekit_bin }}"
               $targetPath = Join-Path $extractDir $targetName
-              Copy-Item $foundExe.FullName -Destination $targetPath -Force
+              if ($foundExe.FullName -ne $targetPath) {
+                  Copy-Item $foundExe.FullName -Destination $targetPath -Force
+                  Write-Host "Successfully renamed $($foundExe.Name) to $targetName"
+              } else {
+                  Write-Host "$targetName is already in place"
+              }
               # 在 Linux/Mac 上需要赋予可执行权限
               if ("${{ runner.os }}" -ne "Windows") {
                   chmod +x $targetPath
               }
-              Write-Host "Successfully renamed $($foundExe.Name) to $targetName"
           } else {
               Write-Error "Could not find livekit executable in extracted files!"
               exit 1
