@@ -200,16 +200,35 @@ async fn main() -> Result<()> {
     if skip_livekit_env {
         tracing::warn!("KAEDE_SKIP_LIVEKIT_ENV_CHECK set; /api/livekit/* will return 500");
     } else {
+        let mut missing = false;
         for var in ["LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"] {
             if std::env::var(var).is_err() {
-                anyhow::bail!(
-                    "{} must be set before starting the server. \
-                     Set KAEDE_SKIP_LIVEKIT_ENV_CHECK=1 to bypass (dev only, NOT for production).",
-                    var
-                );
+                missing = true;
             }
         }
-        tracing::info!("livekit env: ok");
+
+        if missing {
+            if cfg!(feature = "embed-web") {
+                tracing::warn!("======================================================================");
+                tracing::warn!("LIVEKIT env variables not set. Falling back to default dev keys.");
+                tracing::warn!("If you want to use voice chat, run LiveKit with key=devkey secret=secret");
+                tracing::warn!("Or set LIVEKIT_API_KEY and LIVEKIT_API_SECRET environment variables.");
+                tracing::warn!("======================================================================");
+                // SAFETY: 此时服务器还未启动任何异步线程，不存在并发读写环境变量的风险。
+                unsafe {
+                    std::env::set_var("LIVEKIT_API_KEY", "devkey");
+                    std::env::set_var("LIVEKIT_API_SECRET", "secret");
+                    std::env::set_var("LIVEKIT_WS_URL", "ws://127.0.0.1:7880");
+                }
+            } else {
+                anyhow::bail!(
+                    "LIVEKIT_API_KEY and SECRET must be set for dev builds. \
+                     Set KAEDE_SKIP_LIVEKIT_ENV_CHECK=1 to bypass (dev only, NOT for production)."
+                );
+            }
+        } else {
+            tracing::info!("livekit env: ok");
+        }
     }
     let bind = cfg.bind.clone();
     let pool = db::init(&cfg.database_url).await?;
