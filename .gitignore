@@ -117,3 +117,25 @@ _bak_*/
 
 # Ad-hoc per-test scripts (superseded by e2e-standard/ Playwright suite)
 apps/web/test-*.cjs
+
+.legacy-db/
+apps/web/test-results/
+apps/web/playwright-report/
+
+# 构建产物
+/dist/
+/release/
+/target/
+
+# 本地数据库与备份
+kaede.db
+kaede.db-*
+.legacy-db/
+
+# 打包脚本备份
+*.legacy
+*.pre-guard
+
+# 测试产物
+apps/web/test-results/
+apps/web/playwright-report/

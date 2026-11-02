@@ -1,6 +1,7 @@
 //! KaedeNiwa signaling server 入口。
 
 use anyhow::Result;
+#[cfg(feature = "embed-web")]
 use axum::response::IntoResponse;
 use kaede_server::avatars;
 use kaede_server::{
@@ -140,10 +141,18 @@ async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
     let path = if path.is_empty() { "index.html" } else { path };
     let mime = mime_guess::from_path(path).first_or_octet_stream();
     if let Some(content) = Asset::get(path) {
-        ([(axum::http::header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+        (
+            [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
+            content.data,
+        )
+            .into_response()
     } else {
         match Asset::get("index.html") {
-            Some(content) => ([(axum::http::header::CONTENT_TYPE, "text/html")], content.data).into_response(),
+            Some(content) => (
+                [(axum::http::header::CONTENT_TYPE, "text/html")],
+                content.data,
+            )
+                .into_response(),
             None => (axum::http::StatusCode::NOT_FOUND, "404 Not Found").into_response(),
         }
     }
@@ -209,11 +218,19 @@ async fn main() -> Result<()> {
 
         if missing {
             if cfg!(feature = "embed-web") {
-                tracing::warn!("======================================================================");
+                tracing::warn!(
+                    "======================================================================"
+                );
                 tracing::warn!("LIVEKIT env variables not set. Falling back to default dev keys.");
-                tracing::warn!("If you want to use voice chat, run LiveKit with key=devkey secret=secret");
-                tracing::warn!("Or set LIVEKIT_API_KEY and LIVEKIT_API_SECRET environment variables.");
-                tracing::warn!("======================================================================");
+                tracing::warn!(
+                    "If you want to use voice chat, run LiveKit with key=devkey secret=secret"
+                );
+                tracing::warn!(
+                    "Or set LIVEKIT_API_KEY and LIVEKIT_API_SECRET environment variables."
+                );
+                tracing::warn!(
+                    "======================================================================"
+                );
                 // SAFETY: 此时服务器还未启动任何异步线程，不存在并发读写环境变量的风险。
                 unsafe {
                     std::env::set_var("LIVEKIT_API_KEY", "devkey");

@@ -20,9 +20,11 @@ win:
   target:
     - target: nsis
       arch: [x64]
-  artifactName: kaede-client-${version}-setup.${ext}
+    - target: portable
+      arch: [x64]
 
 nsis:
+  artifactName: KaedeNiwa-${version}-setup.${ext}
   oneClick: false
   perMachine: false
   allowElevation: true
@@ -31,3 +33,6 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: KaedeNiwa
   deleteAppDataOnUninstall: false
+
+portable:
+  artifactName: KaedeNiwa-${version}-portable.${ext}
