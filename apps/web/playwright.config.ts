@@ -1,5 +1,12 @@
 import { defineConfig, devices } from '@playwright/test';
 
+// [qa] 兜底：test runner 与 webServer 保持同协议。
+// webServer 用 KAEDE_HTTP=1 启动 vite（http://127.0.0.1:5173），
+// test runner 若未设 KAEDE_HTTP/KAEDE_BASE_URL，BASE 会退回 https → 所有 goto SSL 失败。
+// 显式 KAEDE_HTTPS=1 才走 https，否则默认 http。
+if (!process.env.KAEDE_BASE_URL && process.env.KAEDE_HTTPS !== '1') {
+  process.env.KAEDE_HTTP = '1';
+}
 const BASE = process.env.KAEDE_BASE_URL ?? (process.env.KAEDE_HTTP === '1' ? 'http://127.0.0.1:5173' : 'https://127.0.0.1:5173');
 
 export default defineConfig({
@@ -49,6 +56,12 @@ export default defineConfig({
         RUST_LOG: 'info',
         // 未装 LiveKit 也能跑 e2e：后端在 dev-mode 下不强制校验。
         KAEDE_SKIP_LIVEKIT_ENV_CHECK: '1',
+        // e2e 会批量注册账号，绕过注册/KP/消息限流（仅 dev-mode + env 生效）。
+        KAEDE_TEST_MODE: '1',
+        KAEDE_DB: 'sqlite://tools/qa/.run/qa.db?mode=rwc',
+        KAEDE_ADMIN_ENABLED: '1',
+        KAEDE_ADMIN_BIND: '127.0.0.1:18081',
+        KAEDE_ADMIN_TOKEN: 'qa-admin-token',
       },
     },
     {
