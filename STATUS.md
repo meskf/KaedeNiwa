@@ -115,6 +115,49 @@ QA 使用独立库 `tools/qa/.run/qa.db`，`-Force` 会重建；不污染 `kaede
     Android release APK（0.1.3）        签名链 / 证书指纹 / versionCode 3 校验通过
     Docker 一体化镜像                   0.1.2 时已全绿；0.1.3 仅版本号与桌面默认地址变化
 
+## 打包与产物验收（2026-11-04，版本 0.1.4）
+
+### 产物
+    release/KaedeNiwa-server-0.1.4.zip            Windows 独立服务端（含 LiveKit + 内置前端）
+    release/desktop/KaedeNiwa-0.1.4-setup.exe     安装版
+    release/desktop/KaedeNiwa-0.1.4-portable.exe  绿色版
+    release/apk/KaedeNiwa-android-0.1.4.apk       已签名 release APK（versionCode 4 / versionName 0.1.4）
+    release/SHA256SUMS.txt / README-0.1.4.md      校验和与开箱即用说明
+    docker compose up -d --build                 一体化镜像（镜像由仓库内 compose 构建）
+
+### 实测（2026-11-04，本地构建产物）
+    构建      cargo build --release -p kaede-server --features embed-web  通过（6m13s）
+              tsc -b + vite build                                        通过
+              electron-builder（nsis + portable，--publish never）        通过
+              gradlew assembleRelease + zipalign + apksigner              通过
+    回归      L3 标准套件 14/14、L4 媒体套件 17 通过 / 1 跳过、桌面端启动用例 1/1
+    服务端包  解压到全新目录（无 data/）-> start-kaede.ps1 -> 部署冒烟全绿
+              （注册/登录/建频道/文本/附件/语音 E2EE/1 passed）
+    桌面端    0.1.4 win-unpacked 启动，默认服务器地址即 http://127.0.0.1:18080
+    APK       签名证书 SHA-256 与 0.1.3 一致（4064f525…1d2a），versionCode 4 / versionName 0.1.4
+
+### 0.1.4 修掉的问题
+- 屏幕共享观众端帧率只有 5~10fps 且帧间隔抖动（见下节根因与判读规则）。
+
+### 屏幕共享帧率偏低（2026-11-04）
+- 根因（代码侧）：livekit-client 源码 `getDefaultDegradationPreference()` 对
+  `Track.Source.ScreenShare` 默认返回 `'maintain-resolution'` —— 带宽一紧张，
+  Chrome/浏览器编码器优先保分辨率、按帧砍帧率，表现为观众端 5~10fps 且帧间隔抖动。
+  旧代码没有覆盖这个默认值，也没有设 `contentHint`（默认让编码器按文字/细节优化）。
+- 码率模型改成屏幕共享专用的 0.08 bpp（旧 0.032 bpp 是通话值）：
+  1080p60 4.0 → 10.0 Mbps、1080p30 2.0 → 5.0 Mbps、720p30 0.9 → 2.2 Mbps，
+  4K 封顶 25 Mbps。编码器码率预算不足时 Chrome 会靠丢帧降码率 → 观众端 5~10fps 且帧间隔抖。
+- 30/60fps 档位发布时设置 `contentHint='motion'` + `degradationPreference='maintain-framerate'`
+  （弱网优先保帧率，代价是分辨率可能下降）；低帧率档位维持清晰优先。
+- 新增 `lib/mediaStats.ts`：每 3s 打印一行 `[MediaStats]`，控制台执行
+  `__kaedeMediaStats()` 取最近快照。判读：
+  - `out ... limit=bandwidth` → 上行/服务端链路带宽不足（看 `target=` 和 `Mbps`）
+  - `out ... limit=cpu` → 共享方编码器跑不动（降分辨率档位）
+  - `out fps` 正常但 `in fps` 很低 + `loss` 高 → 丢包；`pair=TCP` 表示走了 TCP 回落
+    （UDP 7882 没放行或 Docker 用户态代理导致），需要在防火墙/安全组放行 UDP 7882，
+    Linux 下更推荐给 livekit 容器 `network_mode: host`。
+  - `in fps` 正常但画面卡顿 → 解码端/播放器问题，不是链路。
+
 ### 0.1.3 修掉的问题
 - 桌面客户端全新安装时，页面由 Electron 本地 http server 托管（不是 file://），
   `resolveDefaultServerUrl()` 走“其余 → 同源”，默认地址变成 127.0.0.1:<随机端口>，

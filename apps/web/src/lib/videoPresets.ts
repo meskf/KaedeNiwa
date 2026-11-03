@@ -11,23 +11,33 @@ export interface VideoPreset {
   width: number
   height: number
   fps: number
-  /** 建议码率（bps），根据 kaede-protocol 的 0.032 bpp 经验系数 */
+  /** 建议码率（bps），屏幕共享按 0.08 bpp 估算（见下方 calcScreenShareBitrate） */
   bitrate: number
 }
 
-// 根据 0.032 bpp × 1.0（Standard 档）计算，与 kaede-protocol 一致
-function calcBitrate(width: number, height: number, fps: number): number {
-  return Math.round(width * height * fps * 0.032)
+// 屏幕共享码率估算。
+//
+// 0.032 bpp 是“视频通话”的低运动量经验值。屏幕共享在滚动、播放视频、拖窗口时
+// 运动量远高于通话，用同样的 bpp 会把编码器的码率预算压死；Chrome 的实时编码器
+// 在预算不够时优先丢帧 → 观众端只剩 5~10fps 且帧间隔抖动。
+// 这里改用 0.08 bpp（对标 LiveKit 自带 ScreenSharePresets：1080p30 ≈ 5 Mbps），
+// 4K 上限 25 Mbps，避免把上行带宽一次性打满（实际码率仍由拥塞控制决定）。
+const MIN_SCREEN_BITRATE = 300_000
+const MAX_SCREEN_BITRATE = 25_000_000
+
+function calcScreenShareBitrate(width: number, height: number, fps: number): number {
+  const raw = Math.round(width * height * fps * 0.08)
+  return Math.min(MAX_SCREEN_BITRATE, Math.max(MIN_SCREEN_BITRATE, raw))
 }
 
 export const VIDEO_PRESETS: VideoPreset[] = [
-  { id: '4k60',   label: '3840x2160 60fps',      width: 3840, height: 2160, fps: 60, bitrate: calcBitrate(3840, 2160, 60) },
-  { id: '4k30',   label: '3840x2160 30fps',      width: 3840, height: 2160, fps: 30, bitrate: calcBitrate(3840, 2160, 30) },
-  { id: '1440p60',label: '2560x1440 60fps',   width: 2560, height: 1440, fps: 60, bitrate: calcBitrate(2560, 1440, 60) },
-  { id: '1080p60',label: '1920x1080 60fps',   width: 1920, height: 1080, fps: 60, bitrate: calcBitrate(1920, 1080, 60) },
-  { id: '1080p30',label: '1920x1080 30fps',   width: 1920, height: 1080, fps: 30, bitrate: calcBitrate(1920, 1080, 30) },
-  { id: '720p30', label: '1280x720 30fps',    width: 1280, height: 720,  fps: 30, bitrate: calcBitrate(1280, 720, 30) },
-  { id: '480p30', label: '854x480 30fps', width: 854, height: 480, fps: 30, bitrate: calcBitrate(854, 480, 30) },
+  { id: '4k60',   label: '3840x2160 60fps',      width: 3840, height: 2160, fps: 60, bitrate: calcScreenShareBitrate(3840, 2160, 60) },
+  { id: '4k30',   label: '3840x2160 30fps',      width: 3840, height: 2160, fps: 30, bitrate: calcScreenShareBitrate(3840, 2160, 30) },
+  { id: '1440p60',label: '2560x1440 60fps',   width: 2560, height: 1440, fps: 60, bitrate: calcScreenShareBitrate(2560, 1440, 60) },
+  { id: '1080p60',label: '1920x1080 60fps',   width: 1920, height: 1080, fps: 60, bitrate: calcScreenShareBitrate(1920, 1080, 60) },
+  { id: '1080p30',label: '1920x1080 30fps',   width: 1920, height: 1080, fps: 30, bitrate: calcScreenShareBitrate(1920, 1080, 30) },
+  { id: '720p30', label: '1280x720 30fps',    width: 1280, height: 720,  fps: 30, bitrate: calcScreenShareBitrate(1280, 720, 30) },
+  { id: '480p30', label: '854x480 30fps', width: 854, height: 480, fps: 30, bitrate: calcScreenShareBitrate(854, 480, 30) },
 ]
 
 export const DEFAULT_PRESET_ID = '1080p60'

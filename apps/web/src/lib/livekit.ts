@@ -6,6 +6,7 @@ function toVideoQuality(q: QualityStr): VideoQuality {
   return q === 'high' ? VideoQuality.HIGH : q === 'low' ? VideoQuality.LOW : VideoQuality.MEDIUM
 }
 import { findPreset } from './videoPresets'
+import { startMediaStats, stopMediaStats } from './mediaStats'
 import { startRnnoiseProcessing, isRnnoiseSupported, type RnnoiseHandle } from './rnnoise'
 
 /**
@@ -238,6 +239,7 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
       screenShareCache.clear()
       remoteAudioElements.clear()
       stopBitrateSampling()
+      stopMediaStats()
       emit()
     })
     .on(RoomEvent.ParticipantConnected, () => emit())
@@ -382,6 +384,7 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
   }
 
   startBitrateSampling()
+  startMediaStats(room)
   emit()
   return room
 }
@@ -397,6 +400,7 @@ export async function disconnectMedia() {
   screenShareCache.clear()
   remoteAudioElements.clear()
   stopBitrateSampling()
+  stopMediaStats()
   emit()
 }
 
@@ -425,6 +429,15 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
     const stream = await navigator.mediaDevices.getDisplayMedia(constraints)
     const videoTrack = stream.getVideoTracks()[0]
     if (!videoTrack) throw new Error('无视频轨道')
+
+    // contentHint / degradationPreference 决定“码率不够时牺牲谁”：
+    // - motion + maintain-framerate：优先保帧率（滚动、播放视频时画面跟手）
+    // - detail + maintain-resolution：优先保清晰度（文字/代码）
+    // 观众端目前报“帧率只有 5fps”，30/60fps 档位统一按流畅优先；15fps 及以下
+    // 本身帧率预算充足，保持清晰优先。
+    const smoothFirst = preset.fps >= 30
+    videoTrack.contentHint = smoothFirst ? 'motion' : 'detail'
+    console.log('[ScreenShare] capture settings:', JSON.stringify(videoTrack.getSettings()))
     
     // 开启 simulcast，让接收端能切到不同分辨率层（高/中/低）
     // 注意：屏幕共享单层的话，接收端调画质会导致 SFU 强制降码率 → 画面糊。
@@ -445,6 +458,7 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
       source: Track.Source.ScreenShare,
       simulcast: false,
       screenShareEncoding: { maxBitrate: preset.bitrate, maxFramerate: preset.fps },
+      degradationPreference: smoothFirst ? 'maintain-framerate' : 'maintain-resolution',
     })
 
     // 系统/标签页音频（用户勾选"共享音频"时才有）—— 独立发布
