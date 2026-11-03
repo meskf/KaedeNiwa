@@ -834,8 +834,17 @@ impl RoomSession {
                     if !is_retryable_kp_error(&e) {
                         return Err(e);
                     }
+                    // 429 是服务端 KeyPackage 消费限流（pair 预算按秒补充）。
+                    // 原固定短退避（0.2~1.5s）会在 3s 内把 5 次重试全部撞回 429，
+                    // 既拿不到 KP 又制造一串 429 噪声；这里按限流窗口退避。
+                    let wait_ms = if matches!(&e, ClientError::Http { status, .. } if *status == 429)
+                    {
+                        (*delay_ms + 1200).max(2000)
+                    } else {
+                        *delay_ms
+                    };
                     last_err = Some(e);
-                    sleep_ms(*delay_ms).await;
+                    sleep_ms(wait_ms).await;
                 }
             }
         }
@@ -1583,7 +1592,48 @@ impl RoomSession {
             .await
         {
             Ok(()) => {}
-            Err(ClientError::Http { status: 409, .. }) => {
+            Err(ClientError::Http {
+                status: 409,
+                message,
+            }) => {
+                // 409 有两种语义，必须区分：
+                //   1) "no online authority"：频道有成员，但全都不在线。
+                //      服务端已把加入申请入队给权威成员。此时**绝不能自建群**：
+                //      自建会与既有群分裂，双方后续消息永远互相解不开。
+                //      正确做法是等权威上线补发 Welcome（或返回可重试错误）。
+                //   2) "client must build own group" / "rebuild required"：
+                //      真正的单人频道，自建群是正确的。
+                if message.contains("no online authority") {
+                    tracing::info!(
+                        "[room] join_channel {} authority offline; waiting for queued welcome",
+                        channel_id
+                    );
+                    return match timeout_recv(std::time::Duration::from_secs(8), rx.recv()).await {
+                        Ok(Ok(Ok(_welcome))) => {
+                            tracing::info!(
+                                "[room] join_channel {} completed via deferred welcome",
+                                channel_id
+                            );
+                            self.conn.flush_dirty_snapshots().await;
+                            Ok(())
+                        }
+                        Ok(Ok(Err(e))) => {
+                            Err(ClientError::Protocol(format!("welcome failed: {}", e)))
+                        }
+                        Ok(Err(_)) => Err(ClientError::Protocol("welcome channel closed".into())),
+                        Err(_timeout) => {
+                            // 全员离线：申请服务端接管（会清掉其他成员并通知他们
+                            // 下次连接时丢弃旧 group），然后自己建群。
+                            tracing::warn!(
+                                "[room] join_channel {} no welcome in 8s; requesting takeover",
+                                channel_id
+                            );
+                            self.http.takeover_channel(channel_id).await?;
+                            self.conn.channel_ensure_group(channel_id)?;
+                            Ok(())
+                        }
+                    };
+                }
                 // P1: 单人频道且本地 group 丢失，server 返回 409 表示"无法补发 Welcome"
                 // → 自己重建 group（用当前 KP 重新 create_group）
                 tracing::info!(
@@ -1612,16 +1662,33 @@ impl RoomSession {
             Ok(Ok(Err(e))) => Err(ClientError::Protocol(format!("welcome failed: {}", e))),
             Ok(Err(_)) => Err(ClientError::Protocol("welcome channel closed".into())),
             Err(_timeout) => {
-                // 【Dead Authority Takeover】
-                // 如果超时，说明原本的权威成员（不管有几个人）全部离线或死透了，
-                // 根本不可能有 Welcome 发过来。此时如果继续拒绝建群，用户就永远卡在门外。
-                // 所以：只要超时，直接强行重建群组，成为新的权威。
-                tracing::warn!(
-                    "[room] join_channel {} timeout waiting welcome. Assuming dead authority, forcing local group creation.",
-                    channel_id
-                );
-                self.conn.channel_ensure_group(channel_id)?;
-                Ok(())
+                // 超时后必须先看频道里还有没有其他成员：
+                //   - 单人频道：权威确实死了，自建群是正确的（否则永远进不去）。
+                //   - 有多人：不能在别人还活着时自建群，否则群分裂、消息永久解不开。
+                //     返回可重试错误，等权威上线补发 Welcome。
+                match self.list_channel_members(channel_id).await {
+                    Ok(members) if members.len() <= 1 => {
+                        tracing::warn!(
+                            "[room] join_channel {} timeout on solo channel, creating group",
+                            channel_id
+                        );
+                        self.conn.channel_ensure_group(channel_id)?;
+                        Ok(())
+                    }
+                    Ok(members) => {
+                        tracing::warn!(
+                            "[room] join_channel {} timeout with {} members; requesting takeover",
+                            channel_id,
+                            members.len()
+                        );
+                        // 服务端会再次校验“其他成员是否全部离线”，在线的话返回 409，
+                        // 我们宁可报错也不自建群造成分裂。
+                        self.http.takeover_channel(channel_id).await?;
+                        self.conn.channel_ensure_group(channel_id)?;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
             }
         }
     }
@@ -2079,6 +2146,23 @@ impl RoomSession {
         mentions: &[String],
         ts: i64,
     ) -> Result<(), ClientError> {
+        self.send_text_with_attachments_mentions_at_ex(channel_id, text, attachments, mentions, ts)
+            .await
+            .map(|_| ())
+    }
+
+    /// 同 [`Self::send_text_with_attachments_mentions_at`]，但返回服务端权威 `(id, ts)`。
+    ///
+    /// UI 用它直接落本地消息：乐观消息没有服务端 id，等 history/回显再按内容配对时
+    /// ts 精度与到达顺序都不可靠（曾导致发送方自己看到两条相同消息）。
+    pub async fn send_text_with_attachments_mentions_at_ex(
+        &self,
+        channel_id: &str,
+        text: &str,
+        attachments: &[kaede_protocol::Attachment],
+        mentions: &[String],
+        ts: i64,
+    ) -> Result<(i64, i64), ClientError> {
         self.ensure_channel_sendable(channel_id)?;
         let mut payload = crate::payload::MessagePayload::new(
             channel_id,
@@ -2111,14 +2195,15 @@ impl RoomSession {
             let mut ciphertext = Vec::with_capacity(1 + sealed.len());
             ciphertext.push(0x03u8);
             ciphertext.extend_from_slice(&sealed);
-            if let Err(e) = self
+            let (server_id, server_ts) = self
                 .http
                 .post_message(channel_id, now_ms(), self.uid.as_str(), &ciphertext)
                 .await
-            {
-                tracing::warn!("post_message: {}", e);
-                return Err(e);
-            }
+                .map_err(|e| {
+                    tracing::warn!("post_message: {}", e);
+                    e
+                })?;
+            Ok((server_id, server_ts))
         } else {
             let ciphertext = self.conn.mls_encrypt_app(&bytes)?;
             // 广播前必须先落盘：否则重启后 ratchet 回退会 nonce 复用。
@@ -2136,8 +2221,8 @@ impl RoomSession {
                 .await?;
             self.persist_local_message(channel_id, server_ts, &bytes)
                 .await;
+            Ok((server_id, server_ts))
         }
-        Ok(())
     }
 
     /// 发送表情回复（独立 MLS 消息）。

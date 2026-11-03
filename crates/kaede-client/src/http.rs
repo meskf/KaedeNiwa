@@ -966,11 +966,27 @@ impl HttpApi {
         if resp.status().is_success() {
             Ok(())
         } else {
-            // P1：返回结构化 Http 错误，让上层能根据 status 分派
-            // （409 = 单人频道 group 丢失需重建；401 = 密码错）
-            let status = resp.status().as_u16();
-            let message = format!("join_channel: {}", resp.status());
-            Err(ClientError::Http { status, message })
+            // 保留服务端 body：409 需要区分 "no online authority" 与 "solo rebuild"。
+            Err(parse_api_error(resp).await)
+        }
+    }
+
+    /// 频道 group 权威全员离线时请求接管（清空其他成员，由调用者重建群）。
+    pub async fn takeover_channel(&self, channel_id: &str) -> Result<(), ClientError> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/api/channels/{}/takeover",
+                self.base_url, channel_id
+            ))
+            .bearer_auth(self.bearer()?)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(parse_api_error(resp).await)
         }
     }
 

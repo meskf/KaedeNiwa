@@ -801,44 +801,59 @@ impl ServerConnection {
 
     async fn heartbeat_loop(self: Arc<Self>) {
         use std::sync::atomic::Ordering;
-        let interval_ms = 20_000u64;
-        let timeout_ms = 30_000u64;
+        // 检查频率必须高于 ping 间隔，否则超时判定会被 sleep 粒度拖慢。
+        // 旧实现：每 20s 才检查一次 30s 超时，实际断链检测最坏要 ~60s。
+        let tick_ms = 2_500u64;
+        let interval_ms = 10_000u64;
+        let timeout_ms = 20_000u64;
+        let mut last_ping = 0u64;
         loop {
             #[cfg(target_arch = "wasm32")]
-            gloo_timers::future::TimeoutFuture::new(interval_ms as u32).await;
+            gloo_timers::future::TimeoutFuture::new(tick_ms as u32).await;
             #[cfg(not(target_arch = "wasm32"))]
-            tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(tick_ms)).await;
 
-            let now = crate::room::now_ms() as u64;
-            let last = self.last_pong_ms.load(Ordering::Relaxed);
-            if last != 0 && now.saturating_sub(last) > timeout_ms {
-                tracing::warn!(
-                    "[client:{}] heartbeat timeout: no Pong for {}ms, closing",
-                    self.server_id,
-                    now.saturating_sub(last)
-                );
-                self.emit(ClientEvent::Disconnected {
-                    server_id: self.server_id.clone(),
-                    reason: "heartbeat timeout".to_string(),
-                });
-                let _ = self.transport.close().await;
+            if self.shutdown.load(Ordering::Relaxed) {
                 return;
             }
 
-            let nonce = now;
-            if self
-                .transport
-                .send(ClientMessage::Ping { nonce })
-                .await
-                .is_err()
-            {
-                tracing::warn!("[client:{}] heartbeat send failed, closing", self.server_id);
-                self.emit(ClientEvent::Disconnected {
-                    server_id: self.server_id.clone(),
-                    reason: "heartbeat send failed".to_string(),
-                });
-                let _ = self.transport.close().await;
-                return;
+            let now = crate::room::now_ms() as u64;
+            let last_pong = self.last_pong_ms.load(Ordering::Relaxed);
+            if last_ping != 0 {
+                // 从未收到 Pong 时以“首次发 ping 的时间”为基准，避免永远不超时。
+                let base = if last_pong != 0 { last_pong } else { last_ping };
+                if now.saturating_sub(base) > timeout_ms {
+                    tracing::warn!(
+                        "[client:{}] heartbeat timeout: no Pong for {}ms, closing",
+                        self.server_id,
+                        now.saturating_sub(base)
+                    );
+                    self.emit(ClientEvent::Disconnected {
+                        server_id: self.server_id.clone(),
+                        reason: "heartbeat timeout".to_string(),
+                    });
+                    let _ = self.transport.close().await;
+                    return;
+                }
+            }
+
+            if last_ping == 0 || now.saturating_sub(last_ping) >= interval_ms {
+                last_ping = now;
+                let nonce = now;
+                if self
+                    .transport
+                    .send(ClientMessage::Ping { nonce })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("[client:{}] heartbeat send failed, closing", self.server_id);
+                    self.emit(ClientEvent::Disconnected {
+                        server_id: self.server_id.clone(),
+                        reason: "heartbeat send failed".to_string(),
+                    });
+                    let _ = self.transport.close().await;
+                    return;
+                }
             }
         }
     }

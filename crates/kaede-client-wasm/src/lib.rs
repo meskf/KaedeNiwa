@@ -239,12 +239,21 @@ impl JsClient {
             .map_err(|e| JsValue::from_str(&format!("Join channel error: {}", e)))
     }
 
-    pub async fn send_message(&self, channel_id: String, text: String) -> Result<(), JsValue> {
+    /// 发送加密消息到指定频道，返回服务端权威 `{"id":..,"ts":..}` JSON。
+    pub async fn send_message(&self, channel_id: String, text: String) -> Result<String, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
-        room.send_text_to(&channel_id, &text)
+        let (id, ts) = room
+            .send_text_with_attachments_mentions_at_ex(
+                &channel_id,
+                &text,
+                &[],
+                &[],
+                js_sys::Date::now() as i64,
+            )
             .await
-            .map_err(|e| JsValue::from_str(&format!("Send error: {}", e)))
+            .map_err(|e| JsValue::from_str(&format!("Send error: {}", e)))?;
+        Ok(format!("{{\"id\":{},\"ts\":{}}}", id, ts))
     }
 
     // 把新成员拉进当前频道
@@ -312,21 +321,29 @@ impl JsClient {
             .map_err(|e| JsValue::from_str(&format!("download attachment: {e}")))
     }
 
-    /// 发送带附件的频道消息。
+    /// 发送带附件的频道消息，返回服务端权威 `{"id":..,"ts":..}` JSON。
     #[wasm_bindgen(js_name = sendMessageWithAttachments)]
     pub async fn send_message_with_attachments(
         &self,
         channel_id: String,
         text: String,
         attachments_json: String,
-    ) -> Result<(), JsValue> {
+    ) -> Result<String, JsValue> {
         let room_opt = self.room.lock().unwrap().clone();
         let room = room_opt.ok_or_else(|| JsValue::from_str("not logged in"))?;
         let atts: Vec<kaede_protocol::Attachment> = serde_json::from_str(&attachments_json)
             .map_err(|e| JsValue::from_str(&format!("parse attachments: {e}")))?;
-        room.send_text_with_attachments(&channel_id, &text, &atts)
+        let (id, ts) = room
+            .send_text_with_attachments_mentions_at_ex(
+                &channel_id,
+                &text,
+                &atts,
+                &[],
+                js_sys::Date::now() as i64,
+            )
             .await
-            .map_err(|e| JsValue::from_str(&format!("send with attachments: {e}")))
+            .map_err(|e| JsValue::from_str(&format!("send with attachments: {e}")))?;
+        Ok(format!("{{\"id\":{},\"ts\":{}}}", id, ts))
     }
 
     /// 发送带附件的 DM。

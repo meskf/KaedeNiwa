@@ -131,6 +131,8 @@ mod native_ws {
     pub struct WebSocketTransport {
         sink: Mutex<SplitSink<WsStream, Message>>,
         source: Mutex<SplitStream<WsStream>>,
+        /// 主动关闭标记：区分「用户主动断开」和「服务端崩溃/网络断开」。
+        closing: std::sync::atomic::AtomicBool,
     }
 
     impl WebSocketTransport {
@@ -142,6 +144,7 @@ mod native_ws {
             Ok(Self {
                 sink: Mutex::new(sink),
                 source: Mutex::new(source),
+                closing: std::sync::atomic::AtomicBool::new(false),
             })
         }
     }
@@ -175,7 +178,16 @@ mod native_ws {
                     Some(Ok(Message::Ping(_)))
                     | Some(Ok(Message::Pong(_)))
                     | Some(Ok(Message::Frame(_))) => continue,
-                    Some(Ok(Message::Close(_))) | None => return Err(ClientError::Closed),
+                    Some(Ok(Message::Close(_))) | None => {
+                        // 只有主动 close() 才算正常结束；否则是服务端崩溃/网络断开，
+                        // 必须让上层 emit Disconnected 触发自动重连。
+                        if self.closing.load(std::sync::atomic::Ordering::Acquire) {
+                            return Err(ClientError::Closed);
+                        }
+                        return Err(ClientError::Transport(
+                            "ws closed unexpectedly (server gone or network lost)".into(),
+                        ));
+                    }
                     Some(Err(e)) => {
                         return Err(ClientError::Transport(format!("ws recv: {}", e)));
                     }
@@ -184,6 +196,8 @@ mod native_ws {
         }
 
         async fn close(&self) -> Result<(), ClientError> {
+            self.closing
+                .store(true, std::sync::atomic::Ordering::Release);
             let mut sink = self.sink.lock().await;
             let _ = sink.close().await;
             Ok(())
@@ -202,7 +216,7 @@ pub use wasm_ws::WebSocketTransport;
 mod wasm_ws {
     use super::*;
     use kaede_protocol::WireMessage;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
@@ -210,9 +224,24 @@ mod wasm_ws {
 
     type InMsg = Result<Vec<u8>, String>;
 
+    /// 在释放 Closure 之前先解绑 JS 事件处理器。
+    ///
+    /// 浏览器事件是异步派发的：连接失败时 onerror 先到，connect() 返回 Err
+    /// 后局部 Closure 被 drop，随后排队的 onclose 再触发就会报
+    /// "closure invoked recursively or after being dropped"（wasm panic）。
+    fn detach_handlers(ws: &WebSocket) {
+        ws.set_onopen(None);
+        ws.set_onmessage(None);
+        ws.set_onerror(None);
+        ws.set_onclose(None);
+    }
+
     pub struct WebSocketTransport {
         ws: WebSocket,
         incoming: async_channel::Receiver<InMsg>,
+        /// 主动关闭标记：区分「用户主动断开」和「服务端崩溃/网络断开」。
+        /// 后者必须投递 Transport 错误，让 event loop emit Disconnected 触发重连。
+        closing: Rc<Cell<bool>>,
         _onopen: Rc<RefCell<Option<Closure<dyn FnMut()>>>>,
         _onmessage: Rc<RefCell<Option<Closure<dyn FnMut(MessageEvent)>>>>,
         _onerror: Rc<RefCell<Option<Closure<dyn FnMut()>>>>,
@@ -277,11 +306,20 @@ mod wasm_ws {
             ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
             // onerror
+            let closing = Rc::new(Cell::new(false));
             let onerror = Closure::<dyn FnMut()>::new({
                 let err_tx = err_tx.clone();
                 let in_tx = in_tx.clone();
+                let closing = closing.clone();
                 move || {
                     let _ = err_tx.try_send("websocket error event".to_string());
+                    // 主动 close() 也会触发 onerror（部分浏览器）；只有非主动关闭
+                    // 才把错误投递给 recv，让上层重连。
+                    if !closing.get() {
+                        let _ = in_tx.try_send(Err(
+                            "websocket error event (network or server lost)".to_string(),
+                        ));
+                    }
                     in_tx.close();
                 }
             });
@@ -291,8 +329,15 @@ mod wasm_ws {
             let onclose = Closure::<dyn FnMut()>::new({
                 let err_tx = err_tx.clone();
                 let in_tx = in_tx.clone();
+                let closing = closing.clone();
                 move || {
                     let _ = err_tx.try_send("websocket closed before open".to_string());
+                    if !closing.get() {
+                        let _ = in_tx.try_send(Err(
+                            "websocket closed unexpectedly (server gone or network lost)"
+                                .to_string(),
+                        ));
+                    }
                     in_tx.close();
                 }
             });
@@ -314,14 +359,20 @@ mod wasm_ws {
             match wait {
                 Some(Ok(())) => {}
                 Some(Err(e)) => {
+                    detach_handlers(&ws);
+                    let _ = ws.close();
                     return Err(ClientError::Connection(format!("ws open failed: {}", e)));
                 }
                 None => {
+                    detach_handlers(&ws);
+                    let _ = ws.close();
                     return Err(ClientError::Connection("ws open wait cancelled".into()));
                 }
             }
 
             if ws.ready_state() != WebSocket::OPEN {
+                detach_handlers(&ws);
+                let _ = ws.close();
                 return Err(ClientError::Connection(format!(
                     "ws not open after wait (ready_state={})",
                     ws.ready_state()
@@ -333,6 +384,7 @@ mod wasm_ws {
             Ok(Self {
                 ws,
                 incoming: in_rx,
+                closing,
                 _onopen: Rc::new(RefCell::new(Some(onopen))),
                 _onmessage: Rc::new(RefCell::new(Some(onmessage))),
                 _onerror: Rc::new(RefCell::new(Some(onerror))),
@@ -357,14 +409,25 @@ mod wasm_ws {
                 Ok(Ok(bytes)) => {
                     ServerMessage::decode(&bytes).map_err(|e| ClientError::Protocol(e.to_string()))
                 }
-                Ok(Err(e)) => Err(ClientError::Protocol(e)),
+                // 文本帧 / 底层关闭错误都是传输层异常，交由上层重连。
+                Ok(Err(e)) => Err(ClientError::Transport(e)),
                 Err(_) => Err(ClientError::Closed),
             }
         }
 
         async fn close(&self) -> Result<(), ClientError> {
+            self.closing.set(true);
             let _ = self.ws.close();
             Ok(())
+        }
+    }
+
+    impl Drop for WebSocketTransport {
+        fn drop(&mut self) {
+            // 先摘掉 JS 事件再释放 Closure/WebSocket，避免迟到的 onclose 触发 panic。
+            self.closing.set(true);
+            detach_handlers(&self.ws);
+            let _ = self.ws.close();
         }
     }
 }
