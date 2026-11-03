@@ -1,43 +1,78 @@
+# 生产部署（带域名 + 自动 HTTPS 证书）。
+#
+# 用法（仓库根目录）：
+#   cp deploy/.env.example deploy/.env   # 填 KAEDE_DOMAIN 等
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# 架构：外置 Caddy（80/443，自动申请证书） -> kaede 一体化镜像（内置 Caddy 8080：
+# 前端静态资源 + /api + /ws + /livekit 反代） -> LiveKit 容器。
+# 只想本机/局域网试跑时用仓库根目录的 docker-compose.yml 即可（无域名、无 TLS）。
+
 services:
   kaede:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile
+      dockerfile: Dockerfile
+    image: kaede:latest
     env_file:
       - .env
     environment:
-      KAEDE_BIND: 0.0.0.0:18080
-      KAEDE_DB: sqlite:///var/lib/kaede/kaede.db?mode=rwc
-      KAEDE_DATA_DIR: /var/lib/kaede/data
-      KAEDE_TRUSTED_PROXIES: ${KAEDE_TRUSTED_PROXIES:-172.28.0.0/16}
-      # 强制指定内部 LiveKit 地址
-      LIVEKIT_WS_URL: ws://livekit:7880
-      LIVEKIT_API_KEY: devkey
-      LIVEKIT_API_SECRET: 12345678901234567890123456789012
+      # 容器内的 Caddy 在回环上转发，server 只信任回环来源的 XFF。
+      KAEDE_TRUSTED_PROXIES: 127.0.0.1/32
+      KAEDE_CORS_ORIGINS: ${KAEDE_CORS_ORIGINS:-*}
+      # 同源反代路径：服务端按请求 Host 推导 ws(s)://<domain>/livekit
+      LIVEKIT_WS_URL: /livekit
+      KAEDE_LIVEKIT_HTTP_URL: http://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-12345678901234567890123456789012}
     expose:
-      - "18080"
+      - "8080"
     volumes:
-      - kaede-data:/var/lib/kaede
+      - kaede-data:/data
     networks:
       - kaede-net
     restart: unless-stopped
-    read_only: true
-    tmpfs:
-      - /tmp
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18080/ready"]
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:18080/ready || exit 1"]
       interval: 30s
-      timeout: 3s
+      timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 20s
 
   livekit:
-    image: livekit/livekit-server:latest
-    command: --config /etc/livekit.yaml
+    image: livekit/livekit-server:${LIVEKIT_VERSION:-v1.13.9}
+    # 不要用 --config：带配置文件时 LIVEKIT_KEYS 会被忽略（无限重启并报
+    # "one of key-file or keys must be provided"）。改用 LIVEKIT_CONFIG 传完整配置。
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        rtc:
+          # node_ip 留空 = 自动（默认 STUN 探测公网 IP）；
+          # 纯局域网部署用 LIVEKIT_NODE_IP 指定 LAN IP 并设 LIVEKIT_USE_EXTERNAL_IP=false。
+          node_ip:
+          use_external_ip: true
+          tcp_port: 7881
+          udp_port: 7882
+        logging:
+          level: info
+          json: false
+        room:
+          auto_create: true
+        keys:
+          ${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-12345678901234567890123456789012}
+        webhook:
+          api_key: ${LIVEKIT_API_KEY:-devkey}
+          urls:
+            - http://kaede:18080/api/livekit/webhook
+      LIVEKIT_RTC_USE_EXTERNAL_IP: "${LIVEKIT_USE_EXTERNAL_IP:-true}"
+      # 入口脚本读取：有值则覆盖 rtc.node_ip 并关闭 STUN（纯局域网部署）。
+      LIVEKIT_NODE_IP: "${LIVEKIT_NODE_IP:-}"
+    # node_ip 只能写在配置里（环境变量不生效），由入口脚本按 LIVEKIT_NODE_IP 覆盖。
+    entrypoint: ["/bin/sh", "/etc/livekit-entrypoint.sh"]
     volumes:
-      - ./livekit.yaml:/etc/livekit.yaml:ro
+      - ./livekit-entrypoint.sh:/etc/livekit-entrypoint.sh:ro
     ports:
       - "7881:7881"         # WebRTC TCP
       - "7882:7882/udp"     # WebRTC UDP
@@ -50,16 +85,13 @@ services:
     depends_on:
       kaede:
         condition: service_healthy
-    # 本地测试临时用 8080/8443，防止被 Steam++ 等占用。生产环境请改回 "80:80" 和 "443:443"
     ports:
-      - "80:80" 
+      - "80:80"
       - "443:443"
     environment:
       KAEDE_DOMAIN: ${KAEDE_DOMAIN:?set KAEDE_DOMAIN in deploy/.env}
-      KAEDE_UPSTREAM: kaede:18080
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ../dist/web:/srv/kaede:ro
       - caddy-data:/data
       - caddy-config:/config
     restart: unless-stopped
@@ -76,5 +108,3 @@ networks:
     ipam:
       config:
         - subnet: 172.28.0.0/16
-
-

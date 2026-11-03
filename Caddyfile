@@ -1,14 +1,42 @@
+# KaedeNiwa 一体化入口：静态站点 + API/WS + LiveKit 信令代理。
+# 默认监听容器内 8080（HTTP），由 compose 映射到宿主机。
+{
+    # 减少容器内日志噪声；生产可改为 debug
+    auto_https off
+}
+
 :8080 {
-    root * /srv/web
-    try_files {path} /index.html
-    
+    # handle 块互斥且按书写顺序匹配。
+    # 注意：不能把 try_files {path} /index.html 放在顶层——它会把 /api/* 等
+    # 未命中磁盘的请求也改写成 index.html（表现为接口返回 HTML、客户端 JSON 解析失败）。
     handle /api/* {
         reverse_proxy localhost:18080
     }
-    
+
+    # 客户端 WebSocket（/ws）
     handle /ws* {
         reverse_proxy localhost:18080
     }
 
-    file_server
+    # 健康检查 / 监控直接透到 server
+    handle /ready {
+        reverse_proxy localhost:18080
+    }
+    handle /metrics {
+        reverse_proxy localhost:18080
+    }
+
+    # LiveKit WebSocket 信令：对外 /livekit，内部去掉前缀转给 livekit:7880。
+    # 服务端返回的 ws_url 为 ws(s)://<当前 Host>/livekit（LIVEKIT_WS_URL=/livekit）。
+    handle /livekit/* {
+        uri strip_prefix /livekit
+        reverse_proxy livekit:7880
+    }
+
+    # 其余全部走静态资源，前端路由回退到 index.html
+    handle {
+        root * /srv/web
+        try_files {path} /index.html
+        file_server
+    }
 }

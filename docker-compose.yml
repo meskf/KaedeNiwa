@@ -1,17 +1,75 @@
 services:
   kaede:
     build: .
-    container_name: kaede-app
+    image: kaede:latest
+    container_name: kaede
     ports:
-      - "8080:8080"
+      - "${KAEDE_HTTP_PORT:-8080}:8080"
+    environment:
+      # Caddy 与 server 在同一容器内，server 只信任回环来源的 XFF。
+      KAEDE_TRUSTED_PROXIES: "127.0.0.1/32"
+      # Android / 桌面 WebView 跨源访问需要；token 走 Authorization，不依赖 Cookie。
+      KAEDE_CORS_ORIGINS: "${KAEDE_CORS_ORIGINS:-*}"
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY:-devkey}"
+      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET:-12345678901234567890123456789012}"
+      # 以 /livekit 形式对外：服务端按请求 Host 自动推导 ws(s)://<host>/livekit。
+      LIVEKIT_WS_URL: "/livekit"
+      KAEDE_LIVEKIT_HTTP_URL: "http://livekit:7880"
     volumes:
       - kaede-data:/data
+    depends_on:
+      - livekit
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:18080/ready || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  livekit:
+    image: livekit/livekit-server:${LIVEKIT_VERSION:-v1.13.9}
+    container_name: kaede-livekit
+    # LiveKit 只有在没有 --config 文件时才走环境变量配置；带 --config 时 LIVEKIT_KEYS 会被忽略
+    # （表现为 "one of key-file or keys must be provided" 无限重启）。因此这里用官方的
+    # LIVEKIT_CONFIG（等价于 --config-body）把完整配置连同密钥一起通过环境变量传入。
     environment:
-      - LIVEKIT_API_KEY=devkey
-      - LIVEKIT_API_SECRET=secret
-      - LIVEKIT_WS_URL=ws://127.0.0.1:7880
+      LIVEKIT_CONFIG: |
+        port: 7880
+        rtc:
+          # node_ip 留空 = 自动：默认用 STUN 探测公网 IP。
+          # 纯局域网部署时用 .env 里的 LIVEKIT_NODE_IP 指定服务器 LAN IP，
+          # 并把 LIVEKIT_USE_EXTERNAL_IP=false（否则 STUN 结果优先）。
+          node_ip:
+          use_external_ip: true
+          tcp_port: 7881
+          udp_port: 7882
+        logging:
+          level: info
+          json: false
+        room:
+          auto_create: true
+        keys:
+          ${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-12345678901234567890123456789012}
+        webhook:
+          api_key: ${LIVEKIT_API_KEY:-devkey}
+          urls:
+            - http://kaede:18080/api/livekit/webhook
+      LIVEKIT_RTC_USE_EXTERNAL_IP: "${LIVEKIT_USE_EXTERNAL_IP:-true}"
+      # 入口脚本读取：有值则覆盖 rtc.node_ip 并关闭 STUN（纯局域网部署）。
+      LIVEKIT_NODE_IP: "${LIVEKIT_NODE_IP:-}"
+    # node_ip 只能写在配置里（环境变量不生效），由入口脚本按 LIVEKIT_NODE_IP 覆盖。
+    entrypoint: ["/bin/sh", "/etc/livekit-entrypoint.sh"]
+    volumes:
+      - ./deploy/livekit-entrypoint.sh:/etc/livekit-entrypoint.sh:ro
+    ports:
+      # HTTP API（twirp）：只绑定回环，便于本机排障 / 部署验收查询房间；
+      # 公网客户端只通过 Caddy 的 /livekit 走信令，不需要这个端口。
+      - "127.0.0.1:7880:7880"
+      # 媒体端口：TCP 回落 + UDP。浏览器所在网络需能访问这些端口。
+      - "${LIVEKIT_TCP_PORT:-7881}:7881"
+      - "${LIVEKIT_UDP_PORT:-7882}:7882/udp"
     restart: unless-stopped
 
 volumes:
   kaede-data:
-

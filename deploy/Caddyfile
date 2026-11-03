@@ -1,21 +1,6 @@
-# 如果配置了 KAEDE_DOMAIN，Caddy 会自动申请 SSL 证书并开启 443
-{$KAEDE_DOMAIN:localhost} {
-    root * /srv/kaede
-    try_files {path} /index.html
-
-    handle /api/* {
-        reverse_proxy kaede:18080
-    }
-
-    handle /ws* {
-        reverse_proxy kaede:18080
-    }
-
-    # LiveKit WebSocket 信令代理
-    handle /livekit/* {
-        uri strip_prefix /livekit
-        reverse_proxy livekit:7880
-    }
-
-    file_server
+# 生产入口：只做 TLS 终结，全部转发给 kaede 一体化容器（内置 Caddy 8080 负责
+# 前端静态资源、/api、/ws 和 /livekit -> LiveKit 的反代）。
+{$KAEDE_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy kaede:8080
 }

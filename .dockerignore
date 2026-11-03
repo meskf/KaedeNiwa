@@ -4,6 +4,11 @@ target/
 dist/
 **/dist/
 node_modules/
+**/node_modules/
+apps/web/android/
+apps/desktop/
+apps/web/e2e-multi/
+release/
 _webrtc/
 tools/
 _archive/
