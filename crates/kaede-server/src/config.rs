@@ -75,9 +75,18 @@ impl Config {
         if let Ok(raw) = env::var("KAEDE_TRUSTED_PROXIES") {
             crate::http::validate_trusted_proxies(&raw).map_err(|e| anyhow::anyhow!(e))?;
         }
-        if !self.livekit_ws_url.starts_with("ws://") && !self.livekit_ws_url.starts_with("wss://") {
+        // LIVEKIT_WS_URL 允许三种形态：
+        // - ws:// / wss:// 绝对地址（客户端直连 LiveKit）；
+        // - `/livekit` 等同源反代路径（按请求 Host + X-Forwarded-Proto 推导公开地址）；
+        // - `auto`（同主机，端口取 KAEDE_LIVEKIT_PUBLIC_PORT，默认 7880）。
+        let lk = self.livekit_ws_url.trim();
+        let lk_ok = lk.starts_with("ws://")
+            || lk.starts_with("wss://")
+            || lk.starts_with('/')
+            || lk.eq_ignore_ascii_case("auto");
+        if !lk_ok {
             bail!(
-                "LIVEKIT_WS_URL must start with ws:// or wss:// (got {})",
+                "LIVEKIT_WS_URL must be ws://, wss://, /path or auto (got {})",
                 self.livekit_ws_url
             );
         }

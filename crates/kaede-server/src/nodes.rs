@@ -138,7 +138,17 @@ async fn update_node(
     Path(id): Path<String>,
     Json(req): Json<UpdateNodeReq>,
 ) -> Result<StatusCode, ApiError> {
-    let _uid = authenticate(&state, &headers).await?;
+    let uid = authenticate(&state, &headers).await?;
+    // 与 create 对齐：改名/移动属于写操作，必须 op3+。
+    // 旧实现只 authenticate，任意登录用户都能改任意频道名。
+    check_write_perm(&state, uid.as_str()).await?;
+    let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound(format!("node: {}", id)));
+    }
     if let Some(name) = req.name {
         sqlx::query("UPDATE nodes SET name = ? WHERE id = ?")
             .bind(name)
@@ -161,7 +171,17 @@ async fn delete_node(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let _uid = authenticate(&state, &headers).await?;
+    let uid = authenticate(&state, &headers).await?;
+    // 与 create 对齐：删除属于写操作，必须 op3+。
+    // 旧实现只 authenticate，任意登录用户都能删任意频道（含私密频道）。
+    check_write_perm(&state, uid.as_str()).await?;
+    let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound(format!("node: {}", id)));
+    }
     sqlx::query("DELETE FROM nodes WHERE id = ?")
         .bind(&id)
         .execute(&state.pool)

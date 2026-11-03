@@ -486,6 +486,10 @@ async fn deliver_pending(state: &AppState, uid: &UserId, tx: &mpsc::Sender<Serve
                 channel_id: channel_id.unwrap_or_default(),
                 member: UserId::new(String::from_utf8_lossy(&payload).to_string()),
             },
+            // 频道 group 被接管：旧成员必须丢弃本地 group，重新以新成员加入。
+            "channel_removed" => ServerMessage::ChannelRemoved {
+                channel_id: channel_id.unwrap_or_default(),
+            },
             "channel_member_joined" => {
                 use serde::Deserialize;
                 #[derive(Deserialize)]

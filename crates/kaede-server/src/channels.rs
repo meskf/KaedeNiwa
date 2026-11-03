@@ -36,6 +36,12 @@ pub fn router(state: AppState) -> Router {
             "/api/channels/{id}/leave",
             axum::routing::delete(leave_channel),
         )
+        // 频道 group 权威全员离线时的接管：清掉旧成员并让请求者重建群。
+        // 被清掉的成员下次连接会收到 channel_removed，丢弃陈旧 group 后重新加入新群。
+        .route(
+            "/api/channels/{id}/takeover",
+            axum::routing::post(takeover_channel),
+        )
         // 频道请求只有名称/密码等小字段；限制 body 防止未认证大包缓冲。
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
@@ -662,6 +668,98 @@ async fn join_channel(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 频道 group 权威全员离线时的「接管」。
+///
+/// 背景：频道 group 的成员列表由 channel_members 维护，但密钥只存在于在线
+/// 成员的本地 MLS 状态。当所有其他成员都离线时，新加入者永远拿不到 Welcome。
+/// 旧实现让客户端直接自建群，结果与旧群分裂；旧成员回来后又因本地存在
+/// 多人 group 而跳过 Welcome，永久互相解不开。
+///
+/// 接管语义：确认其他成员全部离线后，把成员表收缩为请求者自己，并给被移除
+/// 的成员排入 `channel_removed` 信封。他们下次连接时会丢弃陈旧 group，
+/// 重新以新成员身份加入请求者建立的新群。
+async fn takeover_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let uid = authenticate(&state, &headers).await?;
+
+    let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound("channel".into()));
+    }
+
+    // 只有频道成员才能接管（私密频道必须先通过密码 join）。
+    let member: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM channel_members WHERE channel_id = ? AND login_id = ?")
+            .bind(&id)
+            .bind(uid.as_str())
+            .fetch_optional(&state.pool)
+            .await?;
+    if member.is_none() {
+        return Err(ApiError::Unauthorized);
+    }
+
+    let others: Vec<(String,)> = sqlx::query_as(
+        "SELECT login_id FROM channel_members WHERE channel_id = ? AND login_id != ?",
+    )
+    .bind(&id)
+    .bind(uid.as_str())
+    .fetch_all(&state.pool)
+    .await?;
+
+    // 还有任何其他成员在线 → 应由他们发 Welcome，不允许接管（避免踢掉活跃成员）。
+    let online = state.peer_uids();
+    let has_online_other = others
+        .iter()
+        .any(|(m,)| online.iter().any(|u| u.as_str() == m));
+    if has_online_other {
+        return Err(ApiError::Conflict("channel has online members".into()));
+    }
+
+    // 先写入 removed 信封；失败就放弃接管，避免留下“server 已移除但客户端
+    // 仍保留旧 group”的中间态。
+    for (other,) in &others {
+        crate::db::enqueue_envelope(
+            &state.pool,
+            other,
+            uid.as_str(),
+            "channel_removed",
+            Some(&id),
+            &[],
+        )
+        .await
+        .map_err(|e| ApiError::Internal(format!("enqueue channel_removed: {e}")))?;
+    }
+
+    sqlx::query("DELETE FROM channel_members WHERE channel_id = ? AND login_id != ?")
+        .bind(&id)
+        .bind(uid.as_str())
+        .execute(&state.pool)
+        .await?;
+
+    // 竞态兜底：检查在线与删除之间有人刚连上，直接通知它丢弃旧 group。
+    for (other,) in &others {
+        state.send_to(
+            &UserId::new(other.clone()),
+            ServerMessage::ChannelRemoved {
+                channel_id: id.clone(),
+            },
+        );
+    }
+
+    tracing::info!(
+        "channel takeover: {} now sole member of {} (removed {})",
+        uid.as_str(),
+        id,
+        others.len()
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
 /// 把“加入申请”按 `joined_at` 顺序投给第一个在线的成员（频道 group 权威）。
 ///
 /// 权威成员的客户端负责 `add_member` → 发 Welcome → 广播 Commit。

@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use kaede_protocol::{ServerMessage, UserId};
+use kaede_protocol::{ErrorCode, ServerMessage, UserId};
 
 use crate::db::{self, base64_url};
 use crate::error::ApiError;
@@ -146,7 +146,11 @@ async fn register(
     // 注册是未认证入口：按来源 IP 限流，防批量注册灌水/占满连接池。
     // 反向代理部署时 peer 是代理地址，优先取代理透传的客户端 IP。
     let ip = client_ip(&headers, peer);
-    if !state.check_rate_key(&format!("ip:{ip}:register"), 0.2, 10.0) {
+    // [qa-p0] dev-mode + KAEDE_TEST_MODE=1 时绕过注册 IP 限流，仅测试用。
+    // 生产构建下 cfg!(dev-mode) 恒 false，零影响。
+    let register_rate_bypassed =
+        cfg!(feature = "dev-mode") && std::env::var("KAEDE_TEST_MODE").as_deref() == Ok("1");
+    if !register_rate_bypassed && !state.check_rate_key(&format!("ip:{ip}:register"), 0.2, 10.0) {
         state.metrics.rate_limited();
         return Err(ApiError::BadRequest("registration rate limited".into()));
     }
@@ -482,7 +486,10 @@ async fn publish_keypackages(
 
     // 限流：单次最多 100 包 × (CBOR 解析 + DB INSERT)，非好友批量可耗尽 CPU
     // 与 SQLite 写锁。0.2/s burst 3 = 突发 3 次，稳态 5 秒一次。
-    if !state.check_rate_scoped(&uid, "publish_kp", 0.2, 3.0) {
+    // [qa-p0] dev-mode + KAEDE_TEST_MODE=1 绕过 publish_kp 限流。
+    let publish_kp_rate_bypassed =
+        cfg!(feature = "dev-mode") && std::env::var("KAEDE_TEST_MODE").as_deref() == Ok("1");
+    if !publish_kp_rate_bypassed && !state.check_rate_scoped(&uid, "publish_kp", 0.2, 3.0) {
         state.metrics.rate_limited();
         return Err(ApiError::TooManyRequests(
             "keypackage publish rate limited".into(),
@@ -591,11 +598,14 @@ async fn fetch_keypackage(
         ));
     }
 
-    // 防抽干第一层（补充）：单个请求者对同一 target 的消费速率上限
-    // （约 1 次 / 10s，突发 2）。即使攻击者换账号，单账号也无法快速清空队列。
+    // 防抽干第一层（补充）：单个请求者对同一 target 的消费速率上限。
+    // 真正的防抽干兜底是下面的 per-target 全局预算（0.1/s，跨账号），
+    // 因此这里的 pair 预算只需拦住"单账号高频重试同一 target"。
+    // 0.5/s burst 4 能覆盖频道建群时"拉 KP → 提交失败 → 立刻重试"的正常路径；
+    // 过紧（0.1/s burst 2）会让正常加群重试连续 429，并在 UI 上弹出 Add failed。
     if !cfg!(feature = "dev-mode") {
         let pair_scope = format!("kp_pair:{}:{}", uid.as_str(), login_id);
-        if !state.check_rate_key(&pair_scope, 0.1, 2.0) {
+        if !state.check_rate_key(&pair_scope, 0.5, 4.0) {
             state.metrics.rate_limited();
             return Err(ApiError::TooManyRequests(
                 "keypackage pair rate limited".into(),
@@ -616,9 +626,13 @@ async fn fetch_keypackage(
 
     if !is_friend {
         // 防抽干第二层：per-target 全局限流（防多账号轮换）。
+        // 0.1/s burst 2 会让"正常加群"（同一 target 在短时间内被拉 KP 两次）
+        // 之后的所有重试都撞 429（下面还有保留量兜底，队列不会被抽干到 0），
+        // 因此放宽到 0.5/s burst 4：跨账号抽干速率仍被硬性限制，
+        // 但正常建群/重试不再产生 429 与 "Add failed"。
         if !cfg!(feature = "dev-mode") {
             let target_scope = format!("kp_target:{}", login_id);
-            if !state.check_rate_key(&target_scope, 0.1, 2.0) {
+            if !state.check_rate_key(&target_scope, 0.5, 4.0) {
                 state.metrics.rate_limited();
                 tracing::warn!(
                     "keypackage fetch throttled: target={} requester={}",
@@ -714,6 +728,18 @@ async fn issue_session(
         .await
     {
         tracing::warn!("kick old sessions failed: {}", e);
+    }
+
+    // 仅删 session 不会关掉旧 WS：旧连接会变成“僵尸”（读不到消息，
+    // 但 UI 仍显示已登录）。必须在发新 token 时主动断开该账号的旧连接。
+    // 此时新登录的 WS 还没建立，peer_map 里若还有该 uid，必然属于旧会话。
+    let uid = UserId::new(login_id.to_string());
+    if let Some(peer) = state.take_peer(&uid) {
+        let _ = peer.tx.try_send(ServerMessage::Error {
+            code: ErrorCode::Unauthenticated,
+            message: "session superseded by a new login".into(),
+        });
+        tracing::info!("[login] disconnected old session for {}", login_id);
     }
     Ok(token)
 }
@@ -949,7 +975,10 @@ async fn post_message(
     );
 
     // C11: per-uid 限流，防 DB flood
-    if !state.check_rate_scoped(&uid, "messages", 10.0, 30.0) {
+    // [qa-p0] dev-mode + KAEDE_TEST_MODE=1 绕过 messages 限流。
+    let messages_rate_bypassed =
+        cfg!(feature = "dev-mode") && std::env::var("KAEDE_TEST_MODE").as_deref() == Ok("1");
+    if !messages_rate_bypassed && !state.check_rate_scoped(&uid, "messages", 10.0, 30.0) {
         state.metrics.rate_limited();
         return Err(ApiError::BadRequest("message rate limited".into()));
     }

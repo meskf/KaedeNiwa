@@ -95,6 +95,7 @@ pub struct UserRow {
     pub login_id: String,
     pub nickname: String,
     pub created_at: i64,
+    pub op: String,
     pub banned: bool,
     pub banned_at: Option<i64>,
     pub banned_reason: Option<String>,
@@ -108,10 +109,11 @@ pub async fn list_users(
     let query = q.q.chars().take(64).collect::<String>();
     let pattern = format!("%{}%", query);
     let rows = sqlx::query(
-        "SELECT login_id, nickname, created_at, banned, banned_at, banned_reason \
-         FROM accounts \
-         WHERE (? = '' OR login_id LIKE ? OR nickname LIKE ?) \
-         ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        "SELECT a.login_id, a.nickname, a.created_at, a.banned, a.banned_at, a.banned_reason, \
+                COALESCE(m.op, 'op2') AS op \
+         FROM accounts a LEFT JOIN members m ON m.login_id = a.login_id \
+         WHERE (? = '' OR a.login_id LIKE ? OR a.nickname LIKE ?) \
+         ORDER BY a.created_at DESC LIMIT ? OFFSET ?",
     )
     .bind(&query)
     .bind(&pattern)
@@ -126,6 +128,7 @@ pub async fn list_users(
             login_id: r.get("login_id"),
             nickname: r.get("nickname"),
             created_at: r.get("created_at"),
+            op: r.try_get("op").unwrap_or_else(|_| "op2".to_string()),
             banned: r
                 .try_get::<i64, _>("banned")
                 .map(|v| v != 0)

@@ -51,6 +51,71 @@ struct TokenResp {
     e2ee_seed: String,
 }
 
+/// 解析返回给浏览器的 LiveKit WS URL。
+///
+/// `LIVEKIT_WS_URL` 支持三种形态：
+/// - 绝对地址（`ws://host:7880` / `wss://host/livekit`）：原样返回；
+/// - 以 `/` 开头（如 `/livekit`）：反向代理同源路径，按 `X-Forwarded-*` 推导
+///   公开 scheme/host，得到 `wss://domain/livekit`；
+/// - `auto`：同主机直连 LiveKit，端口取 `KAEDE_LIVEKIT_PUBLIC_PORT`（默认 7880）。
+///
+/// 这样 Docker 一体化部署在任意域名/IP 下都能“开箱即用”，无需手填公开地址。
+fn resolve_ws_url(configured: &str, headers: &HeaderMap) -> String {
+    let trimmed = configured.trim();
+    if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
+        return trimmed.to_string();
+    }
+
+    let forwarded_proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim())
+        .unwrap_or("http");
+    let ws_scheme = if forwarded_proto.eq_ignore_ascii_case("https") {
+        "wss"
+    } else {
+        "ws"
+    };
+    let forwarded_host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim())
+        .filter(|s| !s.is_empty())
+        .or_else(|| headers.get("host").and_then(|v| v.to_str().ok()))
+        .unwrap_or("localhost");
+
+    if trimmed.eq_ignore_ascii_case("auto") {
+        let port = std::env::var("KAEDE_LIVEKIT_PUBLIC_PORT")
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+            .unwrap_or(7880);
+        let host = host_name(forwarded_host);
+        return format!("{ws_scheme}://{host}:{port}");
+    }
+
+    let path = if trimmed.is_empty() {
+        "/livekit"
+    } else {
+        trimmed
+    };
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    format!("{ws_scheme}://{forwarded_host}{path}")
+}
+
+/// 去掉 host 中的端口，保留 IPv6 的方括号形式。
+fn host_name(host: &str) -> String {
+    if let Some(rest) = host.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            return format!("[{}]", &rest[..end]);
+        }
+    }
+    host.split(':').next().unwrap_or(host).to_string()
+}
+
 async fn issue_token(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -69,7 +134,7 @@ async fn issue_token(
     check_channel_access(&state, uid.as_str(), &req.channel_id).await?;
     let api_key = state.cfg.livekit_api_key.clone();
     let api_secret = state.cfg.livekit_api_secret.clone();
-    let ws_url = state.cfg.livekit_ws_url.clone();
+    let ws_url = resolve_ws_url(&state.cfg.livekit_ws_url, &headers);
     if api_key.is_empty() || api_secret.is_empty() {
         return Err(ApiError::Internal(
             "LIVEKIT_API_KEY/LIVEKIT_API_SECRET must be set (no default for security)".into(),
@@ -393,9 +458,18 @@ fn verify_webhook_signature(
             "LIVEKIT_API_KEY/LIVEKIT_API_SECRET not configured".into(),
         ));
     }
-    let token = auth_header
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or(ApiError::Unauthorized)?;
+    let raw = auth_header.ok_or(ApiError::Unauthorized)?.trim();
+    // LiveKit 1.13+ 直接把裸 JWT 放进 Authorization（不带 "Bearer " scheme），
+    // 旧版本带 scheme。两种都必须接受：否则 webhook 全部 401，
+    // participant_left / room_finished 无法回收媒体会话 seed。
+    let token = raw
+        .strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))
+        .map(str::trim)
+        .unwrap_or(raw);
+    if token.is_empty() {
+        return Err(ApiError::Unauthorized);
+    }
     let mut parts = token.split('.');
     let (header_b64, claims_b64, sig_b64) = match (parts.next(), parts.next(), parts.next()) {
         (Some(h), Some(c), Some(s)) if parts.next().is_none() => (h, c, s),
@@ -648,6 +722,18 @@ mod webhook_tests {
     }
 
     #[test]
+    fn accepts_raw_jwt_without_bearer_scheme() {
+        // LiveKit 1.13+ 的 webhook Authorization 只有裸 JWT。
+        let body = br#"{"event":"room_finished"}"#;
+        let token = make_token("secret", body, "key");
+        assert!(verify_webhook_signature("key", "secret", Some(&token), body).is_ok());
+        assert!(
+            verify_webhook_signature("key", "secret", Some(&format!("bearer {token}")), body)
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn rejects_missing_or_malformed_auth() {
         assert!(verify_webhook_signature("key", "secret", None, b"{}").is_err());
         assert!(verify_webhook_signature("key", "secret", Some("Bearer a.b"), b"{}").is_err());
@@ -707,5 +793,51 @@ mod webhook_tests {
     #[test]
     fn room_name_prefix_is_stable() {
         assert_eq!(room_name_for("general"), "kaede-general");
+    }
+
+    // ---- 公开 LiveKit WS URL 推导（开箱即用部署） ----
+
+    fn headers_with(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn absolute_ws_url_is_returned_as_is() {
+        let h = headers_with(&[("host", "example.com")]);
+        assert_eq!(
+            resolve_ws_url("wss://lk.example.com", &h),
+            "wss://lk.example.com"
+        );
+        assert_eq!(
+            resolve_ws_url("ws://127.0.0.1:7880", &h),
+            "ws://127.0.0.1:7880"
+        );
+    }
+
+    #[test]
+    fn path_url_follows_forwarded_proto_and_host() {
+        let h = headers_with(&[
+            ("host", "kaede.internal:18080"),
+            ("x-forwarded-proto", "https"),
+            ("x-forwarded-host", "kaede.example.com"),
+        ]);
+        assert_eq!(
+            resolve_ws_url("/livekit", &h),
+            "wss://kaede.example.com/livekit"
+        );
+        // 空值按同源 /livekit 处理
+        assert_eq!(resolve_ws_url("", &h), "wss://kaede.example.com/livekit");
+    }
+
+    #[test]
+    fn auto_mode_uses_livekit_port_and_keeps_ipv6_brackets() {
+        let h = headers_with(&[("host", "192.168.1.5:18080")]);
+        assert_eq!(resolve_ws_url("auto", &h), "ws://192.168.1.5:7880");
+        let h6 = headers_with(&[("host", "[::1]:18080")]);
+        assert_eq!(resolve_ws_url("auto", &h6), "ws://[::1]:7880");
     }
 }
