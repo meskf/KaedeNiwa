@@ -1,6 +1,6 @@
 # KaedeNiwa HANDOFF
 
-最后更新：2026-11-02
+最后更新：2026-11-03
 面向：接手的工程师（人或 AI）
 
 > 完整历史交接记录（1900+ 行，30+ 个 PART，含大量已解决的踩坑细节）已归档至
@@ -94,25 +94,69 @@ MLS 密文只能解密一次（ratchet 前进后不可重放）。`inbound.rs` �
 前端 `MainView.tsx` 按这个形状解构。新增事件类型时前端需要同步加分支，
 否则事件被静默忽略。
 
+## 2026-11-03 本轮改动（务必了解）
+
+### 发送/落库
+- wasm `send_message` / `sendMessageWithAttachments` 现在返回服务端权威
+  `{"id":..,"ts":..}`，前端不再插入无 id 的乐观消息。
+  `chat.ts` 的 `setMessages` 是**原子合并**（在 zustand set 回调里读当前列表），
+  不要改回“外部先读 existing 再整体替换”——会和发送并发丢消息。
+
+### 频道群接管
+- 新增 `POST /api/channels/{id}/takeover`：仅当该频道**其他成员全部离线**时允许；
+  服务端清空其他成员，并给每人排 `channel_removed` 信封。
+- 客户端 join 遇到 409 `no online authority`：先等 8s Welcome；超时才请求 takeover。
+  超时且频道成员数 >1 时也走 takeover（服务端在线成员检查会兜底）。
+- 被移除成员的客户端收到 `ChannelRemoved` → `ChannelDeleted` 事件；
+  MainView 会丢弃旧 group，并在仍停留在该频道时自动重新加入。
+- **不要**在“有在线权威”时自建群，否则会永久分裂。
+
+### 会话/登出
+- `signOut()`（apps/web/src/wasm/client.ts）= forceDisconnect + POST /api/logout + 清 auth。
+- 服务端 login 发新 token 时会主动断开该账号旧 WS（否则旧页面变僵尸）。
+- 客户端处理 `ServerError` 的 snake_case 码（unauthenticated/kicked/
+  unsupported_version）立即回登录页；重连耗尽也会 signOut。
+
+### 心跳 / 断线语义
+- wasm 心跳：10s ping / 20s timeout / 2.5s 检查。旧实现 20s tick + 30s 超时，
+  实际检测最坏 ~60s。
+- **传输层必须区分主动关闭与意外断开**：`WebSocketTransport` 带 `closing` 标记，
+  用户主动 `close()` 才返回 `ClientError::Closed`；服务端崩溃、网络断开、
+  `onerror`、远端正常关闭都返回 `Transport` 错误，让 event loop emit
+  `Disconnected`。否则 event loop 会把 `Closed` 当作正常退出、置 `shutdown`，
+  心跳随之停止，客户端永久“看似在线”但消息发不出（L7 曾因此失败）。
+  native 与 wasm 两套 transport 都要保持该语义。
+
+### 测试基建
+- `tools/qa/`：L0–L7；QA 独立库 `tools/qa/.run/qa.db`，`-Force` 重建。
+- `start-env.ps1` 注入 `KAEDE_TEST_MODE=1`、`KAEDE_DB`、admin（:18081）。
+- e2e-multi 每个场景用 `setupIsolatedChannel` 自建频道；L6 默认串行。
+  跨场景并行会 churn 主群/频道群权威，属测试 artifact。
+- `run-all.ps1` 会清除继承的 `CI`；否则 Playwright webServer 强制
+  `reuseExistingServer=false`，与 QA env 已占用端口冲突。
+
+## 测试基线（2026-11-03）
+
+    cargo ctall          全绿（0 failed / 8 ignored）
+    cargo ctnative       112 passed / 0 failed
+    npx playwright test  14 passed / 0 failed（e2e-standard）
+    e2e-multi            10 spec / 21 passed / 1 skipped 串行全绿
+    L7 chaos-restart     4 clients，重启 16s，4/4 重连，交叉可见 PASS，0 pageError
+    L5 soak（8 clients, mixed）  18/18 共享、66/66 消息，阈值全过
+    cargo cc             0 warning
+
 ## 当前 Open Issue
 
-**屏幕共享视频轨接收端渲染**（HANDOFF 归档 PART 34 有完整调试记录）
+**主群 host 生命周期**（P0 架构级）
 
-- 现象：发送端正常，接收端收到音频轨并解密播放，但收不到视频轨。
-- 已排除：局域网、防火墙、WebRTC 穿透、E2EE（`?noe2ee=1` 也复现）、
-  分辨率、Simulcast。**电脑本地双开也复现。**
-- 调试痕迹：`TrackPublished` / `TrackSubscribed` / `TrackSubscriptionFailed`
-  监听器都加过，强制 `setSubscribed(true)` 无效。SDP 里接收端 Offer 有时
-  甚至没有 `m=video` 行。
-- 下一步：独立最小 WebRTC 页（`getDisplayMedia` + `RTCPeerConnection`，不依赖项目代码）
-  验证原生链路；抓 LiveKit `--dev` 模式 SFU 日志确认是否收到推流端视频数据。
+reaction / media 信令走主群 MLS，而主群仍以“第一个用户 = host”为中心。
+host 离线后新用户可能各自建主群，跨主群 reaction/media 信令不可解。
+频道消息走独立频道群，已有 takeover 兜底，不受此影响。
+下一步：主群也需要 generation/takeover，或改为每频道信令。
 
-## 测试基线（2026-11-02）
-
-    cargo ctall          217 passed / 0 failed / 8 ignored
-    cargo ctnative       112 passed / 0 failed
-    npx playwright test  13 passed / 0 failed（7 spec）
-    cargo cc             4 个既有 warning，非本轮引入
+（屏幕共享视频轨已在 2026-11-03 修复：LiveKit JS 2.23 在 screen_share 上同时
+启用 simulcast + screenShareSimulcastLayers 会静默丢弃 video track；改为单层编码后
+L5 media soak 18/18 共享成功。）
 
 ## 工作方式建议
 
@@ -125,3 +169,26 @@ MLS 密文只能解密一次（ratchet 前进后不可重放）。`inbound.rs` �
 - 破坏性操作（删除、移动、协议变更）先做可逆版本（移到 `_archive/`、
   加 `serde(default)`），确认无副作用后再考虑彻底清理。
 
+
+
+## 打包 / 发布（2026-11-03，版本 0.1.2）
+
+产物与校验在 `release/`：`README-0.1.2.md`、`SHA256SUMS.txt`。
+- Windows 独立包：`tools/package-server.ps1`（依赖 `target/release/kaede-server.exe`、
+  `tools/livekit/livekit-server.exe`、`apps/web/dist`、`deploy/standalone/*`）。
+  打完后解压到干净目录、`start-kaede.ps1` 启动、跑 `deploy-smoke.spec.ts` 复核。
+- Docker：仓库根 `docker-compose.yml`（本机/局域网试跑，8080 无 TLS）与
+  `deploy/docker-compose.yml`（域名 + Caddy 自动证书的生产编排）。
+- 桌面：`apps/desktop` 下 `npm run build:client`（electron-builder 打 NSIS + portable，
+  把 `../web/dist` 作为 extraResources 打进 `resources/web`）。
+- Android：`apps/web` 下 `npx cap sync android` -> `android/gradlew.bat assembleRelease`
+  -> `zipalign -p -f 4` -> `apksigner sign --ks-key-alias kaede`
+  （keystore `release/keys/kaede-release.jks`，密码 `kaede-release`）。
+  版本号在 `android/app/build.gradle` 的 versionCode/versionName，需与 workspace 版本同步。
+
+改前端后三端都要重打：dist 变了 -> APK 与桌面包里的前端就过期了（对比 mtime 即可发现）。
+`deploy-smoke.spec.ts` 要求服务端是“全新实例”（首个注册账号才是 op5 服主），
+每轮验收前先清空数据（Docker: `docker compose down -v`；独立包: 清 `data/`）。
+
+浏览器 + `http://<局域网IP>` 下 Web Crypto 不可用（非安全上下文），前端会显示提示页；
+跨机浏览器访问必须 HTTPS。桌面端（本地 127.0.0.1 源）与 Android（https://localhost 源）不受影响。
