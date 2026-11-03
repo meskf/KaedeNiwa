@@ -1,10 +1,10 @@
 # KaedeNiwa 状态快照
 
-最后更新：2026-11-03
+最后更新：2026-11-04
 
 ## 当前版本
 
-- 协议 v8（MIN_SUPPORTED_VERSION = 7），workspace 版本 0.1.2
+- 协议 v8（MIN_SUPPORTED_VERSION = 7），workspace 版本 0.1.3
 - 7 个 crate 在 workspace（kaede-denoise 未纳入）
 - 前端：apps/web（React 19 + Vite 6 + Tailwind 4）+ apps/desktop（Electron）
 
@@ -96,22 +96,30 @@ QA 使用独立库 `tools/qa/.run/qa.db`，`-Force` 会重建；不污染 `kaede
 语音/屏幕共享信令跨主群不一致。频道消息本身不受影响（走独立频道群）。
 
 
-## 打包与产物验收（2026-11-03，版本 0.1.2）
+## 打包与产物验收（2026-11-04，版本 0.1.3）
 
 ### 产物
-    release/KaedeNiwa-server-0.1.2.zip            Windows 独立服务端（含 LiveKit + 前端）
-    release/desktop/KaedeNiwa-0.1.2-setup.exe     安装版
-    release/desktop/KaedeNiwa-0.1.2-portable.exe  绿色版
-    release/apk/KaedeNiwa-android-0.1.2.apk       已签名 release APK（versionCode 2 / versionName 0.1.2）
-    release/SHA256SUMS.txt / README-0.1.2.md      校验和与开箱即用说明
+    release/KaedeNiwa-server-0.1.3.zip            Windows 独立服务端（含 LiveKit + 前端）
+    release/desktop/KaedeNiwa-0.1.3-setup.exe     安装版
+    release/desktop/KaedeNiwa-0.1.3-portable.exe  绿色版
+    release/apk/KaedeNiwa-android-0.1.3.apk       已签名 release APK（versionCode 3 / versionName 0.1.3）
+    release/SHA256SUMS.txt / README-0.1.3.md      校验和与开箱即用说明
     docker compose up -d --build                 一体化镜像（内置 Caddy + 服务端 + LiveKit）
 
-### 实测（全部用 0.1.2 产物重跑）
-    Docker 一体化镜像             部署冒烟全绿（文本/附件/双人语音 E2EE/LiveKit 2 人），
-                                  LiveKit webhook 全部投递成功，无重试
-    Windows 独立包（干净目录解压）  同一套部署冒烟全绿
-    桌面客户端（新构建）           真实登录 + 频道 + 发消息上屏 PASS
-    Android release APK           安装启动正常（与 0.1.1 相同的 dist，仅版本号变化）
+发布：https://github.com/meskf/KaedeNiwa/releases/tag/v0.1.3（0.1.2 为上一版）。
+
+### 实测（2026-11-04）
+    从 GitHub Release 下载的产物（SHA-256 与发布校验和一致）
+    Windows 独立包（全新目录 + 全新 DB） 部署冒烟全绿（文本/附件/双人语音 E2EE/LiveKit 2 人）
+    桌面绿色版（清空 %APPDATA%\kaede-desktop）  默认地址即 18080，注册/登录/发消息 PASS
+    Android release APK（0.1.3）        签名链 / 证书指纹 / versionCode 3 校验通过
+    Docker 一体化镜像                   0.1.2 时已全绿；0.1.3 仅版本号与桌面默认地址变化
+
+### 0.1.3 修掉的问题
+- 桌面客户端全新安装时，页面由 Electron 本地 http server 托管（不是 file://），
+  `resolveDefaultServerUrl()` 走“其余 → 同源”，默认地址变成 127.0.0.1:<随机端口>，
+  首次注册直接 503 server_not_configured（界面显示 Please log in first）。
+  现在检测 `window.electronAPI` 后固定默认 http://127.0.0.1:18080。
 
 ### 打包期修掉的坑
 - LiveKit 带 --config 文件时 LIVEKIT_KEYS 被忽略 -> 改用 LIVEKIT_CONFIG(config-body)。
@@ -123,5 +131,5 @@ QA 使用独立库 `tools/qa/.run/qa.db`，`-Force` 会重建；不污染 `kaede
 - 运行镜像不能用 caddy:2-alpine（musl）承载 glibc 的 kaede-server -> debian-slim + 拷入
   静态 caddy 二进制。
 - Android/Electron 的 origin 不是服务端，相对 /api/... 会打到本地资源服务器 ->
-  前端统一走 apiUrl()；LoginView 默认地址改为 origin（仅 file:// 与 Capacitor 用 18080）。
-- Android 的 versionName 原为固定 "1.0"，已随版本改为 0.1.2（versionCode 1 -> 2）。
+  前端统一走 apiUrl()；Electron 默认地址固定 18080（见上），Capacitor 同样 18080。
+- Android 的 versionName 原为固定 "1.0"，已随版本改为 0.1.3（versionCode 1 -> 2 -> 3）。

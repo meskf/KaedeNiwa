@@ -171,9 +171,12 @@ L5 media soak 18/18 共享成功。）
 
 
 
-## 打包 / 发布（2026-11-03，版本 0.1.2）
+## 打包 / 发布（2026-11-04，版本 0.1.3）
 
-产物与校验在 `release/`：`README-0.1.2.md`、`SHA256SUMS.txt`。
+发布地址：https://github.com/meskf/KaedeNiwa/releases/tag/v0.1.3（0.1.2 同流程，已发布）。
+产物与校验在 `release/`：`README-0.1.3.md`、`SHA256SUMS.txt`、`notes-0.1.3.md`。
+0.1.3 只修桌面端全新安装的默认服务器地址（`LoginView` 检测 `window.electronAPI`），
+外加版本号统一，服务端功能未变。
 - Windows 独立包：`tools/package-server.ps1`（依赖 `target/release/kaede-server.exe`、
   `tools/livekit/livekit-server.exe`、`apps/web/dist`、`deploy/standalone/*`）。
   打完后解压到干净目录、`start-kaede.ps1` 启动、跑 `deploy-smoke.spec.ts` 复核。
