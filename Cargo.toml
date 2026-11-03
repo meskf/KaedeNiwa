@@ -11,17 +11,17 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.99"
 license      = "PolyForm-Noncommercial-1.0.0"
 [workspace.dependencies]
 # internal
-kaede-protocol = { path = "crates/kaede-protocol", version = "0.1.1" }
-kaede-crypto   = { path = "crates/kaede-crypto", version = "0.1.1" }
-kaede-mls      = { path = "crates/kaede-mls", version = "0.1.1" }
-kaede-storage  = { path = "crates/kaede-storage", version = "0.1.1" }
-kaede-client   = { path = "crates/kaede-client", version = "0.1.1" }
+kaede-protocol = { path = "crates/kaede-protocol", version = "0.1.2" }
+kaede-crypto   = { path = "crates/kaede-crypto", version = "0.1.2" }
+kaede-mls      = { path = "crates/kaede-mls", version = "0.1.2" }
+kaede-storage  = { path = "crates/kaede-storage", version = "0.1.2" }
+kaede-client   = { path = "crates/kaede-client", version = "0.1.2" }
 
 # serialization
 serde    = { version = "1", features = ["derive"] }
