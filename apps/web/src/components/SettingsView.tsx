@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
-import { getClient } from '../wasm/client'
+import { getClient, signOut } from '../wasm/client'
 import { useAuthStore } from '../stores/auth'
 import { useMembersStore } from '../stores/members'
 import { useServerStore } from '../stores/server'
 import { useProfileStore } from '../stores/profile'
 import { useAvatarVersion } from '../lib/avatarCache'
+import { apiUrl } from '../lib/api'
 import { useChatStore } from '../stores/chat'
 import { useI18n } from '../stores/i18n'
 import { useTheme } from '../lib/useTheme'
@@ -12,7 +13,6 @@ import { IconSun, IconMoon } from './icons'
 
 export function SettingsView() {
   const { loginId, serverUrl } = useAuthStore()
-  const logout = useAuthStore(s => s.logout)
   const setActiveView = useChatStore(s => s.setActiveView)
   const { t, lang, setLang } = useI18n()
   const { theme, setTheme } = useTheme()
@@ -179,6 +179,61 @@ export function SettingsView() {
     }
   }
 
+  // ============ 登录设备 / 会话管理 ============
+  type SessionRow = {
+    id: string
+    device_name: string
+    created_at: number
+    last_seen_at: number
+    current: boolean
+  }
+  const [sessions, setSessions] = useState<SessionRow[]>([])
+  const [sessionsBusy, setSessionsBusy] = useState(false)
+  const [sessionsError, setSessionsError] = useState('')
+
+  const loadSessions = async () => {
+    if (!token) return
+    try {
+      const res = await fetch(apiUrl('/api/sessions'), { headers: { Authorization: `Bearer ${token}` } })
+      if (!res.ok) throw new Error(`http ${res.status}`)
+      const data = await res.json().catch(() => ({}))
+      setSessions(Array.isArray(data.sessions) ? data.sessions : [])
+      setSessionsError('')
+    } catch (e: any) {
+      setSessionsError(String(e))
+    }
+  }
+
+  useEffect(() => { loadSessions() }, [token])
+
+  const revokeOtherSessions = async () => {
+    if (sessionsBusy) return
+    setSessionsBusy(true)
+    try {
+      await fetch(apiUrl('/api/sessions/revoke-others'), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      await loadSessions()
+    } finally {
+      setSessionsBusy(false)
+    }
+  }
+
+  const revokeSession = async (sid: string) => {
+    if (sessionsBusy) return
+    setSessionsBusy(true)
+    try {
+      await fetch(apiUrl(`/api/sessions/${sid}`), {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      await loadSessions()
+    } finally {
+      setSessionsBusy(false)
+    }
+  }
+
 
   const changeStageManagerMode = (m: string) => {
     setStageManagerMode(m)
@@ -229,7 +284,7 @@ export function SettingsView() {
             >
               <span className="text-[24px] font-bold text-[var(--text-muted)]">{(me.nickname || me.loginId || '?').slice(0, 1).toUpperCase()}</span>
                 <img
-                  src={`/api/avatars/${me.loginId}?v=${avatarVer}`}
+                  src={apiUrl(`/api/avatars/${me.loginId}?v=${avatarVer}`)}
                   alt="avatar"
                   className="absolute inset-0 w-full h-full object-cover z-10"
                   onError={(e) => { e.currentTarget.style.display = 'none' }}
@@ -312,12 +367,63 @@ export function SettingsView() {
             <span className="text-[13px] text-[var(--text-main)] truncate max-w-[300px]">{serverUrl || '—'}</span>
           </div>
           <button
-            onClick={() => { logout(); setActiveView('chat') }}
+            onClick={() => { void signOut(); setActiveView('chat') }}
             className="w-full text-left px-4 py-3 text-[14px] text-red-500 hover:bg-red-500/5 transition-colors"
             data-testid="settings-logout"
           >
             {t('settings.accountLogout')}
           </button>
+        </div>
+      </section>
+
+      <section className="mb-8">
+        <h2 className="text-[11px] font-bold tracking-widest text-[var(--text-muted)] uppercase mb-3">{lang === 'zh' ? '登录设备' : 'Sessions'}</h2>
+        <div className="rounded-lg bg-[var(--bg-hover)] divide-y divide-[var(--bg-active)]" data-testid="settings-sessions">
+          {sessions.length === 0 && (
+            <div className="px-4 py-3 text-[12px] text-[var(--text-muted)]">{lang === 'zh' ? '暂无登录记录' : 'No sessions'}</div>
+          )}
+          {sessions.map(s => (
+            <div key={s.id} className="flex items-center justify-between px-4 py-3 gap-3" data-testid={`settings-session-row-${s.id}`}>
+              <div className="flex flex-col min-w-0">
+                <span className="text-[13px] font-semibold text-[var(--text-main)] truncate">
+                  {s.device_name || (lang === 'zh' ? '未知设备' : 'Unknown device')}
+                </span>
+                <span className="text-[11px] text-[var(--text-muted)] truncate">
+                  {new Date(s.last_seen_at).toLocaleString()}
+                </span>
+              </div>
+              {s.current ? (
+                <span className="px-2 py-0.5 rounded bg-[var(--bg-active)] text-[11px] text-[var(--text-main)] shrink-0" data-testid="settings-session-current">
+                  {lang === 'zh' ? '当前' : 'Current'}
+                </span>
+              ) : (
+                <button
+                  onClick={() => revokeSession(s.id)}
+                  disabled={sessionsBusy}
+                  data-testid={`settings-session-revoke-${s.id}`}
+                  className="px-3 py-1.5 text-[12px] text-red-500 hover:bg-red-500/10 rounded-md transition-colors disabled:opacity-50 shrink-0"
+                >
+                  {lang === 'zh' ? '撤销' : 'Revoke'}
+                </button>
+              )}
+            </div>
+          ))}
+          <div className="px-4 py-3 flex items-center justify-between gap-3">
+            <span className="text-[11px] text-[var(--text-muted)]">
+              {lang === 'zh' ? '同账号仅保留最新一台设备在线' : 'Only the newest device stays online per account'}
+            </span>
+            <button
+              onClick={revokeOtherSessions}
+              disabled={sessionsBusy || !sessions.some(s => !s.current)}
+              data-testid="settings-revoke-others"
+              className="px-3 py-1.5 text-[12px] font-semibold rounded-md bg-[var(--bg-active)] text-[var(--text-main)] hover:opacity-80 disabled:opacity-40 transition-opacity shrink-0"
+            >
+              {lang === 'zh' ? '撤销其他会话' : 'Revoke others'}
+            </button>
+          </div>
+          {sessionsError && (
+            <div className="px-4 py-2 text-[12px] text-red-500" data-testid="settings-sessions-error">{sessionsError}</div>
+          )}
         </div>
       </section>
 
@@ -336,12 +442,14 @@ export function SettingsView() {
                 title={myLevel < 3 ? (lang === 'zh' ? '需要管理员权限' : 'Requires admin') : (lang === 'zh' ? '点击更换图标' : 'Click to change')}
               >
                 <span className="text-[16px] font-bold text-[var(--text-muted)]">{profile.name.slice(0, 1).toUpperCase()}</span>
-                <img
-                  src={`${profile.icon_url}?t=${Date.now()}`}
-                  alt="icon"
-                  className="absolute inset-0 w-full h-full object-cover z-10"
-                  onError={(e) => { e.currentTarget.style.display = 'none' }}
-                />
+                {profile.icon_url && (
+                  <img
+                    src={`${apiUrl(profile.icon_url)}?t=${Date.now()}`}
+                    alt="icon"
+                    className="absolute inset-0 w-full h-full object-cover z-10"
+                    onError={(e) => { e.currentTarget.style.display = 'none' }}
+                  />
+                )}
                 {myLevel >= 3 && (
                   <span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white text-[10px] font-semibold transition-opacity">
                     {uploadingIcon ? '...' : (lang === 'zh' ? '更换' : 'Change')}

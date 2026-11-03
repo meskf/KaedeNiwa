@@ -3,7 +3,7 @@ import { useAuthStore } from '../stores/auth'
 import { useProfileStore } from '../stores/profile'
 import { useServerStore } from '../stores/server'
 import { useChatStore } from '../stores/chat'
-import { getClient, scheduleReconnect } from '../wasm/client'
+import { getClient, scheduleReconnect, signOut } from '../wasm/client'
 import { connectMedia, disconnectMedia, updateE2EEKey } from '../lib/livekit'
 import { useMediaState } from '../hooks/useLiveKitRoom'
 import { MediaBar } from './MediaBar'
@@ -31,7 +31,18 @@ import { ReactionBar } from './ReactionBar'
 import { tryDecodeReactionPayload } from '../lib/reactionUtils'
 import { extractMessage } from '../lib/messageUtils'
 import { useAvatarVersion } from '../lib/avatarCache'
+import { apiUrl } from '../lib/api'
 import { useMediaQuery, BP } from '../hooks/useMediaQuery'
+
+/** 解析 wasm 发送接口返回的服务端权威 `{id, ts}` JSON。 */
+function parseSendResult(raw: any): { id: number; ts: number } {
+  try {
+    const v = typeof raw === 'string' ? JSON.parse(raw) : raw
+    return { id: Number(v?.id) || 0, ts: Number(v?.ts) || 0 }
+  } catch {
+    return { id: 0, ts: 0 }
+  }
+}
 
 
 
@@ -65,11 +76,11 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
     if (token) {
       fetchMe(token)
       // 手动拉取 server profile
-      fetch('/api/server', { headers: { Authorization: `Bearer ${token}` } })
+      fetch(apiUrl('/api/server'), { headers: { Authorization: `Bearer ${token}` } })
         .then(res => res.ok ? res.json() : null)
         .then(data => {
           if (data) {
-            useServerStore.setState({ profile: data })
+            useServerStore.setState({ profile: { ...data, icon_url: data.icon_url ? apiUrl(data.icon_url) : null } })
           }
         }).catch(console.error)
     }
@@ -80,26 +91,42 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     if (!loginId) return
     let cancelled = false
-    ;(async () => {
+    let seeded = false
+    const loadNodes = async () => {
       const c = getClient()
       if (!c) return
       try {
         let res = await (c as any).listNodes()
         let parsed = res.map((r: any) => JSON.parse(r))
-        if (parsed.length === 0 && !cancelled) {
+        if (parsed.length === 0 && !cancelled && !seeded) {
+          seeded = true
           // Seed 默认目录结构
           const folder1 = await (c as any).createNode('文字频道', 'folder', null, false, null)
           await (c as any).createNode('general', 'text', JSON.parse(folder1).id, false, null)
           const folder2 = await (c as any).createNode('语音频道', 'folder', null, false, null)
           await (c as any).createNode('语音大厅', 'voice', JSON.parse(folder2).id, false, null)
-          
+
           res = await (c as any).listNodes()
           parsed = res.map((r: any) => JSON.parse(r))
         }
         if (!cancelled) setNodes(parsed)
       } catch (e) { console.error('load nodes err:', e) }
-    })()
-    return () => { cancelled = true }
+    }
+    loadNodes()
+    // 服务端没有节点变更广播（Node 不属于 Channel），其他用户的建/改/删
+    // 只能靠轮询同步。10s 足够及时，且请求很轻（单表 SELECT）。
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') loadNodes()
+    }, 10_000)
+    const onVisible = () => { if (document.visibilityState === 'visible') loadNodes() }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+    }
   }, [loginId, setNodes])
   
 
@@ -300,11 +327,20 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
           console.warn('[initChannel] concurrent join detected, ignoring...')
           return
         }
+        // 公开频道 join/history 返回明确的 HTTP 401 = 会话失效。
+        // 注意必须只匹配 "http error (401)"：断网时是 transport error，
+        // 不能因为错误文本里偶然含 401/unauthorized 就把用户登出（曾把断网当登出）。
+        const isPrivateNode = !!useChatStore.getState().nodes.find((n: any) => n.id === CH && n.is_private)
+        if (!isPrivateNode && /http error \(401\)/i.test(msg)) {
+          console.warn('[initChannel] session invalid, scheduling reconnect:', msg.slice(0, 120))
+          scheduleReconnect()
+          return
+        }
         // 私密频道未加入：
         //   - join_channel 无密码尝试 → 服务端 400 Bad Request
         //   - joinChannelWithPassword 密码错误 → 服务端 401 Unauthorized
         // 两种都弹密码框，不重试、不清空消息
-        if (/401|unauthor|password/i.test(msg) || /join_channel: 400/i.test(msg)) {
+        if (isPrivateNode && (/401|unauthor|password/i.test(msg) || /join_channel: 400/i.test(msg))) {
           if (!cancelled && useChatStore.getState().currentChannel === CH) {
             const node = useChatStore.getState().nodes.find((n: any) => n.id === CH)
             console.log('[initChannel] auth-required on', CH, '→ password prompt')
@@ -340,7 +376,50 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
         if (typeof rawEv === 'string') {
           try { ev = JSON.parse(rawEv) } catch { return }
         }
-        if (ev.Disconnected) { scheduleReconnect(); return }
+        if (ev.Disconnected) { scheduleReconnect(); return; }
+
+        if ((ev as any).ChannelDeleted) {
+          // 频道 group 被接管（或频道被删除）：旧 group 已在客户端销毁。
+          // 若用户正停在该频道，应立即以“新成员”身份重新加入，否则看到的永远是空列表。
+          const chId = (ev as any).ChannelDeleted.channel_id as string
+          useChatStore.getState().setMessages(chId, [])
+          if (chId === useChatStore.getState().currentChannel) {
+            setTimeout(async () => {
+              const c = getClient()
+              if (!c) return
+              const node = useChatStore.getState().nodes.find((n: any) => n.id === chId)
+              const pw = unlockedPrivateRef.current.get(chId)
+              try {
+                if (node?.is_private) {
+                  if (!pw) { setPasswordPrompt({ channelId: chId, channelName: node?.name }); return }
+                  await c.joinChannelWithPassword(chId, pw)
+                } else {
+                  await c.join_channel(chId)
+                }
+                const hist = await c.load_history(chId, 50)
+                const arr = typeof hist === 'string' ? JSON.parse(hist) : hist
+                if (Array.isArray(arr) && arr.length > 0) {
+                  useChatStore.getState().setMessages(chId, arr)
+                }
+              } catch (e) {
+                console.warn('[channel-removed] rejoin deferred:', String(e).slice(0, 120))
+              }
+            }, 0)
+          }
+          return
+        }
+
+        // 会话被顶替 / 撤销 / 踢出：立即回登录页，别让用户对着僵尸界面。
+        if ((ev as any).ServerError) {
+          const se = (ev as any).ServerError
+          // ErrorCode 用 serde snake_case 序列化（unauthenticated / kicked / ...）
+          const code = String(se?.code ?? '').toLowerCase()
+          console.warn('[server-error]', code, se?.message)
+          if (code === 'unauthenticated' || code === 'kicked' || code === 'unsupported_version') {
+            void signOut()
+            return
+          }
+        }
 
 
         const st = useChatStore.getState()
@@ -636,9 +715,15 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       for (const p of failed) {
         try {
           incrementRetry(p.id)
-          await client.send_message(currentChannel, p.text)
+          const raw = await client.send_message(currentChannel, p.text)
+          const res = parseSendResult(raw)
           removePending(p.id)
-          addMessage(currentChannel, { sender: loginId, plaintext: p.text, ts: p.ts })
+          addMessage(currentChannel, {
+            sender: loginId,
+            plaintext: p.text,
+            ts: res.ts || p.ts,
+            id: res.id || 0,
+          })
         } catch (e) {
           markPendingFailed(p.id)
         }
@@ -797,9 +882,15 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       const id = Date.now().toString() + Math.random().toString(36).slice(2)
       addPending({ id, channelId: currentChannel, text, ts: Date.now(), status: 'sending', retries: 0 })
       try {
-        await client.send_message(currentChannel, text)
+        const raw = await client.send_message(currentChannel, text)
+        const res = parseSendResult(raw)
         removePending(id)
-        addMessage(currentChannel, { sender: loginId, plaintext: text, ts: Date.now() })
+        addMessage(currentChannel, {
+          sender: loginId,
+          plaintext: text,
+          ts: res.ts || Date.now(),
+          id: res.id || 0,
+        })
       } catch (e) {
         console.error('send failed:', e)
         markPendingFailed(id)
@@ -829,8 +920,15 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
       }
     }
     try {
-      await client.sendMessageWithAttachments(currentChannel, text, JSON.stringify(uploaded))
-      addMessage(currentChannel, { sender: loginId, plaintext: text, ts: Date.now(), attachments: uploaded as any })
+      const raw = await (client as any).sendMessageWithAttachments(currentChannel, text, JSON.stringify(uploaded))
+      const res = parseSendResult(raw)
+      addMessage(currentChannel, {
+        sender: loginId,
+        plaintext: text,
+        ts: res.ts || Date.now(),
+        id: res.id || 0,
+        attachments: uploaded as any,
+      })
       useChatStore.getState().clearPendingAttachments()
     } catch (err: any) {
       console.error('send with attachments failed:', err)
@@ -928,6 +1026,12 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                 <span className="text-[14px] font-semibold leading-tight truncate">{serverProfile?.name || "Kaede Server"}</span>
                 <span className="text-[11px] text-[var(--text-muted)] truncate">{serverProfile?.description || "Workspace"}</span>
               </div>
+              <button
+                data-testid="sidebar-create-node"
+                title={lang === 'zh' ? '新建频道 / 目录' : 'Create channel / folder'}
+                onClick={(e) => setCtxNode({ x: e.clientX, y: e.clientY, node: null })}
+                className="ml-auto w-7 h-7 shrink-0 flex items-center justify-center rounded-md text-[16px] leading-none text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition-colors"
+              >+</button>
             </div>
 
             <div className="flex-1 overflow-y-auto pb-2">
@@ -979,7 +1083,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                       <div className="w-7 h-7 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[11px] font-bold text-[var(--text-main)] overflow-hidden relative">
     <span>{getInitial(uid)}</span>
     <img
-      src={`/api/avatars/${uid}?v=${avatarVer}`}
+      src={apiUrl(`/api/avatars/${uid}?v=${avatarVer}`)}
       className="absolute inset-0 w-full h-full object-cover z-10"
       onError={(e) => { e.currentTarget.style.display = 'none'; }}
     />
@@ -1078,7 +1182,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                         <div className="w-9 h-9 rounded-full flex items-center justify-center text-[13px] font-medium shrink-0 bg-[var(--bg-active)] text-[var(--text-main)] mt-0.5 overflow-hidden relative">
     <span>{getInitial(msg.sender)}</span>
     <img
-      src={`/api/avatars/${msg.sender}?v=${avatarVer}`}
+      src={apiUrl(`/api/avatars/${msg.sender}?v=${avatarVer}`)}
       className="absolute inset-0 w-full h-full object-cover z-10"
       onError={(e) => { e.currentTarget.style.display = 'none'; }}
     />
@@ -1121,7 +1225,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
                         <div className="w-8 h-8 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[13px] font-bold text-[var(--text-main)] overflow-hidden relative">
     <span>{getInitial(loginId)}</span>
     <img
-      src={`/api/avatars/${loginId}?v=${avatarVer}`}
+      src={apiUrl(`/api/avatars/${loginId}?v=${avatarVer}`)}
       className="absolute inset-0 w-full h-full object-cover z-10"
       onError={(e) => { e.currentTarget.style.display = 'none'; }}
     />
@@ -1206,7 +1310,7 @@ export function MainView({ onLogout }: { onLogout: () => void }) {
             <div className="w-7 h-7 rounded-md bg-[var(--bg-active)] flex items-center justify-center text-[11px] text-[var(--text-main)] font-bold overflow-hidden relative">
               <span>{getInitial(loginId)}</span>
               <img
-                src={`/api/avatars/${loginId}?v=${avatarVer}`}
+                src={apiUrl(`/api/avatars/${loginId}?v=${avatarVer}`)}
                 className="absolute inset-0 w-full h-full object-cover z-10"
                 onError={(e) => { e.currentTarget.style.display = 'none'; }}
               />

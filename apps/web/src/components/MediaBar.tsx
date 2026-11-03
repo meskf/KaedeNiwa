@@ -22,7 +22,7 @@ interface Props {
 
 export function MediaBar({ channelId, compact = false }: Props) {
   const media = useMediaState()
-  const [sharing, setSharing] = useState(false)
+  const sharing = media.localScreenSharing
   const [micOn, setMicOn] = useState(false)
   const [presetId, setPresetId] = useState('1080p60')
   const [noiseOn, setNoiseOn] = useState(true)
@@ -61,10 +61,8 @@ export function MediaBar({ channelId, compact = false }: Props) {
     try {
       if (sharing) {
         await stopScreenShare()
-        setSharing(false)
       } else {
         await startScreenShare(presetId)
-        setSharing(true)
       }
     } catch (e: any) {
       setError(String(e))
@@ -116,7 +114,6 @@ export function MediaBar({ channelId, compact = false }: Props) {
       try { await client.leave_media_room(channelId) } catch (e) { /* ignore */ }
     }
     await disconnectMedia()
-    setSharing(false)
     setMicOn(false)
   }
 

@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { apiUrl } from '../lib/api'
 
 export interface Member {
   login_id: string
@@ -24,7 +25,7 @@ export const useMembersStore = create<MembersState>((set) => ({
     if (!token) return
     set({ loading: true })
     try {
-      const res = await fetch('/api/members', { headers: { Authorization: `Bearer ${token}` } })
+      const res = await fetch(apiUrl('/api/members'), { headers: { Authorization: `Bearer ${token}` } })
       if (res.ok) {
         const data = await res.json()
         set({ members: data.members || [] })
@@ -37,7 +38,7 @@ export const useMembersStore = create<MembersState>((set) => ({
   },
   updateOp: async (token, loginId, op) => {
     try {
-      const res = await fetch(`/api/members/${encodeURIComponent(loginId)}`, {
+      const res = await fetch(apiUrl(`/api/members/${encodeURIComponent(loginId)}`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ op }),

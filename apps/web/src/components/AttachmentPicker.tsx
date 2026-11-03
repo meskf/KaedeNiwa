@@ -45,7 +45,7 @@ export function AttachmentPicker() {
 
   return (
     <div onDrop={onDrop} onDragOver={onDragOver} className="contents">
-      <input ref={fileInputRef} type="file" multiple className="hidden" onChange={onChange} />
+      <input ref={fileInputRef} type="file" multiple className="hidden" onChange={onChange} data-testid="attachment-file-input" />
       
       <button
         type="button"

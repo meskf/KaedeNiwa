@@ -1,5 +1,11 @@
 import { create } from 'zustand'
 import { ServerProfile } from '../protocol/Server'
+import { apiUrl } from '../lib/api'
+
+/** 服务端把 icon_url 存成相对路径 /api/server/icon；Android/桌面端必须转绝对地址。 */
+function normalize(data: ServerProfile): ServerProfile {
+  return { ...data, icon_url: data.icon_url ? apiUrl(data.icon_url) : null }
+}
 
 interface ServerState {
   profile: ServerProfile
@@ -16,10 +22,10 @@ export const useServerStore = create<ServerState>((set) => ({
     if (!token) return
     set({ loading: true })
     try {
-      const res = await fetch('/api/server', { headers: { Authorization: `Bearer ${token}` } })
+      const res = await fetch(apiUrl('/api/server'), { headers: { Authorization: `Bearer ${token}` } })
       if (res.ok) {
         const data = await res.json()
-        set({ profile: data })
+        set({ profile: normalize(data) })
       }
     } catch (e) {
       console.error('fetch server profile failed', e)
@@ -29,7 +35,7 @@ export const useServerStore = create<ServerState>((set) => ({
   },
   update: async (token, patch) => {
     try {
-      const res = await fetch('/api/server', {
+      const res = await fetch(apiUrl('/api/server'), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(patch),
@@ -49,14 +55,14 @@ export const useServerStore = create<ServerState>((set) => ({
     try {
       const { compressToSquareJpeg } = await import('../lib/imageUtils')
       const blob = await compressToSquareJpeg(file, 256, 0.85)
-      const res = await fetch('/api/server/icon', {
+      const res = await fetch(apiUrl('/api/server/icon'), {
         method: 'POST',
         headers: { 'Content-Type': 'image/jpeg', Authorization: `Bearer ${token}` },
         body: blob,
       })
       if (res.status === 204) {
-        const r = await fetch('/api/server', { headers: { Authorization: `Bearer ${token}` } })
-        if (r.ok) { const data = await r.json(); set({ profile: data }) }
+        const r = await fetch(apiUrl('/api/server'), { headers: { Authorization: `Bearer ${token}` } })
+        if (r.ok) { const data = await r.json(); set({ profile: normalize(data) }) }
         return { ok: true }
       }
       if (res.status === 403) return { ok: false, error: 'forbidden' }

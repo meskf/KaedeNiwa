@@ -27,7 +27,7 @@ function SingleAttachment({ targetId, att }: { targetId: string; att: Attachment
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    if (url || loading) return
+    if (url) return
     if (!isImage(att.mime) && !isVideo(att.mime) && !isAudio(att.mime)) return
     const c = getClient()
     if (!c) return
@@ -48,7 +48,9 @@ function SingleAttachment({ targetId, att }: { targetId: string; att: Attachment
       }
     })()
     return () => { cancelled = true }
-  }, [targetId, att.id, att.mime, att.sha256, url, loading, setUrl])
+    // 注意：不要把 loading 放进依赖。否则 setLoading(true) 会触发 effect 重跑，
+    // 上一次请求的 cleanup 把 cancelled 置 true，结果被丢弃，UI 永远停在 Loading...
+  }, [targetId, att.id, att.mime, att.sha256, url, setUrl])
 
   const handleDownload = async () => {
     const c = getClient()

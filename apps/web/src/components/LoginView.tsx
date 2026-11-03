@@ -2,19 +2,19 @@ import { useState, useEffect } from 'react'
 
 /**
  * 推导默认服务器地址：
- * - localhost / 127.0.0.1 / Electron (file://) → 用 127.0.0.1
- * - 否则（局域网 IP 访问）→ 用当前 hostname（服务端已绑定 0.0.0.0）
+ * - Vite 开发服务器（5173/5174）→ 同源（由 proxy 转发）
+ * - Electron(file://) / Capacitor(Android,iOS) → 本地独立包默认端口 18080
+ * - 其余（独立包 / Docker 8080 / 任意反向代理端口）→ 同源，避免写死 18080 导致部署端口不一致时登录失败
  */
 function resolveDefaultServerUrl(): string {
   if (typeof window === 'undefined') return 'http://127.0.0.1:18080'
-  const origin = window.location.origin
-  // 如果是 Vite 开发服务器（5173），使用当前 origin，借助 Vite proxy 转发
-  if (window.location.port === '5173' || window.location.port === '5174') {
-    return origin
-  }
-  const h = window.location.hostname
-  if (!h || h === 'localhost' || h === '127.0.0.1') return 'http://127.0.0.1:18080'
-  return `http://${h}:18080`
+  const { origin, port, protocol } = window.location
+  if (protocol === 'file:') return 'http://127.0.0.1:18080'
+  const cap = (window as any).Capacitor
+  if (cap?.isNativePlatform?.()) return 'http://127.0.0.1:18080'
+  if (!origin || origin === 'null') return 'http://127.0.0.1:18080'
+  if (port === '5173' || port === '5174') return origin
+  return origin
 }
 
 import { useAuthStore } from '../stores/auth'
@@ -31,7 +31,10 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
   const [isRegister, setIsRegister] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [serverUrl, setServerUrl] = useState(() => resolveDefaultServerUrl())
+  // 记住上次成功的服务器地址（Android/桌面/局域网场景免手输）
+  const [serverUrl, setServerUrl] = useState(
+    () => localStorage.getItem('kaede-server-url') || resolveDefaultServerUrl(),
+  )
 
   // Electron: 从主进程 config.json 恢复上次使用的服务器地址
   useEffect(() => {
@@ -57,7 +60,12 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
       const res = await fetch(serverUrl + endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ login_id: loginId, password })
+        body: JSON.stringify({
+          login_id: loginId,
+          password,
+          // 用于设置页“登录设备”列表；服务端截断到 64 字符。
+          device_name: (typeof navigator !== 'undefined' ? navigator.userAgent : '').slice(0, 64),
+        })
       })
       
       const data = await res.json().catch(() => ({}))
@@ -89,6 +97,7 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
         await api.setServerUrl(serverUrl)
       }
       await client.login(serverUrl, wsUrl, loginId, token)
+      localStorage.setItem('kaede-server-url', serverUrl)
       setAuth({ serverUrl, wsUrl, token, loginId })
       recordLoginArgs({ serverUrl, wsUrl, loginId, token })
       allowReconnect()

@@ -1,4 +1,4 @@
-import { setLogLevel as setLiveKitLogLevel, Room, RoomEvent, RemoteParticipant, RemoteTrackPublication, RemoteTrack, Track, ConnectionState, ExternalE2EEKeyProvider, LocalTrack, VideoPreset, VideoQuality } from 'livekit-client'
+import { setLogLevel as setLiveKitLogLevel, Room, RoomEvent, RemoteParticipant, RemoteTrackPublication, RemoteTrack, Track, ConnectionState, ExternalE2EEKeyProvider, LocalTrack, VideoQuality } from 'livekit-client'
 
 type QualityStr = 'low' | 'medium' | 'high'
 setLiveKitLogLevel('debug')
@@ -429,16 +429,22 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
     // 开启 simulcast，让接收端能切到不同分辨率层（高/中/低）
     // 注意：屏幕共享单层的话，接收端调画质会导致 SFU 强制降码率 → 画面糊。
     // 必须发 simulcast 层，SVC/Simulcast 切层才能做到真正的"分辨率"变化。
+    // LiveKit JS 2.23 在 screen_share video 上传 `simulcast: true` + 非空
+    // `screenShareSimulcastLayers` 时，会把整条 video track 静默从 publisher offer
+    // 中丢弃（audio 正常）。复现：Playwright 双端 screen-share-smoke，SFU 侧只会看到
+    // SCREEN_SHARE_AUDIO 的 published 日志，video 从未发出，接收端 remoteParticipants
+    // 的 videoTrackPublications 一直是空。改为单层编码后 video 正常到达接收端（已用
+    // screen-share-diag-nosimulcast.spec.ts 验证）。
+    //
+    // 功能取舍：
+    //   - 失去 SFU 层切换能力：接收端 setScreenShareQuality 只能走本地
+    //     setVideoDimensions，无法真正让 SFU 降码率/降分辨率。
+    //   - 恢复前提：要么 livekit-client 升级修复此 bug，要么在 SDP 层重新验证
+    //     simulcast 组合。恢复时把本块改回 `simulcast: true` + `screenShareSimulcastLayers`。
     const videoPub = await currentRoom.localParticipant.publishTrack(videoTrack, {
-      source: Track.Source.ScreenShare, // 【关键修复】必须声明这是屏幕共享！
-      simulcast: true,
+      source: Track.Source.ScreenShare,
+      simulcast: false,
       screenShareEncoding: { maxBitrate: preset.bitrate, maxFramerate: preset.fps },
-      // 屏幕共享必须用 screenShareSimulcastLayers（不是 videoSimulcastLayers，那是给摄像头的）
-      // 只传 2 个额外层（LiveKit 上限），顺序必须低→高。原始分辨率层自动作为最高层。
-      screenShareSimulcastLayers: [
-        new VideoPreset(854, 480, 500_000, 30),                       // LOW  = 480p
-        new VideoPreset(1280, 720, 1_500_000, Math.min(preset.fps, 30)), // MEDIUM = 720p
-      ],
     })
 
     // 系统/标签页音频（用户勾选"共享音频"时才有）—— 独立发布
@@ -499,13 +505,19 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
     setTimeout(() => { isStartingShare = false }, 1000)
     return true
   } catch (e: any) {
-    setTimeout(() => { isStartingShare = false }, 1000)
     console.error('屏幕共享启动失败:', e)
-    // 若 getDisplayMedia 被用户取消或浏览器不支持 4K，降级重试
+    // 【修复 bug】降级重试必须在 isStartingShare 复位之后才能成功。
+    // 原实现：setTimeout(1000) 是异步，下面 return startScreenShare('1080p60') 是
+    // 同步立即递归 —— 此时 isStartingShare 还是 true，递归第一行直接 return false，
+    // 用户选 4K 时屏幕共享完全不可用（MediaBar 的 handleToggleShare 不看返回值，
+    // 仍然 setSharing(true)，造成"UI 显示共享中，实际零流"的静默失败）。
+    // 由 tools/qa/playwright/specs/screen-share-4k-cancel.spec.ts 捕获。
     if (preset.width > 1920) {
       console.warn('[ScreenShare] 4K 失败，降级到 1080p60 重试')
+      isStartingShare = false
       return startScreenShare('1080p60')
     }
+    setTimeout(() => { isStartingShare = false }, 1000)
     throw e
   }
 }

@@ -14,8 +14,10 @@ interface Props {
 export function NodeContextMenu({ x, y, node, onClose }: Props) {
   const setNodes = useChatStore(s => s.setNodes)
   const ref = useRef<HTMLDivElement>(null)
-  const [mode, setMode] = useState<'main' | 'rename' | 'create-folder' | 'create-text' | 'create-voice'>('main')
+  const [mode, setMode] = useState<'main' | 'rename' | 'create-folder' | 'create-text' | 'create-voice' | 'create-private'>('main')
   const [input, setInput] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -38,15 +40,20 @@ export function NodeContextMenu({ x, y, node, onClose }: Props) {
     const c = getClient()
     if (!c) return
     let kind = 'folder'
-    if (mode === 'create-text') kind = 'text'
+    if (mode === 'create-text' || mode === 'create-private') kind = 'text'
     if (mode === 'create-voice') kind = 'voice'
+    const isPrivate = mode === 'create-private'
+    if (isPrivate && password.length < 8) {
+      setError('密码至少 8 位')
+      return
+    }
     
     try {
-      await (c as any).createNode(input.trim(), kind, node ? node.id : null, false, null)
+      await (c as any).createNode(input.trim(), kind, node ? node.id : null, isPrivate, isPrivate ? password : null)
       await refreshNodes()
       onClose()
     } catch (e) {
-      alert('创建失败: ' + String(e))
+      setError('创建失败: ' + String(e))
     }
   }
 
@@ -91,6 +98,7 @@ export function NodeContextMenu({ x, y, node, onClose }: Props) {
           <button data-testid="ctx-create-folder" onClick={() => setMode('create-folder')} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--bg-hover)]"><IconFolder className="w-4 h-4" /> 新建子文件夹</button>
           <button data-testid="ctx-create-text" onClick={() => setMode('create-text')} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--bg-hover)]"><IconHash className="w-4 h-4" /> 新建文字频道</button>
           <button data-testid="ctx-create-voice" onClick={() => setMode('create-voice')} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--bg-hover)]"><IconVolume className="w-4 h-4" /> 新建语音频道</button>
+          <button data-testid="ctx-create-private" onClick={() => setMode('create-private')} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--bg-hover)]"><IconHash className="w-4 h-4" /> 新建私密频道</button>
           {node && (
             <>
               <div className="h-px bg-[var(--bg-hover)] my-1" />
@@ -116,6 +124,18 @@ export function NodeContextMenu({ x, y, node, onClose }: Props) {
             placeholder="输入名称..."
             className="w-full bg-[var(--bg-hover)] px-2 py-1.5 rounded outline-none border border-transparent focus:border-[var(--text-muted)]"
           />
+          {mode === 'create-private' && (
+            <input
+              type="password"
+              value={password}
+              onChange={e => { setPassword(e.target.value); setError('') }}
+              onKeyDown={e => { if (e.key === 'Enter') handleCreate() }}
+              placeholder="频道密码（8 位以上）"
+              data-testid="ctx-create-private-password"
+              className="w-full bg-[var(--bg-hover)] px-2 py-1.5 rounded outline-none border border-transparent focus:border-[var(--text-muted)]"
+            />
+          )}
+          {error && <div className="text-[11px] text-red-500 px-1" data-testid="ctx-create-error">{error}</div>}
           <div className="flex justify-end gap-1">
             <button onClick={() => setMode('main')} className="px-2 py-1 rounded text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)]">取消</button>
             <button data-testid="ctx-confirm" onClick={mode === 'rename' ? handleRename : handleCreate} className="px-2 py-1 rounded text-[12px] bg-[var(--text-main)] text-[var(--bg-app)] font-semibold">确认</button>

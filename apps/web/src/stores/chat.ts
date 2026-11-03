@@ -126,6 +126,38 @@ interface ChatState {
   setAttachmentUrl: (id: string, url: string) => void;
 }
 
+/**
+ * 判断两条消息是否为同一条。
+ *
+ * 主判据是服务端 id（v8.1）。只有「一条有 id、一条没有 id」的旧数据才回退到
+ * 内容 + 2s 时间窗：发送端现在直接用 POST 返回的权威 (id, ts) 落本地消息，
+ * 正常情况下不存在无 id 的消息。
+ */
+function isSameMessage(a: ChatMessage, b: ChatMessage): boolean {
+  const aId = a.id && a.id > 0 ? a.id : 0;
+  const bId = b.id && b.id > 0 ? b.id : 0;
+  if (aId && bId) return aId === bId;
+  return (
+    a.sender === b.sender &&
+    a.plaintext === b.plaintext &&
+    Math.abs(a.ts - b.ts) < 2000
+  );
+}
+
+/** 合并消息列表：服务端消息优先，保留无 id 的本地消息去重。 */
+function mergeMessages(list: ChatMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of list) {
+    const idx = out.findIndex(x => isSameMessage(x, m));
+    if (idx < 0) {
+      out.push(m);
+    } else if ((!out[idx].id || out[idx].id === 0) && m.id && m.id > 0) {
+      out[idx] = m;
+    }
+  }
+  return out;
+}
+
 export const useChatStore = create<ChatState>((set) => ({
   channels: ['general', 'dev', 'random'],
   currentChannel: 'general',
@@ -151,15 +183,30 @@ export const useChatStore = create<ChatState>((set) => ({
   setChannels: (channels) => set({ channels }),
   setChannel: (currentChannel) => set({ currentChannel }),
   setActiveView: (activeView) => set({ activeView }),
-  setMessages: (channelId, msgs) => set((state) => ({
-    messages: { ...state.messages, [channelId]: msgs }
-  })),
-  addMessage: (channelId, msg) => set((state) => ({
-    messages: {
-      ...state.messages,
-      [channelId]: [...(state.messages[channelId] || []), msg]
+  setMessages: (channelId, msgs) => set((state) => {
+    // 原子合并而不是整体替换：历史拉取是异步的，调用方先读 existing 再算出 merged
+    // 再写回会丢失这期间 addMessage 新增的消息（曾导致发送方自己的消息瞬间消失）。
+    // 在 set 回调里读取“提交时刻”的列表，才是无竞态的。
+    const current = state.messages[channelId] || [];
+    const merged = mergeMessages([...current, ...msgs]);
+    merged.sort((a, b) => Number(a.ts) - Number(b.ts));
+    if (
+      merged.length === current.length &&
+      merged.every((m, i) => m === current[i])
+    ) {
+      return state;
     }
-  })),
+    return { messages: { ...state.messages, [channelId]: merged } };
+  }),
+  addMessage: (channelId, msg) => set((state) => {
+    const list = state.messages[channelId] || [];
+    const merged = mergeMessages([...list, msg]);
+    if (merged.length === list.length) {
+      // 命中去重且已有服务端消息：保持引用不变，避免无意义重渲染。
+      return state;
+    }
+    return { messages: { ...state.messages, [channelId]: merged } };
+  }),
   addPending: (msg) => set((state) => ({
     pendingMessages: [...state.pendingMessages, msg]
   })),

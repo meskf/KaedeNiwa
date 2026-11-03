@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAuthStore } from './stores/auth'
 import { useChatStore } from './stores/chat'
-import { initWasm, getClient, recordLoginArgs, stopReconnect, allowReconnect } from './wasm/client'
+import { initWasm, getClient, recordLoginArgs, allowReconnect, signOut } from './wasm/client'
 import { LoginView } from './components/LoginView'
 import { MainView } from './components/MainView'
 import { DynamicBackground } from './components/DynamicBackground'
@@ -65,8 +65,7 @@ export default function App() {
             console.log('reconnected')
           } catch (e) {
             console.error('auto reconnect failed:', e)
-            stopReconnect()
-            useAuthStore.getState().logout()
+            await signOut()
           }
         }
       } catch (e) {
@@ -251,7 +250,7 @@ export default function App() {
       {dynamicBg && <DynamicBackground />}
       <div className={`h-full w-full relative z-10 ${dynamicBg ? 'bg-transparent' : 'bg-[var(--bg-app)]'}`}>
         {isLoggedIn
-          ? <MainView onLogout={() => useAuthStore.getState().logout()} />
+          ? <MainView onLogout={() => { void signOut() }} />
           : <LoginView onLogin={() => {}} />}
       </div>
     </>

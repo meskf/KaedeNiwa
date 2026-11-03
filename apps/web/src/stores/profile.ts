@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { bumpAvatarVersion } from '../lib/avatarCache'
+import { apiUrl } from '../lib/api'
 
 export interface MyProfile {
   loginId: string
@@ -24,7 +25,7 @@ interface ProfileState {
 const EMPTY: MyProfile = { loginId: '', nickname: '', bio: '', title: '', avatarUrl: '' }
 
 async function fetchMeRaw(token: string): Promise<MyProfile | null> {
-  const res = await fetch('/api/me', { headers: { Authorization: `Bearer ${token}` } })
+  const res = await fetch(apiUrl('/api/me'), { headers: { Authorization: `Bearer ${token}` } })
   if (!res.ok) return null
   const data = await res.json()
   return {
@@ -51,7 +52,7 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
   },
   updateMe: async (token, patch) => {
     try {
-      const res = await fetch('/api/me', {
+      const res = await fetch(apiUrl('/api/me'), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(patch),
@@ -78,7 +79,7 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
     try {
       const { compressToSquareJpeg } = await import('../lib/imageUtils')
       const blob = await compressToSquareJpeg(file, 256, 0.85)
-      const res = await fetch('/api/me/avatar', {
+      const res = await fetch(apiUrl('/api/me/avatar'), {
         method: 'POST',
         headers: { 'Content-Type': 'image/jpeg', Authorization: `Bearer ${token}` },
         body: blob,
@@ -98,7 +99,7 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
   },
   deleteAvatar: async (token) => {
     try {
-      const res = await fetch('/api/me/avatar', {
+      const res = await fetch(apiUrl('/api/me/avatar'), {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       })

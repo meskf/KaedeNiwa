@@ -119,6 +119,7 @@ export function FriendsView() {
         <h1 className="text-3xl font-extrabold tracking-tight text-[var(--text-main)]">{t('friends.title')}</h1>
         <button
           onClick={() => setShowAdd(v => !v)}
+          data-testid="friends-add-open"
           className="px-3 py-1.5 text-[12px] font-semibold rounded-md bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--text-muted)] transition-colors"
         >
           + {t('friends.addFriend')}
@@ -132,8 +133,9 @@ export function FriendsView() {
             onChange={e => setNewId(e.target.value)}
             placeholder={t('friends.placeholderLogin')}
             className="flex-1 bg-[var(--bg-app)] text-[var(--text-main)] text-[13px] rounded-md px-3 py-2 outline-none"
+            data-testid="friends-add-input"
           />
-          <button type="submit" disabled={busy === 'add'} className="px-3 py-1.5 text-[12px] font-semibold rounded-md bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--text-muted)] disabled:opacity-50">
+          <button type="submit" disabled={busy === 'add'} data-testid="friends-add-submit" className="px-3 py-1.5 text-[12px] font-semibold rounded-md bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--text-muted)] disabled:opacity-50">
             {busy === 'add' ? '...' : t('friends.send')}
           </button>
           <button type="button" onClick={() => { setShowAdd(false); setNewId(''); setError(null) }} className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)]">
@@ -166,7 +168,7 @@ export function FriendsView() {
         )}
         <div className="flex flex-col gap-2">
           {filtered.map(f => (
-            <div key={f.login_id} className="flex items-center justify-between p-3 rounded-lg hover:bg-[var(--bg-hover)] transition-colors group">
+            <div key={f.login_id} data-testid={`friend-row-${f.login_id}`} className="flex items-center justify-between p-3 rounded-lg hover:bg-[var(--bg-hover)] transition-colors group">
               <div className="flex items-center gap-3 min-w-0">
                 <div className="relative shrink-0">
                   <div className="w-9 h-9 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[13px] font-bold text-[var(--text-main)]">
@@ -191,6 +193,7 @@ export function FriendsView() {
                     <button
                       onClick={() => handleMessage(f.login_id)}
                       disabled={busy === f.login_id}
+                      data-testid={`friend-message-${f.login_id}`}
                       className="px-3 py-1.5 bg-[var(--bg-active)] hover:bg-[var(--text-muted)] text-[var(--text-main)] text-[12px] rounded-md font-medium transition-colors disabled:opacity-50"
                     >
                       {t('friends.actionMessage')}
@@ -198,6 +201,7 @@ export function FriendsView() {
                     <button
                       onClick={() => handleRemove(f.login_id)}
                       disabled={busy === f.login_id}
+                      data-testid={`friend-remove-${f.login_id}`}
                       className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-red-400 transition-colors disabled:opacity-50"
                     >
                       {t('friends.actionRemove')}
@@ -209,6 +213,7 @@ export function FriendsView() {
                     <button
                       onClick={() => handleAccept(f.login_id)}
                       disabled={busy === f.login_id}
+                      data-testid={`friend-accept-${f.login_id}`}
                       className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white text-[12px] rounded-md font-medium transition-colors disabled:opacity-50"
                     >
                       {t('friends.actionAccept')}
@@ -216,6 +221,7 @@ export function FriendsView() {
                     <button
                       onClick={() => handleRemove(f.login_id)}
                       disabled={busy === f.login_id}
+                      data-testid={`friend-reject-${f.login_id}`}
                       className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-red-400 transition-colors disabled:opacity-50"
                     >
                       {t('friends.actionReject')}

@@ -147,6 +147,7 @@ export function DMView() {
           <h1 className="text-3xl font-extrabold tracking-tight text-[var(--text-main)]">{t('dm.title')}</h1>
           <button
             onClick={() => setShowNew(v => !v)}
+            data-testid="dm-new-toggle"
             className="px-3 py-1.5 text-[12px] font-semibold rounded-md bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--text-muted)] transition-colors"
             title="New conversation"
           >
@@ -161,10 +162,11 @@ export function DMView() {
               onChange={e => setNewPeer(e.target.value)}
               placeholder={t('dm.placeholderPeer')}
               className="w-full bg-[var(--bg-app)] text-[var(--text-main)] text-[13px] rounded-md px-3 py-2 outline-none"
+              data-testid="dm-new-input"
               onKeyDown={e => { if (e.key === 'Enter') handleOpen() }}
             />
             <div className="flex gap-2">
-              <button onClick={handleOpen} disabled={busy} className="flex-1 px-3 py-1.5 text-[12px] font-semibold rounded-md bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--text-muted)] disabled:opacity-50">
+              <button onClick={handleOpen} disabled={busy} data-testid="dm-new-open" className="flex-1 px-3 py-1.5 text-[12px] font-semibold rounded-md bg-[var(--bg-active)] text-[var(--text-main)] hover:bg-[var(--text-muted)] disabled:opacity-50">
                 {busy ? '...' : t('dm.open')}
               </button>
               <button onClick={() => { setShowNew(false); setNewPeer(''); setError(null) }} className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-main)]">
@@ -184,6 +186,7 @@ export function DMView() {
             <div
               key={c.conv_id}
               onClick={() => setActiveConv(c.conv_id)}
+              data-testid={`dm-conv-${c.peer_login_id}`}
               className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
                 activeConvId === c.conv_id ? 'bg-[var(--bg-active)]' : 'hover:bg-[var(--bg-hover)]'
               }`}
@@ -216,7 +219,7 @@ export function DMView() {
                   <div className="text-[13px] text-[var(--text-muted)] py-8 text-center">{t('dm.noMessages')}</div>
                 )}
                 {msgs.map((m, i) => (
-                  <div key={i} className={`flex gap-3 ${isMine(m) ? 'flex-row-reverse' : ''}`}>
+                  <div key={i} data-testid="dm-message" data-sender={m.sender} className={`flex gap-3 ${isMine(m) ? 'flex-row-reverse' : ''}`}>
                     <div className="w-9 h-9 rounded-full bg-[var(--bg-active)] flex items-center justify-center text-[13px] font-medium shrink-0 text-[var(--text-main)] mt-0.5">
                       {getInitial(m.sender === '__me__' ? 'You' : m.sender)}
                     </div>
