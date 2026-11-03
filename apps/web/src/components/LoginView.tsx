@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react'
 /**
  * 推导默认服务器地址：
  * - Vite 开发服务器（5173/5174）→ 同源（由 proxy 转发）
- * - Electron(file://) / Capacitor(Android,iOS) → 本地独立包默认端口 18080
+ * - Electron(file:// 或被本地 http server 托管) / Capacitor(Android,iOS) → 本地独立包默认端口 18080
  * - 其余（独立包 / Docker 8080 / 任意反向代理端口）→ 同源，避免写死 18080 导致部署端口不一致时登录失败
  */
 function resolveDefaultServerUrl(): string {
@@ -12,6 +12,9 @@ function resolveDefaultServerUrl(): string {
   if (protocol === 'file:') return 'http://127.0.0.1:18080'
   const cap = (window as any).Capacitor
   if (cap?.isNativePlatform?.()) return 'http://127.0.0.1:18080'
+  // Electron 桌面端用本地 http server（COOP/COEP）托管页面，同源地址只是本机代理端口，
+  // 尚未配置服务端时不能当默认值（首次安装会直接 503 server_not_configured）。
+  if ((window as any).electronAPI) return 'http://127.0.0.1:18080'
   if (!origin || origin === 'null') return 'http://127.0.0.1:18080'
   if (port === '5173' || port === '5174') return origin
   return origin

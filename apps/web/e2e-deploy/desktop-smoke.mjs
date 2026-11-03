@@ -4,6 +4,8 @@
 import { chromium } from '@playwright/test';
 
 const CDP = process.env.KAEDE_CDP ?? 'http://127.0.0.1:9222';
+// 全新安装（无 config.json）时默认地址是 Electron 本地代理端口，需要显式填服务端地址。
+const SERVER_URL = process.env.KAEDE_SERVER_URL ?? '';
 const loginId = `desktop-${Date.now().toString(36).slice(-6)}`;
 
 const browser = await chromium.connectOverCDP(CDP);
@@ -13,6 +15,9 @@ console.log('[desktop] page url:', page.url());
 
 await page.getByTestId('login-id').waitFor({ state: 'visible', timeout: 60_000 });
 await page.getByTestId('login-server-url').waitFor({ state: 'visible', timeout: 10_000 }).catch(() => {});
+if (SERVER_URL) {
+  await page.locator('input').first().fill(SERVER_URL);
+}
 
 // 注册（登录页默认登录模式，点“注册”切换）
 const toggle = page.getByTestId('login-toggle-register');
