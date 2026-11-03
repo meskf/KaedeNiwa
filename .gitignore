@@ -139,3 +139,6 @@ kaede.db-*
 # 测试产物
 apps/web/test-results/
 apps/web/playwright-report/
+
+# QA 归档（死代码 / .bak 归档处）
+.recon/
