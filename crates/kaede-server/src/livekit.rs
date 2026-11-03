@@ -108,10 +108,10 @@ fn resolve_ws_url(configured: &str, headers: &HeaderMap) -> String {
 
 /// 去掉 host 中的端口，保留 IPv6 的方括号形式。
 fn host_name(host: &str) -> String {
-    if let Some(rest) = host.strip_prefix('[') {
-        if let Some(end) = rest.find(']') {
-            return format!("[{}]", &rest[..end]);
-        }
+    if let Some(rest) = host.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        return format!("[{}]", &rest[..end]);
     }
     host.split(':').next().unwrap_or(host).to_string()
 }
