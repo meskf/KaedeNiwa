@@ -69,7 +69,7 @@ axum = "0.8"
 
 # Windows DPAPI（CryptProtectData / CryptUnprotectData）
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
 ] }
