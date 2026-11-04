@@ -11,7 +11,7 @@
     "build:client": "electron-builder --win"
   },
   "devDependencies": {
-    "electron": "^34.0.0",
+    "electron": "^45.2.1",
     "electron-builder": "^26.18.0"
   },
   "allowScripts": {
