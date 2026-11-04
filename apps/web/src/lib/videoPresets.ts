@@ -36,6 +36,9 @@ export const VIDEO_PRESETS: VideoPreset[] = [
   { id: '1440p60',label: '2560x1440 60fps',   width: 2560, height: 1440, fps: 60, bitrate: calcScreenShareBitrate(2560, 1440, 60) },
   { id: '1080p60',label: '1920x1080 60fps',   width: 1920, height: 1080, fps: 60, bitrate: calcScreenShareBitrate(1920, 1080, 60) },
   { id: '1080p30',label: '1920x1080 30fps',   width: 1920, height: 1080, fps: 30, bitrate: calcScreenShareBitrate(1920, 1080, 30) },
+  // 高动态（游戏 / 高速滚动）推荐档：60fps 保证节奏，720p 把单帧编码耗时压下来。
+  // CS2 这类快节奏画面在 30fps 下天然发飘，即使编码器不丢帧也“看着卡”。
+  { id: '720p60', label: '1280x720 60fps',    width: 1280, height: 720,  fps: 60, bitrate: calcScreenShareBitrate(1280, 720, 60) },
   { id: '720p30', label: '1280x720 30fps',    width: 1280, height: 720,  fps: 30, bitrate: calcScreenShareBitrate(1280, 720, 30) },
   { id: '480p30', label: '854x480 30fps', width: 854, height: 480, fps: 30, bitrate: calcScreenShareBitrate(854, 480, 30) },
 ]

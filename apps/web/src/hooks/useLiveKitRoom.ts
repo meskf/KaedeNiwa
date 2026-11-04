@@ -20,6 +20,8 @@ const INITIAL: MediaState = {
   pushToTalk: false,
   pushToTalkKey: 'Space',
   audioBitrate: 0,
+  link: null,
+  autoQualityNote: null,
 }
 
 export function useMediaState(): MediaState {

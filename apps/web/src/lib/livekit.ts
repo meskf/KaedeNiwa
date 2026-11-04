@@ -5,8 +5,11 @@ setLiveKitLogLevel('debug')
 function toVideoQuality(q: QualityStr): VideoQuality {
   return q === 'high' ? VideoQuality.HIGH : q === 'low' ? VideoQuality.LOW : VideoQuality.MEDIUM
 }
-import { findPreset } from './videoPresets'
-import { startMediaStats, stopMediaStats } from './mediaStats'
+import { findPreset, type VideoPreset } from './videoPresets'
+import {
+  startMediaHealth, stopMediaHealth, subscribeMediaHealth, setMediaHealthTargetFps,
+  type MediaHealth, type HealthReason,
+} from './mediaHealth'
 import { startRnnoiseProcessing, isRnnoiseSupported, type RnnoiseHandle } from './rnnoise'
 
 /**
@@ -35,6 +38,21 @@ export interface MediaState {
   pushToTalk: boolean
   pushToTalkKey: string
   audioBitrate: number
+  /** 链路健康度（UDP/TCP、丢包、实际接收帧率）；无媒体会话时为 null */
+  link: LinkInfo | null
+  /** 自动降档原因（如“编码器 CPU 受限，已降分辨率、帧率保持不变”）；未降档为 null */
+  autoQualityNote: string | null
+}
+
+export interface LinkInfo {
+  severity: 'ok' | 'warn' | 'bad'
+  transport: MediaHealth['transport']
+  rttMs: number
+  inFps: number
+  lossPct: number
+  /** 接收端帧间隔标准差（ms）：越大越“不跟手” */
+  pacingStdMs: number
+  reasons: HealthReason[]
 }
 
 export interface ParticipantInfo {
@@ -92,9 +110,102 @@ let pttHandler: ((e: KeyboardEvent) => void) | null = null
 let pttKeyDown = false
 const remoteAudioElements = new Map<string, HTMLAudioElement>()
 
+// 链路健康度 / 自适应降档状态
+let currentLink: LinkInfo | null = null
+let currentAutoQualityNote: string | null = null
+let unsubHealth: (() => void) | null = null
+let activeShareTrack: MediaStreamTrack | null = null
+let activePreset: VideoPreset | null = null
+let cpuStreak = 0
+
 function emit() {
   const state = getState()
   for (const fn of listeners) fn(state)
+}
+
+// ---- 屏幕共享自适应降档 ----
+//
+// 触发条件只看 encoder 自报的 qualityLimitationReason === 'cpu'。
+//
+// 为什么不用“帧率不达标”：静态文档共享时 Chrome 本来就只在画面变化时出帧，
+// framesEncoded 很低但观看完全正常（用户实测“读文档还好”）。而游戏/滚动这类
+// 高动态画面会把编码器压满，Chrome 报 cpu → 实际丢帧、画面断续。
+//
+// 稳帧优先：降档**只降分辨率、绝不动帧率**。
+// 帧率一旦被砍（30→22→15），帧间隔反而更不匀，肉眼就是“一卡一卡”。
+// 而分辨率降一档能显著降低单帧编码耗时，帧间隔回到稳定节奏。
+const ADAPT_STEPS: Array<{ scale: number; fpsRatio: number }> = [
+  { scale: 0.85, fpsRatio: 1 },
+  { scale: 0.7, fpsRatio: 1 },
+  { scale: 0.55, fpsRatio: 1 },
+  { scale: 0.45, fpsRatio: 1 },
+]
+let adaptiveStep = -1
+
+function computeAdaptiveTarget() {
+  const preset = activePreset
+  if (!preset) return null
+  const step = ADAPT_STEPS[Math.max(0, adaptiveStep)]
+  // 帧率保持档位原值：宁可糊一点，也要节奏稳
+  const fps = preset.fps
+  const scale = step.scale
+  const w = Math.max(640, Math.round((preset.width * scale) / 2) * 2)
+  const h = Math.max(360, Math.round((preset.height * scale) / 2) * 2)
+  return { fps, w, h }
+}
+
+async function applyAdaptiveDowngrade() {
+  if (!activeShareTrack || !activePreset) return
+  if (adaptiveStep >= ADAPT_STEPS.length - 1) return
+  adaptiveStep++
+  const target = computeAdaptiveTarget()
+  if (!target) return
+  try {
+    await activeShareTrack.applyConstraints({
+      width: { max: target.w },
+      height: { max: target.h },
+      frameRate: { ideal: target.fps, max: target.fps },
+    })
+    setMediaHealthTargetFps(target.fps)
+    currentAutoQualityNote =
+      `检测到编码器压力过高，已自动降到 ${target.w}x${target.h}（帧率保持 ${target.fps}fps，稳帧优先）`
+    console.warn('[ScreenShare] ' + currentAutoQualityNote)
+  } catch (e) {
+    console.warn('[ScreenShare] 自适应降档失败:', e)
+  }
+  emit()
+}
+
+function onHealth(h: MediaHealth) {
+  currentLink = {
+    severity: h.severity,
+    transport: h.transport,
+    rttMs: h.rttMs,
+    inFps: h.inbound?.fps ?? 0,
+    lossPct: h.inbound?.lossPct ?? 0,
+    pacingStdMs: h.inbound?.frameIntervalStdMs ?? 0,
+    reasons: h.reasons,
+  }
+  // 只有本端在共享时才谈得上“降档”；作为接收方无法改发送端编码
+  if (activeShareTrack && activePreset) {
+    cpuStreak = h.outbound?.limit === 'cpu' ? cpuStreak + 1 : 0
+    // 每秒采样一次，连续 4 秒 CPU 受限才降档，避开首帧/偶发抖动
+    if (cpuStreak >= 4) {
+      cpuStreak = 0
+      void applyAdaptiveDowngrade()
+    }
+  } else {
+    cpuStreak = 0
+  }
+  emit()
+}
+
+function resetAdaptive() {
+  activeShareTrack = null
+  activePreset = null
+  adaptiveStep = -1
+  cpuStreak = 0
+  currentAutoQualityNote = null
 }
 
 function getState(): MediaState {
@@ -118,6 +229,8 @@ function getState(): MediaState {
       pushToTalk: currentPushToTalk,
       pushToTalkKey: currentPushToTalkKey,
       audioBitrate: 0,
+      link: null,
+      autoQualityNote: null,
     }
   }
   const room = currentRoom
@@ -145,6 +258,8 @@ function getState(): MediaState {
     pushToTalk: currentPushToTalk,
     pushToTalkKey: currentPushToTalkKey,
     audioBitrate: currentAudioBitrate,
+    link: currentLink,
+    autoQualityNote: currentAutoQualityNote,
   }
 }
 
@@ -239,7 +354,12 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
       screenShareCache.clear()
       remoteAudioElements.clear()
       stopBitrateSampling()
-      stopMediaStats()
+      stopMediaHealth()
+      unsubHealth?.()
+      unsubHealth = null
+      currentLink = null
+      resetAdaptive()
+      ;(window as any).__kaedeRoom = null
       emit()
     })
     .on(RoomEvent.ParticipantConnected, () => emit())
@@ -384,7 +504,12 @@ export async function connectMedia(opts: ConnectOptions): Promise<Room> {
   }
 
   startBitrateSampling()
-  startMediaStats(room)
+  startMediaHealth(room)
+  // 暴露给 QA/线上诊断：避免测试里 import 模块拿到另一个实例（HMR 下会失真）
+  ;(window as any).__kaedeRoom = room
+  ;(window as any).__kaedeMediaState = () => getState()
+  unsubHealth?.()
+  unsubHealth = subscribeMediaHealth(onHealth)
   emit()
   return room
 }
@@ -400,13 +525,36 @@ export async function disconnectMedia() {
   screenShareCache.clear()
   remoteAudioElements.clear()
   stopBitrateSampling()
-  stopMediaStats()
+  stopMediaHealth()
+  unsubHealth?.()
+  unsubHealth = null
+  currentLink = null
+  resetAdaptive()
+  ;(window as any).__kaedeRoom = null
   emit()
 }
 
 /**
  * 开启屏幕共享（simulcast + 用户选定档位）。
  */
+/**
+ * 屏幕共享首选编码器。
+ *
+ * LiveKit 默认 VP8（纯软件编码）。游戏/高动态共享时编码器会把 CPU 吃满，
+ * 表现就是“读文档没事、一打游戏就掉帧断续”。Windows 上 H.264 可走硬件编码
+ * （Media Foundation / QuickSync / NVENC 的 H.264 引擎），明显降低 CPU 占用。
+ * 浏览器没有 H.264 编码能力时退回 VP8。
+ */
+function preferredScreenShareCodec(): 'h264' | 'vp8' {
+  try {
+    const caps = RTCRtpSender.getCapabilities('video')
+    const hasH264 = !!caps?.codecs?.some((c) => /video\/h264/i.test(c.mimeType))
+    return hasH264 ? 'h264' : 'vp8'
+  } catch {
+    return 'vp8'
+  }
+}
+
 let isStartingShare = false
 export async function startScreenShare(presetId: string): Promise<boolean> {
   if (!currentRoom) throw new Error('未加入媒体房间')
@@ -438,6 +586,17 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
     const smoothFirst = preset.fps >= 30
     videoTrack.contentHint = smoothFirst ? 'motion' : 'detail'
     console.log('[ScreenShare] capture settings:', JSON.stringify(videoTrack.getSettings()))
+
+    // 游戏/高动态场景：编码器压力是主要瓶颈。H.264 在 Windows 上可走硬件编码
+    // （Media Foundation），显著降低 CPU 占用；浏览器不支持时回退 VP8。
+    const codec = preferredScreenShareCodec()
+    console.log('[ScreenShare] preferred codec=' + codec)
+
+    // 记录本端共享状态，供健康采样器判定“降档是否有效”
+    resetAdaptive()
+    activePreset = preset
+    activeShareTrack = videoTrack
+    setMediaHealthTargetFps(preset.fps)
     
     // 开启 simulcast，让接收端能切到不同分辨率层（高/中/低）
     // 注意：屏幕共享单层的话，接收端调画质会导致 SFU 强制降码率 → 画面糊。
@@ -457,6 +616,7 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
     const videoPub = await currentRoom.localParticipant.publishTrack(videoTrack, {
       source: Track.Source.ScreenShare,
       simulcast: false,
+      videoCodec: codec,
       screenShareEncoding: { maxBitrate: preset.bitrate, maxFramerate: preset.fps },
       degradationPreference: smoothFirst ? 'maintain-framerate' : 'maintain-resolution',
     })
@@ -538,6 +698,7 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
 
 export async function stopScreenShare(): Promise<void> {
   if (!currentRoom) return
+  resetAdaptive()
   // 清理本地预览
   for (const key of Array.from(screenShareCache.keys())) {
     if (key.startsWith('LOCAL-SHARE-')) {
@@ -728,6 +889,11 @@ export function subscribeMedia(fn: (state: MediaState) => void): () => void {
 
 export function getCurrentRoom(): Room | null {
   return currentRoom
+}
+
+/** 供 QA/诊断读取当前媒体状态（不含 DOM）。 */
+export function getMediaState(): MediaState {
+  return getState()
 }
 
 // 兼容旧 API

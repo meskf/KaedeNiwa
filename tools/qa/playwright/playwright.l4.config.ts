@@ -28,6 +28,11 @@ export default defineConfig({
         '--use-fake-device-for-media-stream',
         '--allow-running-insecure-content',
         '--disable-features=WebRtcHideLocalIpsWithMdns',
+        // 帧率测试必须是“真帧率”：后台/被遮挡的标签页默认会被 Chromium 降频，
+        // rAF 和 canvas.captureStream 会被压到 1fps，导致测试结果完全失真。
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
       ],
     },
   },

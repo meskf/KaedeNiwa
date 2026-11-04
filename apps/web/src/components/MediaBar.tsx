@@ -364,10 +364,20 @@ export function MediaBar({ channelId, compact = false }: Props) {
         >
           {VIDEO_PRESETS.map(p => (
             <option key={p.id} value={p.id}>
-              {p.label} ({(p.bitrate / 1e6).toFixed(1)}M)
+              {p.label} ({(p.bitrate / 1e6).toFixed(1)}M){p.id === '720p60' ? ' · 游戏推荐' : ''}
             </option>
           ))}
         </select>
+
+        {/* 高动态场景提示：CS2 这类快节奏画面 30fps 天然发飘，且独占全屏抓屏会走 CPU 拷贝 */}
+        <span
+          className="text-[10px] leading-tight text-[var(--text-muted)] max-w-[120px] shrink-0"
+          title="高动态画面（FPS 游戏）建议 60fps 档；游戏用独占全屏时请改成无边框窗口，否则抓屏会退回 CPU 拷贝、帧间隔明显抖动"
+        >
+          游戏建议 720p60
+          <br />
+          独占全屏改无边框
+        </span>
 
         <button
           data-testid="media-share-toggle"
