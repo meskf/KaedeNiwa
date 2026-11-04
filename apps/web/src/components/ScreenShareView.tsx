@@ -3,6 +3,7 @@ import { ScreenOrientation } from '@capacitor/screen-orientation'
 import { useMediaState } from '../hooks/useLiveKitRoom'
 import { setScreenShareQuality } from '../lib/livekit'
 import { VIDEO_PRESETS } from '../lib/videoPresets'
+import { getDiag } from '../lib/mediaHealth'
 import type { LinkInfo } from '../lib/livekit'
 
 function isMobileViewport() {
@@ -54,6 +55,10 @@ function linkLabel(link: LinkInfo | null, local: boolean, note: string | null): 
   if (!link) return { text: '', tone: 'ok' }
   if (link.transport === 'direct-tcp') {
     return { text: `TCP 回落 · 丢包 ${link.lossPct.toFixed(1)}% · 放行 UDP 7882`, tone: 'bad' }
+  }
+  // 有码率流入却解不出画面：不是带宽问题，是关键帧丢了（已在自动重订阅）
+  if (link.stalledSec >= 2) {
+    return { text: `画面无帧 ${link.stalledSec}s · 关键帧丢失 · 已自动重订阅`, tone: 'bad' }
   }
   if (link.severity === 'bad') {
     if (link.reasons.includes('packet-loss')) return { text: `丢包 ${link.lossPct.toFixed(1)}%`, tone: 'bad' }
@@ -253,6 +258,23 @@ function VideoPane({ share, multi, link, note }: { share: any; multi: boolean; l
           </span>
         )}
       </div>
+
+      {/* 冻结问题现场取证：不用边打游戏边敲控制台，点一下导出最近 30 秒逐秒数据 */}
+      <button
+        data-testid="screen-share-diag"
+        onClick={() => {
+          const blob = new Blob([JSON.stringify(getDiag(), null, 2)], { type: 'application/json' })
+          const a = document.createElement('a')
+          a.href = URL.createObjectURL(blob)
+          a.download = `kaede-diag-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
+          a.click()
+          setTimeout(() => URL.revokeObjectURL(a.href), 5_000)
+        }}
+        title="导出最近 30 秒媒体诊断（含逐秒帧率/丢包/关键帧/冻结事件）"
+        className="absolute bottom-3 right-3 px-2 py-1 bg-black/60 backdrop-blur-sm text-white text-[10px] rounded-md hover:bg-black/80"
+      >
+        诊断
+      </button>
     </div>
   )
 }

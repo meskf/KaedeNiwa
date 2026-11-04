@@ -372,7 +372,7 @@ export function MediaBar({ channelId, compact = false }: Props) {
         {/* 高动态场景提示：CS2 这类快节奏画面 30fps 天然发飘，且独占全屏抓屏会走 CPU 拷贝 */}
         <span
           className="text-[10px] leading-tight text-[var(--text-muted)] max-w-[120px] shrink-0"
-          title="高动态画面（FPS 游戏）建议 60fps 档；游戏用独占全屏时请改成无边框窗口，否则抓屏会退回 CPU 拷贝、帧间隔明显抖动"
+          title="高动态画面（FPS 游戏）建议 60fps 档；游戏用独占全屏时请改成无边框窗口，否则抓屏会退回 CPU 拷贝、帧间隔明显抖动。若仍然冻结，可在地址后加 ?codec=vp8 强制软件编码以排除显卡编码器问题"
         >
           游戏建议 720p60
           <br />

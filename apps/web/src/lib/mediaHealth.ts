@@ -51,6 +51,19 @@ export interface EndpointHealth {
   frameIntervalStdMs?: number
   /** 仅入站：窗口内丢弃的帧数（解码器/播放侧） */
   droppedFrames?: number
+  /** 关键帧累计数（出站 keyFramesEncoded / 入站 keyFramesDecoded）；长时间不增长说明请求不到关键帧 */
+  keyFrames?: number
+  /**
+   * 连续“有数据但无画面”的秒数。
+   * 入站口径：fps≈0 且仍有码率在流入 → 解码器拿不到关键帧，画面冻结。
+   * 出站口径：framesEncoded≈0 且 encoder 自报 cpu 受限 → 编码器停摆。
+   */
+  stalledSec?: number
+  /** 仅出站：SFU 反馈的上行丢包率（remote-inbound-rtp），区分“上行丢”还是“观众侧下行丢” */
+  uplinkLossPct?: number
+  uplinkRttMs?: number
+  /** 仅入站：浏览器没有提供 packetsReceived，丢包率无法计算（不能当 0 也不能当 100） */
+  lossUnknown?: boolean
 }
 
 export interface MediaHealth {
@@ -80,12 +93,48 @@ interface PrevSample {
   delay?: number
   sqDelay?: number
   dropped?: number
+  /** 连续“有数据无画面/编码停摆”的采样秒数 */
+  stall?: number
+  /** SFU 反馈的累计上行丢包数 */
+  upLost?: number
 }
+
+/** 有一次“画面冻结”事件的证据快照，供事后（不用边打游戏边操作）导出分析。 */
+export interface DiagEvent {
+  ts: number
+  side: 'in' | 'out'
+  presetId: string | null
+  codec: string | null
+  snapshot: MediaHealth
+}
+
+export interface DiagReport {
+  version: string
+  ts: number
+  targetFps: number
+  presetId: string | null
+  codec: string | null
+  ua: string
+  /** 最近 30 秒每秒一条 */
+  history: MediaHealth[]
+  /** 最近 20 次冻结/编码停摆事件 */
+  events: DiagEvent[]
+}
+
+const DIAG_VERSION = 'diag-2'
+const DIAG_HISTORY_MAX = 30
+const DIAG_EVENTS_MAX = 20
+const DIAG_EVENTS_KEY = 'kaede.diag.events'
 
 export const HEALTH_WINDOW_SEC = 10
 
 const prev = new Map<string, PrevSample>()
 const buckets = new Map<string, number[]>() // 每秒入站帧数
+const lossBuckets = new Map<string, Array<{ lost: number; recv: number }>>() // 每秒丢包/收包，滚动窗口
+const uplinkBuckets = new Map<string, Array<{ lost: number; sent: number }>>() // 每秒上行丢包/发包，滚动窗口
+const diagHistory: MediaHealth[] = []
+const diagEvents: DiagEvent[] = []
+const diagMeta: { presetId: string | null; codec: string | null } = { presetId: null, codec: null }
 let timer: number | undefined
 let targetFps = 30
 let last: MediaHealth = emptyHealth()
@@ -157,6 +206,13 @@ async function sampleOutbound(key: string, pub: TrackPublication): Promise<{ ep:
   const dt = p ? now - p.ts : 0
   const fps = Math.max(0, rate(video.framesEncoded ?? 0, p?.frames, dt))
   const mbps = Math.max(0, (rate(video.bytesSent ?? 0, p?.bytes, dt) * 8) / 1e6)
+  const keyFrames = video.keyFramesEncoded ?? 0
+  const rawLimit = String(video.qualityLimitationReason ?? 'none')
+  const limit: EndpointHealth['limit'] =
+    rawLimit === 'cpu' ? 'cpu' : rawLimit === 'bandwidth' ? 'bandwidth' : rawLimit === 'none' ? 'none' : 'other'
+  // 只有 encoder 自报 cpu 受限且完全不出帧时才算“编码器停摆”；
+  // 静态文档本来就不出帧（Chrome 只在画面变化时编码），不能算停摆。
+  const stalledSec = limit === 'cpu' && fps < 0.5 ? (p?.stall ?? 0) + 1 : 0
   prev.set(key, {
     ts: now,
     frames: video.framesEncoded ?? 0,
@@ -165,13 +221,33 @@ async function sampleOutbound(key: string, pub: TrackPublication): Promise<{ ep:
     lost: 0,
     freezes: 0,
     frozenSeconds: 0,
+    stall: stalledSec,
+    upLost: 0,
   })
 
-  const rawLimit = String(video.qualityLimitationReason ?? 'none')
-  const limit: EndpointHealth['limit'] =
-    rawLimit === 'cpu' ? 'cpu' : rawLimit === 'bandwidth' ? 'bandwidth' : rawLimit === 'none' ? 'none' : 'other'
-
   const t = transportOf(report)
+  // SFU 回传的 remote-inbound-rtp：只有发布端才有。
+  // 观众端的 inbound 丢包可能是“观众网络”，而上行丢包只能在这里看到。
+  let upLost = 0
+  let upRtt = 0
+  report.forEach(s => {
+    if (s.type !== 'remote-inbound-rtp' || s.kind !== 'video') return
+    upLost = Math.max(upLost, Number(s.packetsLost ?? 0))
+    if (typeof s.roundTripTime === 'number') upRtt = s.roundTripTime * 1000
+  })
+  // 上行丢包率同样按 10 秒窗口算：用累计值会被早期的一次丢包永久拉高，
+  // 导致自动降码率一路降到地板。
+  const sentDelta = Math.max(0, rate(video.packetsSent ?? 0, p?.packets, dt))
+  const upLostDelta = Math.max(0, rate(upLost, p?.upLost, dt))
+  const ub = uplinkBuckets.get(key) ?? []
+  if (dt > 0) ub.push({ lost: upLostDelta, sent: sentDelta })
+  while (ub.length > HEALTH_WINDOW_SEC) ub.shift()
+  uplinkBuckets.set(key, ub)
+  const sumUpLost = ub.reduce((n, b) => n + b.lost, 0)
+  const sumUpSent = ub.reduce((n, b) => n + b.sent, 0)
+  const uplinkLossPct = sumUpSent > 0 ? Math.min(100, (sumUpLost / sumUpSent) * 100) : 0
+  prev.set(key, { ...prev.get(key)!, upLost })
+
   return {
     ep: {
       fps,
@@ -180,6 +256,10 @@ async function sampleOutbound(key: string, pub: TrackPublication): Promise<{ ep:
       width: video.frameWidth ?? 0,
       height: video.frameHeight ?? 0,
       limit,
+      keyFrames,
+      stalledSec,
+      uplinkLossPct,
+      uplinkRttMs: upRtt,
     },
     transport: t.transport,
     rttMs: t.rttMs,
@@ -203,10 +283,14 @@ async function sampleInbound(key: string, pub: TrackPublication): Promise<{ ep: 
   const dt = p ? now - p.ts : 0
   const fps = Math.max(0, rate(video.framesDecoded ?? 0, p?.frames, dt))
   const mbps = Math.max(0, (rate(video.bytesReceived ?? 0, p?.bytes, dt) * 8) / 1e6)
-  const lostDelta = rate(video.packetsLost ?? 0, p?.lost, dt)
-  const recvDelta = rate(video.packetsReceived ?? 0, p?.packets, dt)
+  const lostDelta = Math.max(0, rate(video.packetsLost ?? 0, p?.lost, dt))
+  // 部分浏览器/版本的 inbound-rtp 不提供 packetsReceived。缺了它分母就只剩
+  // lostDelta，任何一次丢包都会算出 100%，这正是“丢包率极高、却和分辨率无关”的来源。
+  const recvKnown = typeof video.packetsReceived === 'number'
+  const recvDelta = recvKnown ? Math.max(0, rate(video.packetsReceived, p?.packets, dt)) : 0
   const freezeDelta = Math.max(0, rate(video.freezeCount ?? 0, p?.freezes, dt))
   const frozenMsDelta = Math.max(0, rate(video.totalFreezesDuration ?? 0, p?.frozenSeconds, dt) * 1000)
+  const keyFrames = video.keyFramesDecoded ?? 0
 
   // 帧间隔稳定性：Chrome 的 inbound-rtp 提供 totalInterFrameDelay（秒）与
   // totalSquaredInterFrameDelay，二者之差除以帧数就是帧间隔方差 → 标准差。
@@ -224,6 +308,10 @@ async function sampleInbound(key: string, pub: TrackPublication): Promise<{ ep: 
   }
   const droppedFrames = Math.max(0, (video.framesDropped ?? 0) - (p?.dropped ?? video.framesDropped ?? 0))
 
+  // “有码率在流入、但一帧都解不出来” → 关键帧丢失，画面冻结。
+  // 静态文档时码率≈0，不会误判成冻结。
+  const stalledSec = fps < 0.5 && mbps > 0.2 ? (p?.stall ?? 0) + 1 : 0
+
   prev.set(key, {
     ts: now,
     frames: video.framesDecoded ?? 0,
@@ -235,9 +323,17 @@ async function sampleInbound(key: string, pub: TrackPublication): Promise<{ ep: 
     delay: video.totalInterFrameDelay,
     sqDelay: video.totalSquaredInterFrameDelay,
     dropped: video.framesDropped ?? 0,
+    stall: stalledSec,
   })
 
-  const lossPct = recvDelta + lostDelta > 0 ? (lostDelta / (recvDelta + lostDelta)) * 100 : 0
+  // 丢包率按 10 秒窗口累计：单秒突发不应被显示成“极高丢包”。
+  const lb = lossBuckets.get(key) ?? []
+  if (dt > 0) lb.push({ lost: lostDelta, recv: recvDelta })
+  while (lb.length > HEALTH_WINDOW_SEC) lb.shift()
+  lossBuckets.set(key, lb)
+  const sumLost = lb.reduce((n, b) => n + b.lost, 0)
+  const sumRecv = lb.reduce((n, b) => n + b.recv, 0)
+  const lossPct = recvKnown && sumLost + sumRecv > 0 ? (sumLost / (sumLost + sumRecv)) * 100 : 0
   const jitterMs = typeof video.jitter === 'number' ? video.jitter * 1000 : 0
 
   // 每秒入站帧数，用于检测“断断续续”（某些秒完全无帧 / 帧数骤降）
@@ -261,6 +357,9 @@ async function sampleInbound(key: string, pub: TrackPublication): Promise<{ ep: 
       frameIntervalMs,
       frameIntervalStdMs,
       droppedFrames,
+      keyFrames,
+      stalledSec,
+      lossUnknown: !recvKnown,
     },
     transport: t.transport,
     rttMs: t.rttMs,
@@ -334,6 +433,23 @@ function warnOnce(h: MediaHealth) {
   }
 }
 
+function recordStall(side: 'in' | 'out', h: MediaHealth) {
+  const ep = side === 'in' ? h.inbound : h.outbound
+  // 只在“刚满 2 秒”那一刻记录一次，避免每秒刷屏/刷爆存储
+  if (!ep?.stalledSec || ep.stalledSec !== 2) return
+  diagEvents.push({ ts: Date.now(), side, presetId: diagMeta.presetId, codec: diagMeta.codec, snapshot: h })
+  while (diagEvents.length > DIAG_EVENTS_MAX) diagEvents.shift()
+  try {
+    localStorage.setItem(DIAG_EVENTS_KEY, JSON.stringify(diagEvents))
+  } catch {
+    /* 隐私模式/配额不足时忽略 */
+  }
+  console.warn(
+    `[Diag] ${side === 'in' ? '接收端连续 2 秒有数据但无画面（疑似关键帧丢失）' : '编码器连续 2 秒无输出（疑似 CPU/GPU 被打满）'}`,
+    h,
+  )
+}
+
 async function tick(room: Room) {
   try {
     let transport: MediaHealth['transport'] = 'unknown'
@@ -383,15 +499,19 @@ async function tick(room: Room) {
     }
 
     const outTxt = outbound
-      ? `out ${outbound.width}x${outbound.height} fps=${outbound.fps.toFixed(1)}/${outbound.nominalFps} ${outbound.mbps.toFixed(2)}Mbps limit=${outbound.limit}`
+      ? `out ${outbound.width}x${outbound.height} fps=${outbound.fps.toFixed(1)}/${outbound.nominalFps} ${outbound.mbps.toFixed(2)}Mbps up=${(outbound.uplinkLossPct ?? 0).toFixed(1)}% kf=${outbound.keyFrames ?? 0} limit=${outbound.limit} stall=${outbound.stalledSec ?? 0}s`
       : 'out -'
     const inTxt = inbound
-      ? `in  ${inbound.width}x${inbound.height} fps=${inbound.fps.toFixed(1)} ${inbound.mbps.toFixed(2)}Mbps loss=${(inbound.lossPct ?? 0).toFixed(1)}% jitter=${(inbound.jitterMs ?? 0).toFixed(0)}ms gap=${(inbound.frameIntervalStdMs ?? 0).toFixed(0)}ms dropped=${inbound.droppedFrames ?? 0} freeze=${(inbound.freezes ?? 0).toFixed(1)}/${(inbound.frozenMs ?? 0).toFixed(0)}ms`
+      ? `in  ${inbound.width}x${inbound.height} fps=${inbound.fps.toFixed(1)} ${inbound.mbps.toFixed(2)}Mbps loss=${(inbound.lossPct ?? 0).toFixed(1)}%${inbound.lossUnknown ? '(unknown)' : ''} jitter=${(inbound.jitterMs ?? 0).toFixed(0)}ms gap=${(inbound.frameIntervalStdMs ?? 0).toFixed(0)}ms kf=${inbound.keyFrames ?? 0} dropped=${inbound.droppedFrames ?? 0} freeze=${(inbound.freezes ?? 0).toFixed(1)}/${(inbound.frozenMs ?? 0).toFixed(0)}ms stall=${inbound.stalledSec ?? 0}s`
       : 'in  -'
     console.log(
       `[MediaHealth] ${transport} rtt=${rttMs}ms | ${outTxt} | ${inTxt} | gaps=${windowStats.zeroFrameBuckets}/${windowStats.sampledBuckets}` +
         (reasons.length ? ` | ${reasons.join(',')}` : ''),
     )
+    diagHistory.push(last)
+    while (diagHistory.length > DIAG_HISTORY_MAX) diagHistory.shift()
+    recordStall('out', last)
+    recordStall('in', last)
     warnOnce(last)
     for (const fn of listeners) fn(last)
   } catch (e) {
@@ -403,10 +523,14 @@ export function startMediaHealth(room: Room) {
   stopMediaHealth()
   prev.clear()
   buckets.clear()
+  lossBuckets.clear()
+  uplinkBuckets.clear()
   warnedKeys.clear()
+  diagHistory.length = 0
   last = emptyHealth()
   timer = window.setInterval(() => void tick(room), 1000)
   ;(window as any).__kaedeMediaHealth = () => last
+  ;(window as any).__kaedeDiag = () => getDiag()
   // 兼容旧诊断入口
   ;(window as any).__kaedeMediaStats = () => last
 }
@@ -418,6 +542,28 @@ export function stopMediaHealth() {
   }
   prev.clear()
   buckets.clear()
+  lossBuckets.clear()
+  uplinkBuckets.clear()
+}
+
+/** 记录当前共享档位/编码器，冻结事件里会带上，便于事后定位。 */
+export function setMediaHealthContext(ctx: { presetId?: string | null; codec?: string | null }) {
+  if (ctx.presetId !== undefined) diagMeta.presetId = ctx.presetId
+  if (ctx.codec !== undefined) diagMeta.codec = ctx.codec
+}
+
+/** 事后诊断：最近 30 秒逐秒数据 + 冻结事件（控制台 `copy(JSON.stringify(__kaedeDiag()))`）。 */
+export function getDiag(): DiagReport {
+  return {
+    version: DIAG_VERSION,
+    ts: Date.now(),
+    targetFps,
+    presetId: diagMeta.presetId,
+    codec: diagMeta.codec,
+    ua: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+    history: diagHistory.slice(),
+    events: diagEvents.slice(),
+  }
 }
 
 /** 发布端把当前档位目标帧率告诉健康采样器，用于判定 “帧率是否达标”。 */

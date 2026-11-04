@@ -8,6 +8,7 @@ function toVideoQuality(q: QualityStr): VideoQuality {
 import { findPreset, type VideoPreset } from './videoPresets'
 import {
   startMediaHealth, stopMediaHealth, subscribeMediaHealth, setMediaHealthTargetFps,
+  setMediaHealthContext,
   type MediaHealth, type HealthReason,
 } from './mediaHealth'
 import { startRnnoiseProcessing, isRnnoiseSupported, type RnnoiseHandle } from './rnnoise'
@@ -52,6 +53,8 @@ export interface LinkInfo {
   lossPct: number
   /** 接收端帧间隔标准差（ms）：越大越“不跟手” */
   pacingStdMs: number
+  /** 接收端连续“有码率但无画面”的秒数（关键帧丢失/卡死） */
+  stalledSec: number
   reasons: HealthReason[]
 }
 
@@ -115,6 +118,8 @@ let currentLink: LinkInfo | null = null
 let currentAutoQualityNote: string | null = null
 let unsubHealth: (() => void) | null = null
 let activeShareTrack: MediaStreamTrack | null = null
+/** 底层 RTCRtpSender：用于上行丢包时动态下调 maxBitrate（LiveKit 发布参数只在发布时生效） */
+let activeShareSender: RTCRtpSender | null = null
 let activePreset: VideoPreset | null = null
 let cpuStreak = 0
 
@@ -125,20 +130,22 @@ function emit() {
 
 // ---- 屏幕共享自适应降档 ----
 //
-// 触发条件只看 encoder 自报的 qualityLimitationReason === 'cpu'。
+// 触发条件：encoder 自报 qualityLimitationReason === 'cpu'，或编码器连续
+// 2 秒完全不出帧（stalledSec >= 2）。
 //
 // 为什么不用“帧率不达标”：静态文档共享时 Chrome 本来就只在画面变化时出帧，
 // framesEncoded 很低但观看完全正常（用户实测“读文档还好”）。而游戏/滚动这类
 // 高动态画面会把编码器压满，Chrome 报 cpu → 实际丢帧、画面断续。
 //
-// 稳帧优先：降档**只降分辨率、绝不动帧率**。
+// 稳帧优先：前两档只降分辨率、不动帧率；后两档才允许帧率减半。
 // 帧率一旦被砍（30→22→15），帧间隔反而更不匀，肉眼就是“一卡一卡”。
-// 而分辨率降一档能显著降低单帧编码耗时，帧间隔回到稳定节奏。
+// 但编码器完全停摆（framesEncoded≈0）时，继续保帧率只会一帧都发不出，
+// 所以最后两档允许 60→30 的回落。
 const ADAPT_STEPS: Array<{ scale: number; fpsRatio: number }> = [
   { scale: 0.85, fpsRatio: 1 },
   { scale: 0.7, fpsRatio: 1 },
-  { scale: 0.55, fpsRatio: 1 },
-  { scale: 0.45, fpsRatio: 1 },
+  { scale: 0.55, fpsRatio: 0.5 },
+  { scale: 0.45, fpsRatio: 0.5 },
 ]
 let adaptiveStep = -1
 
@@ -146,8 +153,8 @@ function computeAdaptiveTarget() {
   const preset = activePreset
   if (!preset) return null
   const step = ADAPT_STEPS[Math.max(0, adaptiveStep)]
-  // 帧率保持档位原值：宁可糊一点，也要节奏稳
-  const fps = preset.fps
+  // 两档之内保持档位原帧率：宁可糊一点，也要节奏稳
+  const fps = Math.max(15, Math.round(preset.fps * step.fpsRatio))
   const scale = step.scale
   const w = Math.max(640, Math.round((preset.width * scale) / 2) * 2)
   const h = Math.max(360, Math.round((preset.height * scale) / 2) * 2)
@@ -184,28 +191,99 @@ function onHealth(h: MediaHealth) {
     inFps: h.inbound?.fps ?? 0,
     lossPct: h.inbound?.lossPct ?? 0,
     pacingStdMs: h.inbound?.frameIntervalStdMs ?? 0,
+    stalledSec: h.inbound?.stalledSec ?? 0,
     reasons: h.reasons,
   }
-  // 只有本端在共享时才谈得上“降档”；作为接收方无法改发送端编码
   if (activeShareTrack && activePreset) {
-    cpuStreak = h.outbound?.limit === 'cpu' ? cpuStreak + 1 : 0
-    // 每秒采样一次，连续 4 秒 CPU 受限才降档，避开首帧/偶发抖动
-    if (cpuStreak >= 4) {
+    // 上行丢包（SFU 反馈）：这才是“PC → 服务器”这一段，观众换成 4G 也照样卡。
+    if ((h.outbound?.uplinkLossPct ?? 0) >= 4) void reduceSentBitrate(h.outbound?.uplinkLossPct ?? 0)
+
+    // 两条触发线：encoder 自报 cpu 受限；或编码器连续 2 秒完全不出帧。
+    // 后者比“cpu”更快，能在画面已经冻住时立即降档。
+    const stalled = (h.outbound?.stalledSec ?? 0) >= 2
+    const cpu = h.outbound?.limit === 'cpu'
+    cpuStreak = stalled || cpu ? cpuStreak + 1 : 0
+    const need = stalled ? 2 : 4
+    if (cpuStreak >= need) {
       cpuStreak = 0
-      void applyAdaptiveDowngrade()
+      if (adaptiveStep >= ADAPT_STEPS.length - 1) {
+        currentAutoQualityNote =
+          '编码器持续无输出：游戏可能占满 GPU/CPU。可尝试 ?codec=vp8 强制软件编码，或把游戏改为无边框窗口并限制帧率'
+        emit()
+      } else {
+        void applyAdaptiveDowngrade()
+      }
     }
   } else {
     cpuStreak = 0
+    // 作为观众：连续 2 秒“有码率但解不出画面”= 关键帧丢失，重新订阅触发关键帧请求。
+    if ((h.inbound?.stalledSec ?? 0) >= 2) void resubscribeRemoteShare()
   }
   emit()
 }
 
+let lastResubAt = 0
+let lastBitrateCutAt = 0
+
+/**
+ * 上行丢包时只降编码码率上限，不动分辨率/帧率。
+ * LiveKit 的 screenShareEncoding 只在发布时生效，这里直接改底层 sender 参数。
+ */
+async function reduceSentBitrate(lossPct: number) {
+  if (!activeShareTrack) return
+  const now = Date.now()
+  if (now - lastBitrateCutAt < 10_000) return
+  try {
+    const sender = activeShareSender
+    if (!sender) return
+    const params = sender.getParameters()
+    const enc = params.encodings?.[0]
+    if (!enc || typeof enc.maxBitrate !== 'number') return
+    const next = Math.max(400_000, Math.round(enc.maxBitrate * 0.65))
+    if (next >= enc.maxBitrate) return
+    lastBitrateCutAt = now
+    enc.maxBitrate = next
+    await sender.setParameters(params)
+    currentAutoQualityNote = `上行丢包 ${lossPct.toFixed(1)}%，已自动降码率至 ${(next / 1e6).toFixed(1)} Mbps`
+    console.warn(`[ScreenShare] ${currentAutoQualityNote}`)
+    emit()
+  } catch (e) {
+    console.warn('[ScreenShare] 降低上行码率失败:', e)
+  }
+}
+async function resubscribeRemoteShare() {
+  if (!currentRoom) return
+  const now = Date.now()
+  // 重订阅会让画面闪一下，20 秒内最多做一次，避免抖动循环
+  if (now - lastResubAt < 20_000) return
+  for (const p of currentRoom.remoteParticipants.values()) {
+    for (const pub of p.videoTrackPublications.values()) {
+      if (pub.source !== Track.Source.ScreenShare) continue
+      lastResubAt = now
+      try {
+        console.warn('[ScreenShare] 接收端连续 2 秒有码率无画面，重新订阅以请求关键帧')
+        await pub.setSubscribed(false)
+        setTimeout(() => {
+          try { pub.setSubscribed(true) } catch (e) { console.warn('[ScreenShare] 重订阅恢复失败:', e) }
+        }, 300)
+        currentAutoQualityNote = '画面连续无帧，已重新订阅请求关键帧'
+      } catch (e) {
+        console.warn('[ScreenShare] 重新订阅失败:', e)
+      }
+      return
+    }
+  }
+}
+
 function resetAdaptive() {
   activeShareTrack = null
+  activeShareSender = null
   activePreset = null
   adaptiveStep = -1
   cpuStreak = 0
+  lastBitrateCutAt = 0
   currentAutoQualityNote = null
+  setMediaHealthContext({ presetId: null })
 }
 
 function getState(): MediaState {
@@ -546,6 +624,18 @@ export async function disconnectMedia() {
  * 浏览器没有 H.264 编码能力时退回 VP8。
  */
 function preferredScreenShareCodec(): 'h264' | 'vp8' {
+  // 现场二分用：?codec=vp8 或 localStorage.kaede.codec=vp8 强制软件编码。
+  // 若 VP8 下高动态画面不再冻结，说明问题在 H.264 硬件编码器（游戏抢占 GPU）。
+  try {
+    const fromQuery = new URLSearchParams(window.location.search).get('codec')
+    const forced = fromQuery ?? localStorage.getItem('kaede.codec')
+    if (forced === 'vp8' || forced === 'h264') {
+      console.log('[ScreenShare] codec forced by user: ' + forced)
+      return forced
+    }
+  } catch {
+    /* 非浏览器环境忽略 */
+  }
   try {
     const caps = RTCRtpSender.getCapabilities('video')
     const hasH264 = !!caps?.codecs?.some((c) => /video\/h264/i.test(c.mimeType))
@@ -597,6 +687,8 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
     activePreset = preset
     activeShareTrack = videoTrack
     setMediaHealthTargetFps(preset.fps)
+    setMediaHealthContext({ presetId, codec })
+    lastResubAt = 0
     
     // 开启 simulcast，让接收端能切到不同分辨率层（高/中/低）
     // 注意：屏幕共享单层的话，接收端调画质会导致 SFU 强制降码率 → 画面糊。
@@ -620,6 +712,7 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
       screenShareEncoding: { maxBitrate: preset.bitrate, maxFramerate: preset.fps },
       degradationPreference: smoothFirst ? 'maintain-framerate' : 'maintain-resolution',
     })
+    activeShareSender = (videoPub.track as LocalTrack | undefined)?.sender ?? null
 
     // 系统/标签页音频（用户勾选"共享音频"时才有）—— 独立发布
     const audioTracks = stream.getAudioTracks()
@@ -669,7 +762,9 @@ export async function startScreenShare(presetId: string): Promise<boolean> {
       console.warn('[ScreenShare] 本地预览注入失败:', e)
     }
     
-    // 监听用户点系统停止共享
+    // 监听用户点系统/浏览器原生的“停止共享”：
+    // LiveKit 的 LocalVideoTrack 没有 onended，必须挂在底层 MediaStreamTrack 上，
+    // 否则浏览器原生停止后 UI 会一直显示“共享中”。
     videoTrack.onended = () => {
       stopScreenShare().catch(console.error)
     }
