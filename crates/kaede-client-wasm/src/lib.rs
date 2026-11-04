@@ -150,14 +150,20 @@ impl JsClient {
             .map_err(|e| JsValue::from_str(&format!("hostAddPeer: {}", e)))
     }
 
-    /// 主群是否处于"我是第一个成员（host）"状态。
+    /// 主群是否处于"我是创建者（host）"状态。
     /// true = 收到 PeerJoined 时应该调 hostAddPeer 拉人。
+    ///
+    /// 旧实现用 `成员数 == 1` 推断，拉进第一个成员后立刻变成 false，
+    /// 第 3 个及之后登录的用户永远不会被拉进主群。现在由
+    /// `RoomSession::become_host` / `become_guest` 显式设置；
+    /// 成员数 == 1 只作为“旧快照 / 重连恢复”场景的兜底。
     #[wasm_bindgen(js_name = isMlsHost)]
     pub fn is_mls_host(&self) -> bool {
         let room_opt = self.room.lock().unwrap().clone();
         if let Some(room) = room_opt {
             let conn = room.connection();
-            conn.mls_is_ready() && conn.mls_member_uids().len() == 1
+            conn.mls_is_ready()
+                && (conn.is_host() || conn.mls_member_uids().len() == 1)
         } else {
             false
         }

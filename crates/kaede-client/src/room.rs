@@ -404,6 +404,18 @@ impl RoomSession {
         }
         conn.set_identity_restored(restored);
 
+        // 恢复“我是主群创建者（host）”标记：
+        // 刷新后 join_room 会跳过 become_host（mls_is_ready 已恢复），
+        // 若不恢复该标记，host 刷新后就再也不会 hostAddPeer 拉新成员。
+        if restored {
+            if let Some(store) = &storage {
+                let marker_key = format!("{}/{}", server_url, uid.as_str());
+                if let Ok(Some(_)) = store.get("mls_host", &marker_key).await {
+                    conn.set_is_host(true);
+                }
+            }
+        }
+
         // B3+: 注入 aux storage hook + 恢复 DM / 私密频道 snapshot
         if let Some(store) = &storage {
             let hook = AuxStorageHook {
@@ -537,6 +549,18 @@ impl RoomSession {
         }
         conn.set_identity_restored(restored);
 
+        // 恢复“我是主群创建者（host）”标记：
+        // 刷新后 join_room 会跳过 become_host（mls_is_ready 已恢复），
+        // 若不恢复该标记，host 刷新后就再也不会 hostAddPeer 拉新成员。
+        if restored {
+            if let Some(store) = &storage {
+                let marker_key = format!("{}/{}", server_url, uid.as_str());
+                if let Ok(Some(_)) = store.get("mls_host", &marker_key).await {
+                    conn.set_is_host(true);
+                }
+            }
+        }
+
         // B3+: 注入 aux storage hook + 恢复 DM / 私密频道 snapshot
         if let Some(store) = &storage {
             let hook = AuxStorageHook {
@@ -584,14 +608,38 @@ impl RoomSession {
     /// 房主：建 MLS 组 + 上传 KeyPackage 队列。
     pub async fn become_host(&self) -> Result<(), ClientError> {
         self.conn.mls_create_group()?;
+        // 记住“我是主群创建者”。UI 的 isMlsHost 曾用 `成员数 == 1` 推断，
+        // 一旦拉进第一个成员就变成 false，导致第 3 个及之后的登录用户
+        // 永远不会被 hostAddPeer 拉进主群（公开频道 reaction 等全部失效）。
+        self.conn.set_is_host(true);
+        self.persist_host_marker(true).await;
         self.publish_key_packages(!self.conn.identity_restored())
             .await?;
         self.save_snapshot().await?;
         Ok(())
     }
 
+    /// 持久化“主群创建者”标记（刷新/重连后仍能拉新成员）。
+    /// 失败只影响多人加入，不阻断登录。
+    async fn persist_host_marker(&self, is_host: bool) {
+        let Some(store) = &self.storage else {
+            return;
+        };
+        let key = format!("{}/{}", self.server_url, self.uid.as_str());
+        let res = if is_host {
+            store.put("mls_host", &key, b"1").await
+        } else {
+            store.delete("mls_host", &key).await
+        };
+        if let Err(e) = res {
+            tracing::warn!("[mls] persist host marker failed: {}", e);
+        }
+    }
+
     /// 新成员：生成 + 上传 KeyPackage 队列。
     pub async fn become_guest(&self) -> Result<(), ClientError> {
+        self.conn.set_is_host(false);
+        self.persist_host_marker(false).await;
         if self.conn.identity_restored() {
             // 同一身份重启：只补货，不覆盖仍可用的旧 KP。
             self.replenish_key_packages_if_low().await?;
