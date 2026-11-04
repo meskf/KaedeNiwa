@@ -48,8 +48,7 @@ export async function enterVoiceChannel(page: Page, chId: string, voiceName: str
 
 export async function dumpRoomState(page: Page) {
   return await page.evaluate(async () => {
-    const m: any = await import('/src/lib/livekit.ts');
-    const r = m.getCurrentRoom();
+    const r = (window as any).__kaedeRoom;
     if (!r) return { noRoom: true };
     const remote: any[] = [];
     for (const [id, p] of r.remoteParticipants) {
@@ -79,16 +78,16 @@ export async function dumpRoomState(page: Page) {
 
 export async function myIdentity(page: Page): Promise<string> {
   return await page.evaluate(async () => {
-    const m: any = await import('/src/lib/livekit.ts');
-    const room = m.getCurrentRoom();
+    // 用页面挂载的实例，避免 HMR 下动态 import 拿到另一个模块实例（currentRoom 为 null）
+    const room = (window as any).__kaedeRoom;
     return room?.localParticipant?.identity ?? '';
   });
 }
 
 export async function localShareInfo(page: Page) {
   return await page.evaluate(async () => {
-    const m: any = await import('/src/lib/livekit.ts');
-    const room = m.getCurrentRoom();
+    // 用页面挂载的实例，避免 HMR 下动态 import 拿到另一个模块实例（currentRoom 为 null）
+    const room = (window as any).__kaedeRoom;
     if (!room) return { has: false, reason: 'no-room' };
     const pubs: any[] = Array.from(room.localParticipant.videoTrackPublications.values());
     const share = pubs.find((p: any) => p.source === 'screen_share');
@@ -120,8 +119,8 @@ export async function localShareInfo(page: Page) {
 
 export async function remoteShareInfo(page: Page, fromIdentity: string) {
   return await page.evaluate(async (id) => {
-    const m: any = await import('/src/lib/livekit.ts');
-    const room = m.getCurrentRoom();
+    // 用页面挂载的实例，避免 HMR 下动态 import 拿到另一个模块实例（currentRoom 为 null）
+    const room = (window as any).__kaedeRoom;
     if (!room) return { has: false, reason: 'no-room' };
     const p = room.remoteParticipants.get(id);
     if (!p) return { has: false, reason: 'participant-not-found', known: Array.from(room.remoteParticipants.keys()) };
@@ -135,8 +134,8 @@ export async function remoteShareInfo(page: Page, fromIdentity: string) {
 // 观测层：真帧数（sender framesEncoded / receiver framesDecoded）
 export async function videoFrameStats(page: Page, identity: string | null) {
   return await page.evaluate(async (id) => {
-    const m: any = await import('/src/lib/livekit.ts');
-    const room = m.getCurrentRoom();
+    // 用页面挂载的实例，避免 HMR 下动态 import 拿到另一个模块实例（currentRoom 为 null）
+    const room = (window as any).__kaedeRoom;
     if (!room) return { ok: false, reason: 'no-room' };
     const pub = id
       ? Array.from(room.remoteParticipants.get(id)?.videoTrackPublications?.values?.() || [])
@@ -466,8 +465,10 @@ export const test = base.extend<Fixtures>({
     await use(ctx);
     await ctx.close();
   },
-  u0: async ({ u0Ctx, u0Name }, use) => { const p = await u0Ctx.newPage(); await login(p, u0Name); await use(p); },
-  u1: async ({ u1Ctx, u1Name }, use) => { const p = await u1Ctx.newPage(); await login(p, u1Name); await use(p); },
+  // teardown 里显式 Leave：避免 abrupt close 触发 LiveKit departure 宽限，
+  // 幽灵 participant/共享面板残留污染下一个用例
+  u0: async ({ u0Ctx, u0Name }, use) => { const p = await u0Ctx.newPage(); await login(p, u0Name); await use(p); try { await p.evaluate(async () => { await (window as any).__kaedeRoom?.disconnect(); }); } catch { /* 页面已关闭则忽略 */ } },
+  u1: async ({ u1Ctx, u1Name }, use) => { const p = await u1Ctx.newPage(); await login(p, u1Name); await use(p); try { await p.evaluate(async () => { await (window as any).__kaedeRoom?.disconnect(); }); } catch { /* 页面已关闭则忽略 */ } },
 });
 
 export { expect };

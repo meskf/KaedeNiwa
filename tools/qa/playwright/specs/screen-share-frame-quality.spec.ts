@@ -143,6 +143,8 @@ test.describe('SCREEN SHARE — 帧率与连续性', () => {
 
     // UI 上的健康度徽标也应可见（观众能直接看到“TCP 回落/丢包”）
     await expect(u1.getByTestId('screen-share-health').first()).toBeVisible();
+    // 现场没法边玩边敲控制台，必须有“一键导出诊断”
+    await expect(u1.getByTestId('screen-share-diag').first()).toBeVisible();
   });
 
   test('静态文档画面不会误触发自动降档', async ({ u0, u1 }) => {
@@ -161,6 +163,35 @@ test.describe('SCREEN SHARE — 帧率与连续性', () => {
       return fn ? fn().autoQualityNote : null;
     });
     expect(state, '静态共享不应触发自动降档').toBeNull();
+  });
+
+  test('诊断快照可事后导出：历史/关键帧/事件结构完整', async ({ u0, u1 }) => {
+    const { id: chId, name } = await getFirstVoiceChannel(u0);
+    await enterVoiceChannel(u0, chId, name);
+    await enterVoiceChannel(u1, chId, name);
+
+    await installSyntheticDisplay(u0, { width: 1280, height: 720, fps: 30, motion: 'high' });
+    await startShare(u0, '720p30');
+    await expect(u1.getByTestId('screenshare-panel')).toBeVisible({ timeout: 30_000 });
+
+    await u0.waitForTimeout(12_000);
+
+    // 现场用户没法边打游戏边在控制台敲命令，所以必须有“事后一键导出”的快照。
+    const sender = await u0.evaluate(() => (window as any).__kaedeDiag?.() ?? null);
+    expect(sender, '共享端诊断快照').not.toBeNull();
+    expect(sender.history.length, '逐秒历史条数').toBeGreaterThanOrEqual(6);
+    expect(sender.presetId).toBe('720p30');
+    expect(sender.codec, '记录实际使用的编码器').toMatch(/h264|vp8/);
+    const lastOut = sender.history[sender.history.length - 1].outbound;
+    expect(lastOut?.keyFrames, '出站关键帧计数').toBeGreaterThan(0);
+
+    const viewer = await u1.evaluate(() => (window as any).__kaedeDiag?.() ?? null);
+    expect(viewer, '观众端诊断快照').not.toBeNull();
+    const lastIn = viewer.history[viewer.history.length - 1].inbound;
+    expect(lastIn?.keyFrames, '入站已解关键帧计数').toBeGreaterThan(0);
+    // 正常连续共享时不应被判成“有码率无画面”
+    expect(lastIn?.stalledSec ?? 0, '稳态不应处于无帧状态').toBe(0);
+    expect(Array.isArray(viewer.events), '事件列表').toBe(true);
   });
 
   test('手机端“横屏放大”会进入全屏', async ({ u0, u1 }) => {

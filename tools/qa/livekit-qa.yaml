@@ -1,0 +1,22 @@
+# QA 专用 LiveKit 配置（替代 --dev 裸跑）。
+# keys 与 --dev 默认值一致（devkey/secret），后端通过 LIVEKIT_API_KEY/SECRET 注入相同值。
+#
+# 关键差异：departure_timeout 从默认 20s 缩到 2s。
+# 测试用例的浏览器是直接关闭的（不发 Leave），默认配置下 LiveKit 会把 participant
+# 连同其 screen_share publication 保留 20s 等待重连 —— 下一个用例进同一房间会看到
+# 上一个用例的"幽灵共享面板"（UNKNOWN · 0fps），导致 panel 计数/归属断言全挂。
+# 2 秒足够覆盖正常重连测试窗口，又能在用例间隔内清掉幽灵。
+port: 7880
+bind_addresses:
+  - 127.0.0.1
+keys:
+  devkey: secret
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+room:
+  empty_timeout: 60
+  departure_timeout: 2
+logging:
+  level: info

@@ -111,7 +111,9 @@ if ($WithLiveKit) {
     } else {
         $lkWin = Join-Path $Root "tools\livekit\livekit-server.exe"; $lkNix = Join-Path $Root "tools\livekit\livekit-server"; $lk = if (Test-Path $lkWin) { $lkWin } else { $lkNix }
         if (-not (Test-Path $lk)) { throw "missing $lk" }
-        $proc = Start-Process -FilePath $lk -ArgumentList '--dev' -WindowStyle Hidden `
+        # 用 QA 配置（keys=devkey/secret，departure_timeout=2s 快速清理幽灵 participant）
+        $lkCfg = Join-Path $QaDir "livekit-qa.yaml"
+        $proc = Start-Process -FilePath $lk -ArgumentList '--config', $lkCfg -WindowStyle Hidden `
             -RedirectStandardOutput "$LogDir\livekit.log" `
             -RedirectStandardError "$LogDir\livekit.err.log" -PassThru
         $livekitPid = $proc.Id
